@@ -5,13 +5,13 @@ def parse_requirements(filename):
         return [line.strip() for line in f if line.strip() and not line.startswith('#')]
 
 setup(
-    name='terrabyte_cube',
-    version='0.1.0',
+    name='stac2ardcube',
+    version='1.0.0',
     packages=find_packages(),
     install_requires=parse_requirements('requirements.txt'),
     include_package_data=True,
-    description='terrabyte data cube spectral stacking',
+    description='stac to Analysis-Ready-Data Cubes w/ terrabyte by DLR&LRZ',
     author='Baturalp Arisoy',
     author_email='baturalp.arisoy@uni-wuerzburg.de',
-    # url='https://github.com/username/packagename',  # Optional
+    url='https://github.com/BaturalpArisoy/stac2ardcube'
 )

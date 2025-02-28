@@ -1,4 +1,4 @@
-from terrabyte_cube import cloud_masking
+from stac2ardcube import cloud_masking
 import json
 import os
 

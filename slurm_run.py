@@ -1,4 +1,4 @@
-from terrabyte_cube import main
+from stac2ardcube import main
 import json
 import os
 
