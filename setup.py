@@ -10,7 +10,7 @@ setup(
     packages=find_packages(),
     install_requires=parse_requirements('requirements.txt'),
     include_package_data=True,
-    description='stac to Analysis-Ready-Data Cubes w/ terrabyte by DLR&LRZ',
+    description='STAC to Analysis-Ready-Data Cubes w/ terrabyte by DLR & LRZ',
     author='Baturalp Arisoy',
     author_email='baturalp.arisoy@uni-wuerzburg.de',
     url='https://github.com/BaturalpArisoy/stac2ardcube'

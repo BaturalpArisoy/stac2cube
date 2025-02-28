@@ -26,9 +26,6 @@ def generate_animation(stac):
     _export_animation()
     
     
-    
-    
-    
 def _export_animation():
     
     home_dir = os.path.expanduser('~')

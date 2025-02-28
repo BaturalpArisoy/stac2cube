@@ -13,11 +13,6 @@ def export_stac(stac, output, crs, transform):
             transform = None  # Avoid passing empty arrays
         else:
             transform = Affine(*transform.ravel()[:6])
-    """
-    # Force overwrite: Remove existing transform before writing a new one
-    if hasattr(stac.rio, "_obj") and "transform" in stac.rio._obj.attrs:
-        del stac.rio._obj.attrs["transform"]
-    """
     
     stac.rio.write_crs(crs, inplace=True)
     stac.rio.write_transform(transform, inplace=True)

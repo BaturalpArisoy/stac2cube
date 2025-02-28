@@ -9,9 +9,6 @@ from .clip import clip_stac
 import xarray as xr
 import rioxarray as rio
 
-# main func can be instance free. find a way to combine with login_node_run
-# or replace with this class!
-
 def get_stac_layers(mission, polygon, resolution = None, daterange = None, bands= None, max_cc= None, clip_raster= None, cloud_masking = None, indices = None , output = None, aggregator= None, topographic_features = None, animation = None):
     
     stac, baselines = get_stac(mission, polygon, resolution, daterange, bands, max_cc, cloud_masking)
@@ -31,7 +28,7 @@ def get_stac_layers(mission, polygon, resolution = None, daterange = None, bands
     stac = stac.where(stac != 0)
     
     # Index calculation
-    # Add line when indices are empty
+    # Add code when only indices are asked without band selection
     if indices is not None:
         stac_indices = calculate_spectral_index(stac, mission, indices)
 
@@ -75,12 +72,8 @@ def get_stac_layers(mission, polygon, resolution = None, daterange = None, bands
     # Clip netcdf as clip raster
     if clip_raster:
         stac = clip_stac(stac, polygon, crs) # delete write_crs in clip_stac
-#    else:
-#        stac.rio.write_crs(crs, inplace=True) #will delete
             
     # Finalizing
-#    stac.attrs['crs'] = crs
-    
     if output is None:
         stac.attrs['crs'] = crs
         stac.attrs['transform'] = transform

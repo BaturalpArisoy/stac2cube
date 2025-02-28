@@ -1,7 +1,6 @@
 import os
 import geopandas as gpd
 import fiona
-#from shapely.geometry import Polygon  # (imported where needed)
 
 def _read_polygon_file(polygon) -> gpd.GeoDataFrame:
     """
