@@ -1,0 +1,3 @@
+critical libmamba Shell not initialized
+/var/slurmd-hpda2/job5218503/slurm_script: line 25: python: command not found
+/var/slurmd-hpda2/job5218503/slurm_script: line 28: conda: command not found

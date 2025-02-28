@@ -1,0 +1,54 @@
+critical libmamba Shell not initialized
+/dss/dsshome1/08/di38red/.local/lib/python3.10/site-packages/pandas/core/arrays/masked.py:60: UserWarning: Pandas requires version '1.3.6' or newer of 'bottleneck' (version '1.3.5' currently installed).
+  from pandas.core import (
+Traceback (most recent call last):
+  File "/dss/dsshome1/08/di38red/terrabyte_cube/slurm/get_stac_layers/slurm_run.py", line 1, in <module>
+    from stac2ardcube import main
+  File "/dss/dsshome1/08/di38red/terrabyte_cube/stac2ardcube/__init__.py", line 2, in <module>
+    from .main import *
+  File "/dss/dsshome1/08/di38red/terrabyte_cube/stac2ardcube/main.py", line 1, in <module>
+    from .get_data import get_stac
+  File "/dss/dsshome1/08/di38red/terrabyte_cube/stac2ardcube/get_data.py", line 6, in <module>
+    from pystac_client import Client as pystacclient
+  File "/dss/dsshome1/08/di38red/.local/lib/python3.10/site-packages/pystac_client/__init__.py", line 11, in <module>
+    from pystac_client._utils import Modifiable
+  File "/dss/dsshome1/08/di38red/.local/lib/python3.10/site-packages/pystac_client/_utils.py", line 4, in <module>
+    import pystac
+  File "/dss/dsshome1/08/di38red/.local/lib/python3.10/site-packages/pystac/__init__.py", line 87, in <module>
+    import pystac.validation
+  File "/dss/dsshome1/08/di38red/.local/lib/python3.10/site-packages/pystac/validation/__init__.py", line 12, in <module>
+    from pystac.validation.stac_validator import GetSchemaError
+  File "/dss/dsshome1/08/di38red/.local/lib/python3.10/site-packages/pystac/validation/stac_validator.py", line 14, in <module>
+    import jsonschema
+  File "/dss/dsshome1/08/di38red/.local/lib/python3.10/site-packages/jsonschema/__init__.py", line 13, in <module>
+    from jsonschema._format import FormatChecker
+  File "/dss/dsshome1/08/di38red/.local/lib/python3.10/site-packages/jsonschema/_format.py", line 11, in <module>
+    from jsonschema.exceptions import FormatError
+  File "/dss/dsshome1/08/di38red/.local/lib/python3.10/site-packages/jsonschema/exceptions.py", line 15, in <module>
+    from referencing.exceptions import Unresolvable as _Unresolvable
+  File "/dss/dsshome1/08/di38red/.local/lib/python3.10/site-packages/referencing/__init__.py", line 5, in <module>
+    from referencing._core import Anchor, Registry, Resource, Specification
+  File "/dss/dsshome1/08/di38red/.local/lib/python3.10/site-packages/referencing/_core.py", line 86, in <module>
+    class Specification(Generic[D]):
+  File "/dss/dsshome1/08/di38red/.local/lib/python3.10/site-packages/referencing/_core.py", line 112, in Specification
+    ] = field(alias="anchors_in")
+TypeError: field() got an unexpected keyword argument 'alias'
+
+CommandNotFoundError: Your shell has not been properly configured to use 'conda deactivate'.
+To initialize your shell, run
+
+    $ conda init <SHELL_NAME>
+
+Currently supported shells are:
+  - bash
+  - fish
+  - tcsh
+  - xonsh
+  - zsh
+  - powershell
+
+See 'conda init --help' for more information and options.
+
+IMPORTANT: You may need to close and restart your shell after running 'conda init'.
+
+

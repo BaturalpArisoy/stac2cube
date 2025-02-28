@@ -13,14 +13,5 @@
 #SBATCH --clusters=hpda2
 #SBATCH --partition=hpda2_compute
 
-module load slurm_setup
-source activate /dss/dsshome1/08/di38red/.conda/envs/stac_env
-
-# Change to the directory where your Python script is located
-# cd ~/slurm/get_stac_layers
-
-# Run your Python script
-python slurm_run.py
-
-# Deactivate the virtual environment after job completion (optional)
-conda deactivate
+module load micromamba
+micromamba run -n stac2ardcube python slurm_run.py
