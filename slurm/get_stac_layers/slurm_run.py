@@ -1,4 +1,4 @@
-from stac2ardcube import cloud_masking
+from stac2ardcube import main
 import json
 import os
 
@@ -13,7 +13,7 @@ def load_config_json(config_file):
 
 if __name__ == "__main__":
     
-    config_file = os.path.expanduser('~/slurm/cloud_masking.json')
+    config_file = os.path.expanduser('get_stac_layers.json')
     config = load_config_json(config_file)
     
-    cloud_masking.get_cloud_layers(**config)
+    main.get_stac_layers(**config)

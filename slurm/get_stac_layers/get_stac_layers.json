@@ -1,0 +1,15 @@
+{
+  "parameters": {
+    "mission": "s2",
+    "polygon": "/dss/dsstbyfs02/pr94no/pr94no-dss-0001/drylands/polygons/naryn_test.gpkg",
+    "daterange": ["2024-04-01", "2024-05-01"],
+    "bands": ["blue", "green", "red", "nir"],
+    "indices": ["ndvi", "ndwi"],
+    "max_cc": 100,
+    "cloud_masking": "False",
+    "output": "/dss/dsstbyfs02/pr94no/pr94no-dss-0001/drylands/results/masking_test_stac.nc",
+    "clip_raster": null,
+    "aggregator": null,
+    "animation": false
+  }
+}

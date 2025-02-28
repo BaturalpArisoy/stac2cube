@@ -1,0 +1,11 @@
+{
+  "parameters": {
+    "polygon": "/dss/dsstbyfs02/pr94no/pr94no-dss-0001/drylands/polygons/naryn_test.gpkg",
+    "daterange": ["2024-04-01", "2024-05-01"],
+    "output": "/dss/dsstbyfs02/pr94no/pr94no-dss-0001/drylands/results/masking_test_cloud3.nc",
+    "cloud_layers": ["cloud_prob", "cloud_mask"],
+    "clip_raster": false,
+    "threshold": 0.7,
+    "masking": null
+  }
+}
