@@ -1,4 +1,4 @@
-from .main import mainfunc
+from .main import get_stac_layers
 from s2cloudless import S2PixelCloudDetector
 import numpy as np
 import xarray as xr
@@ -32,7 +32,7 @@ def get_cloud_layers(polygon, daterange, output, cloud_layers=None, clip_raster=
              'nir08', 'nir09', 'cirrus', 'swir16', 'swir22']
 
     # Retrieve the lazy STAC DataArray.
-    stac = mainfunc(mission=mission, polygon=polygon, daterange=daterange, bands=bands, max_cc=max_cc, clip_raster=clip_raster) #LAZY
+    stac = get_stac_layers(mission=mission, polygon=polygon, daterange=daterange, bands=bands, max_cc=max_cc, clip_raster=clip_raster) #LAZY
     print(stac, flush=True)
     crs = stac.crs
     transform = stac.transform

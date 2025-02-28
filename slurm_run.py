@@ -16,4 +16,4 @@ if __name__ == "__main__":
     config_file = os.path.expanduser('~/slurm/terrabyte_cube.json')
     config = load_config_json(config_file)
     
-    main.mainfunc(**config)
+    main.get_stac_layers(**config)
