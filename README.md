@@ -15,7 +15,7 @@ There are two options for using this repository, depending on your access privil
 You should have access to EORC DSS container. This setup is set as default. 
 
 #### a) Verify Access
-$ dssusrinfo all
+    $ dssusrinfo all
 find if _pr94no-dss-0001_ is listed
 
 #### b) Initiliaze Micromamba
