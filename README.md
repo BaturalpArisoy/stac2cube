@@ -16,29 +16,30 @@ You should have access to EORC DSS container. This setup is set as default.
 
 #### a) Verify Access
     $ dssusrinfo all
-find if _pr94no-dss-0001_ is listed
+find if `pr94no-dss-0001` is listed
 
 #### b) Initiliaze Micromamba
-if EORC DSS listed and micromamba haven't been activated yet,
-micromamba should be initiliazed on the _terrabyte_ login-node:<br>
-    $ module use /dss/dsstbyfs01/pn56su/pn56su-dss-0020/usr/share/modules/files/
-    $ module load micromamba
-    $ micromamba shell init --shell bash --root-prefix=~/micromamba
-    $ source ~/.bashrc
-
+If EORC DSS listed and micromamba haven't been activated yet,
+micromamba should be initiliazed on the _terrabyte_ login-node:
+```sh
+$ module use /dss/dsstbyfs01/pn56su/pn56su-dss-0020/usr/share/modules/files/
+$ module load micromamba
+$ micromamba shell init --shell bash --root-prefix=~/micromamba
+$ source ~/.bashrc
+```
 #### c) Configure Slurm Setup
-Edit <path/to/stac2ardcube>/slurm/get_stac_layers/slurm_setup.cmd<br>
-Comment local package micromamba<br>
-Uncomment shared DSS package micromamba<br>
-Do the same for slurm/get_cloud_layers
+- Edit `<path/to/stac2ardcube>/slurm/get_stac_layers/slurm_setup.cmd`
+- Comment (disable) local package micromamba `micromamba run -n stac2ardcube python slurm_run.py`
+- Uncomment (enable) shared DSS package micromamba `micromamba run -p /dss/dsstbyfs02/pr94no/pr94no-dss-0001/drylands/envs/stac2ardcube python slurm_run.py`
+- Do the same for `slurm/get_cloud_layers`
 
 #### d) Update Job Configuration and Submit
-Edit slurm/get_stac_layers.json<br>
-Edit variables for data collection (examples.txt will be updated with further explanations!) and save<br>
-On MobaXTerm, middle click _submit.sh_ and enter<br>
-If laptop pad, right click, copy file path to terminal and enter<br><br>
+- Edit `slurm/get_stac_layers.json`
+- Edit variables for data collection (`examples.txt` will be updated with further explanations!) and save
+- On MobaXTerm, middle click `submit.sh` and enter
+- If laptop pad, right click, copy file path to terminal and enter<br>
 
-Congrulations, your job is submitted to HPC! You can check any error or the progress of xarray computing on slurm/log/ .err & .out<br>
+Congratulations, your job is submitted to HPC! You can check any error or the progress of xarray computing on `slurm/log/ .err & .out`<br>
 Dont forget to sort by time for the latest log files!
 
 
@@ -54,29 +55,36 @@ Dont forget to sort by time for the latest log files!
 
 #### b) Install stac2ardcube via PIP
 Ensure you are in the directory containing setup.py and stac2ardcube env is activated, then choose your installation mode:
+
     $ micromamba install pip
-You should be on the folder where setup.py is located.
+You should be on the folder where `setup.py` is located.
+
     $ cd <path_to_stac2ardcube_parent_folder>
 
 Stable mode:<br>
-pip install .<br>
+
+    $ pip install .
+
 Editable mode (for development):<br>
-pip install -e .
+
+    $ pip install -e .
+
 
 #### c) Configure Slurm Setup
-Edit <path/to/stac2ardcube>/slurm/get_stac_layers/slurm_setup.cmd<br>
-Comment shared DSS package micromamba<br>
-Uncomment local package micromamba<br>
-Do the same for slurm/get_cloud_layers
+- Edit `<path/to/stac2ardcube>/slurm/get_stac_layers/slurm_setup.cmd`
+- Comment (disable) shared DSS package micromamba `micromamba run -p /dss/dsstbyfs02/pr94no/pr94no-dss-0001/drylands/envs/stac2ardcube python slurm_run.py`
+- Uncomment (enable) local package micromamba `micromamba run -n stac2ardcube python slurm_run.py`
+- Do the same for `slurm/get_cloud_layers`
 
 #### d) Update Job Configuration and Submit
-Edit slurm/get_stac_layers.json<br>
-Edit variables for data collection (examples.txt will be updated with further explanations!) and save<br>
-On MobaXTerm, middle click _submit.sh_ and enter<br>
-If laptop pad, right click, copy file path to terminal and enter<br><br>
+- Edit `slurm/get_stac_layers.json`
+- Edit variables for data collection (`examples.txt` will be updated with further explanations!) and save
+- On MobaXTerm, middle click `submit.sh` and enter
+- If laptop pad, right click, copy file path to terminal and enter<br><br>
 
-Congrulations, your job is submitted to HPC! You can check any error or the progress of xarray computing on slurm/log/ .err & .out<br>
+Congratulations, your job is submitted to HPC! You can check any error or the progress of xarray computing on slurm/log/ .err & .out<br>
 Dont forget to sort by time for the latest log files!<br>
+
 ---
 <br><br>
 
