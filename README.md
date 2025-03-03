@@ -20,7 +20,7 @@ find if _pr94no-dss-0001_ is listed
 
 #### b) Initiliaze Micromamba
 if EORC DSS listed and micromamba haven't been activated yet,
-micromamba should be initiliazed on the _terrabyte_ login-node:
+micromamba should be initiliazed on the _terrabyte_ login-node:<br>
     $ module use /dss/dsstbyfs01/pn56su/pn56su-dss-0020/usr/share/modules/files/
     $ module load micromamba
     $ micromamba shell init --shell bash --root-prefix=~/micromamba
