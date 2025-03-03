@@ -5,7 +5,7 @@
     "polygon": "~/terrabyte_cube/interactive/polygons/test.gpkg",
     "daterange": ["2021-01-01", "2022-01-01"],
     "bands": ["coastal", "blue", "green", "red", "rededge1", "rededge2", "rededge3", "nir", "nir08", "nir09", "swir16", "swir22"],
-    "max_cc": 10,
+    "max_cc": null,
     "cloud_masking": "False",
     "indices": ["ndvi", "ndwi", "savi"],
     "output": "~/terrabyte_cube/interactive/results/test.nc",

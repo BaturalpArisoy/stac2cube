@@ -1,0 +1,17 @@
+/usr/bin/xdg-open: line 871: x-www-browser: command not found
+/usr/bin/xdg-open: line 871: firefox: command not found
+/usr/bin/xdg-open: line 871: iceweasel: command not found
+/usr/bin/xdg-open: line 871: seamonkey: command not found
+/usr/bin/xdg-open: line 871: mozilla: command not found
+/usr/bin/xdg-open: line 871: epiphany: command not found
+/usr/bin/xdg-open: line 871: konqueror: command not found
+/usr/bin/xdg-open: line 871: chromium: command not found
+/usr/bin/xdg-open: line 871: chromium-browser: command not found
+/usr/bin/xdg-open: line 871: google-chrome: command not found
+/usr/bin/xdg-open: line 871: www-browser: command not found
+/usr/bin/xdg-open: line 871: links2: command not found
+/usr/bin/xdg-open: line 871: elinks: command not found
+/usr/bin/xdg-open: line 871: links: command not found
+/usr/bin/xdg-open: line 871: lynx: command not found
+/usr/bin/xdg-open: line 871: w3m: command not found
+xdg-open: no method available for opening 'https://www.whiteboxgeo.com/'
