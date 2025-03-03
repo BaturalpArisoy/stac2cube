@@ -2,7 +2,7 @@
 Transform STAC catalogs into Analysis-Ready Data Cubes (ARDCube) for Earth Observation (EO) applications
 
 ## Overview
-**stac2ardcube** converts STAC catalogs into analysis-ready data cubes for efficient Earth Observation (EO) processing. This tool is designed to work on HPC systems and is optimized for users working on _terrabyte_. We recommend using *MobaXTerm* for accessing the _terrabyte_ login node and editing files.
+**stac2ardcube** converts STAC catalogs into Analysis-Ready Data Cubes for efficient Earth Observation (EO) processing. This tool is designed to work on HPC systems and is optimized for users working on _terrabyte_. We recommend using *MobaXTerm* for accessing the _terrabyte_ login node and editing files.
 
 
 ## Installation:
@@ -77,7 +77,7 @@ If laptop pad, right click, copy file path to terminal and enter<br><br>
 
 Congrulations, your job is submitted to HPC! You can check any error or the progress of xarray computing on slurm/log/ .err & .out<br>
 Dont forget to sort by time for the latest log files!<br>
-
+---
 <br><br>
 
 
