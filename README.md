@@ -11,14 +11,14 @@ There are two options for using this repository, depending on your access privil
 
 ---
 
-1. Members of EORC Uni Wuerzburg
+### 1. Members of EORC Uni Wuerzburg
 You should have access to EORC DSS container. This setup is set as default. 
 
-a) Verify Access
+#### a) Verify Access
 $ dssusrinfo all
 find if _pr94no-dss-0001_ is listed
 
-b) Initiliaze Micromamba
+#### b) Initiliaze Micromamba
 if EORC DSS listed and micromamba haven't been activated yet,
 micromamba should be initiliazed on the _terrabyte_ login-node:
 $ module use /dss/dsstbyfs01/pn56su/pn56su-dss-0020/usr/share/modules/files/
