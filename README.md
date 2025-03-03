@@ -16,11 +16,11 @@ You should have access to EORC DSS container. This setup is set as default.
 
 #### a) Verify Access
     $ dssusrinfo all
-find if `pr94no-dss-0001` is listed
+`pr94no-dss-0001` should be in the list.
 
-#### b) Initiliaze Micromamba
-If EORC DSS listed and micromamba haven't been activated yet,
-micromamba should be initiliazed on the _terrabyte_ login-node:
+#### b) Initialize Micromamba
+If EORC DSS listed and micromamba hasn't been activated yet,
+micromamba should be initialized on the _terrabyte_ login-node:
 ```sh
 $ module use /dss/dsstbyfs01/pn56su/pn56su-dss-0020/usr/share/modules/files/
 $ module load micromamba
@@ -82,7 +82,7 @@ Editable mode (for development):<br>
 - On MobaXTerm, middle click `submit.sh` and enter
 - If laptop pad, right click, copy file path to terminal and enter<br><br>
 
-Congratulations, your job is submitted to HPC! You can check any error or the progress of xarray computing on slurm/log/ .err & .out<br>
+Congratulations, your job is submitted to HPC! You can check any error or the progress of xarray computing on `slurm/log/ .err & .out`<br>
 Dont forget to sort by time for the latest log files!<br>
 
 ---
