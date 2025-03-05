@@ -91,6 +91,7 @@ Dont forget to sort by time for the latest log files!<br>
 <br><br>
 
 ## How to cite:
+paper to be published <3
 
 <br><br>
 Contact: https://www.geographie.uni-wuerzburg.de/en/earthobservation/staff/baturalp-arisoy/#c1122000
