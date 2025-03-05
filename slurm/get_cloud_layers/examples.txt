@@ -1,58 +1,82 @@
-# Sentinel 2 - Sample
+# Function get_stac_layers
+get_cloud_layers(polygon, daterange, output, cloud_layers=None, clip_raster=None, threshold= None, masking= None)
+
+- This function is designed to collect layers for cloud masking for Sentinel 2 mission. Does not work for Landsat.
+- Applies s2cloudless algorithm on STAC xarrays.
+- In case the user wants to mask L2A data, please select same daterange of the collected stac layer. 
+Make sure that the stac layers were collected without max_cc constraints.
+
+---
+
+# Parameters:
+
+'polygon' -> Path or vector file: Input polygon, defining the area to be data collected. Cant be None.
+- The input should be on geographic coordinates (WGS84). The new code will implemented to accept projected polygons.
+- The return is by default the boundingbox of the polygon. For a result of the exact shape of polygon, refer to 'clip_raster'.
+- Available vector formats: '.kml', '.kmz', '.gpkg', '.geojson', '.gml', '.shp'.
+- For better results, please avoid any shapefile format.
+
+'daterange' -> List: The beginning and the end date of the data search. Can be None.
+- The date format should be "yyyy-mm-dd".
+- Select the exact same daterange of S2 L2A data if the user already executed 'get_stac_layers'.
+- If None, then the function will get every datetime available in the STAC catalog grouped by solar_day (single scene per date).
+
+'clip_raster' -> Boolean: True or False for clipping the raster by the input polygon. Can be None.
+- Since the default stac is the bbox of the polygon, the user might want to activate 'clip_raster'.
+- Based on the proportion of the polygon to its bbox, the processing time can be significantly reduced. (No data computing for Nan)
+- The data size will be the exactly same for both bbox and clipped raster results because Nan values are also allocated in the memory as Float32.
+- NaN values cannot be completely removed because xarrays are working in the gridded system.
+However they won't be part of any calculation, including s2cloudless algorithm.
+- if None, then 'clipping_raster' is False and the function returns bbox area.
+
+'output' -> Path: Path to export cloud layers as NETCDF. Can be None.
+- The output format must be NETCDF but NOT Geotiff since Geotiffs cannot handle 4 dimensional EO data.
+If the user does not know how to work around NETCDF files with xarray, please refer to exercies in 'interactive' folder. It's super simple :)
+- Output Path is HIGHLY recommended to be set at DSS because stac layers can easily reach 100 Gb which is serious issue if the user is working on the personal container.
+Check 'Data Storage' and 'Data Transfer' here: https://docs.terrabyte.lrz.de/services/overview/
+- If None, then the function will return lazy array. Meaning that the result is not computed, meaning no file to export.
+However, the result will be returned super fast. In log file, the user can see the lazy array, with the information of estimated file size, array dimension including the available date times.
+It's a good option if the user simply wants to investigate the result fastly instead of waiting long time to export the result and investigate.
+Also if the user is calling the function in a ipynb file, the function can set equal to "data_array", if necessary "data_array.to_compute()".
+Further information and examples are available in 'interactive' folder.
+
+'cloud_layers' -> List: Layers for cloud masking. Can be None.
+- Available cloud layers: 'cloud_prob', 'cloud_mask'
+- Cloud probability is layer of probability ranging between 0-1, 0 indicating 0% and 1 indicating 100%.
+- Cloud mask layer is dependent on 'threshold' parameter.
+- Cloud mask is calculated over cloud probability. Therefore cloud_mask cannot be selected alone but vice-versa does work.
+- If None, then the function selects both cloud layers by default.
+
+'threshold' -> Float: Threshold to assign probability pixels to cloud or no-cloud binary values.
+- Threshold has to be set between 0 and 1 instead of 0 and 100.
+In future versions, the probability layer will be stored as unit8, values ranging between 0 and 100. 
+- 1 represents clouds in cloud_mask layer, 0 represents no-cloud.
+- In future versions, this parameter will be removed. Instead:
+cloud_layers= ["cloud_prob", "cloud_mask_70"] where "cloud_mask_70" will automatically select 0.7 threshold value.
+Therefore selection of multiple cloud maskings will be possible: e.g. cloud_layers= ["cloud_prob", "cloud_mask_70", "cloud_mask_80", "cloud_mask_90"]
+
+'masking' -> Path to NETCDF or DataArray or Dataset: The S2 L2A STAC to be masked. Can be None
+- The function accepts the path to NETCDF, or dataset= xr.read(netcdf) or the datarray extracted from the dataset.
+# Under development
+- The S2 L2A STAC and cloud layers must have the same time dimension. This will be corrected in the future versions.
+- Returns the masked S2 L2A NETCDF file with a suffix '_masked', in the same Path.
+This NETCDF export is different than cloud layers. Therefore, independent from 'output'.
+- Even if masking for some reason fails to be executed, cloud layers NETCDF will be already exported.
+In this case, do not run SLURM batch once again, instead use stac2ardcube.cloud_masking.mask_stac_clouds() function in the notebook. (example ipynb in 'interactive' folder)
+- If None, then no masking of S2 L2A, therefore only exporting cloud layers but not exporting masked S2 L2A.
+
+---
+
+# EXAMPLE
+
 {
   "parameters": {
-    "mission": "s2",
-    "polygon": "~/terrabyte_cube/interactive/polygons/test.gpkg",
-    "daterange": ["2021-01-01", "2022-01-01"],
-    "bands": ["coastal", "blue", "green", "red", "rededge1", "rededge2", "rededge3", "nir", "nir08", "nir09", "swir16", "swir22"],
-    "max_cc": 10,
-    "cloud_masking": "False",
-    "indices": ["ndvi", "ndwi", "savi"],
-    "output": "~/terrabyte_cube/interactive/results/test.nc",
-    "aggregator": null,
-    "animation": false
-  }
-}
-
-
-# Landsat OLI/TIRS - Sample
-{
-  "parameters": {
-    "mission": "l_oli",
-    "polygon": "~/terrabyte_cube/interactive/polygons/test.gpkg",
-    "daterange": ["2021-01-01", "2022-01-01"],
-    "bands": ["coastal", "blue", "green", "red", "nir", "swir1", "swir2", "thermal"],
-    "max_cc": 10,
-    "cloud_masking": "False",
-    "indices": ["ndvi", "ndwi", "savi"],
-    "output": "~/terrabyte_cube/interactive/results/test.nc",
-    "aggregator": null,
-    "animation": false
-  }
-}
-
-
-# Sentinel 1 - Sample
-{
-  "parameters": {
-    "mission": "s1",
-    "polygon": "~/terrabyte_cube/interactive/polygons/test.gpkg",
-    "daterange": ["2021-01-01", "2022-01-01"],
-    "bands": ["vh", "vv"],
-    "indices": ["vh/vv", "vv/vh", "rvi"],
-    "output": "~/terrabyte_cube/interactive/results/test.nc",
-    "aggregator": null,
-    "animation": false
-  }
-}
-
-
-# COP 30-GLO - Sample
-{
-  "parameters": {
-    "mission": "cop_dem",
-    "polygon": "~/terrabyte_cube/interactive/polygons/test.gpkg",
-    "output": "~/terrabyte_cube/interactive/results/test.nc",
-    "topographic_features": ["slope", "aspect", "d_inf_flow_accumulation", "twi"]
+    "polygon": "/dss/dsstbyfs02/pr94no/pr94no-dss-0001/drylands/polygons/naryn_test.gpkg",
+    "daterange": ["2024-04-01", "2024-05-01"],
+    "output": "/dss/dsstbyfs02/pr94no/pr94no-dss-0001/drylands/results/test_cloud.nc",
+    "cloud_layers": ["cloud_prob", "cloud_mask"],
+    "clip_raster": false,
+    "threshold": 0.7,
+    "masking": "/dss/dsstbyfs02/pr94no/pr94no-dss-0001/drylands/results/test_L2A.nc"
   }
 }
