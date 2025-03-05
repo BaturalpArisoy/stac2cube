@@ -3,7 +3,7 @@
 #SBATCH --output=../log/stac_xarray_output.%j.out
 #SBATCH --error=../log/stac_xarray_error.%j.err
 #SBATCH --mail-type=END
-#SBATCH --mail-user=baturalp.arisoy@uni-wuerzburg.de
+##SBATCH --mail-user=<e-mail>
 #SBATCH --account=pr94no-c
 #SBATCH --nodes=1
 #SBATCH --ntasks=1

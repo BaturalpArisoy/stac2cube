@@ -1,3 +1,0 @@
-/var/slurmd-hpda2/job5218490/slurm_script: line 19: activate: No such file or directory
-/var/slurmd-hpda2/job5218490/slurm_script: line 25: python: command not found
-/var/slurmd-hpda2/job5218490/slurm_script: line 28: conda: command not found

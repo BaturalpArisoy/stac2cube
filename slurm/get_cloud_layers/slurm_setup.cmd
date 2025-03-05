@@ -3,7 +3,7 @@
 #SBATCH --output=../log/cloud_masking_output.%j.out
 #SBATCH --error=../log/cloud_masking_output.%j.err
 #SBATCH --mail-type=END
-#SBATCH --mail-user=baturalp.arisoy@uni-wuerzburg.de
+##SBATCH --mail-user=<e-mail>
 #SBATCH --account=pr94no-c
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
