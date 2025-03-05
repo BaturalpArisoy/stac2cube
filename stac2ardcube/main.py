@@ -9,7 +9,20 @@ from .clip import clip_stac
 import xarray as xr
 import rioxarray as rio
 
-def get_stac_layers(mission, polygon, resolution = None, daterange = None, bands= None, max_cc= None, clip_raster= None, cloud_masking = None, indices = None , output = None, aggregator= None, topographic_features = None, animation = None):
+def get_stac_layers(
+    mission,
+    polygon,
+    resolution = None,
+    daterange = None,
+    bands= None,
+    max_cc= None,
+    clip_raster= None,
+    cloud_masking = None,
+    indices = None ,
+    output = None,
+    aggregator= None,
+    topographic_features = None,
+    animation = None):
     
     stac, baselines = get_stac(mission, polygon, resolution, daterange, bands, max_cc, cloud_masking)
     crs = stac.spatial_ref.crs_wkt

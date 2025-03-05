@@ -13,8 +13,14 @@ from rasterio.errors import NotGeoreferencedWarning
 warnings.filterwarnings("ignore", category=NotGeoreferencedWarning)
 
 
-def get_cloud_layers(polygon, daterange, output, cloud_layers=None, clip_raster=None,
-                             threshold= None, masking= None):
+def get_cloud_layers(
+    polygon,
+    daterange,
+    output,
+    cloud_layers=None,
+    clip_raster=None,
+    threshold= None,
+    masking= None):
     
     # Default to both layers if not provided.
     if cloud_layers is None:
