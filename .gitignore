@@ -4,7 +4,6 @@
 # Slurm files
 *.err
 *.out
-*.cmd
 
 ### Python ###
 # Byte-compiled / optimized / DLL files
