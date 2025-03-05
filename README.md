@@ -12,7 +12,7 @@ There are two options for using this repository, depending on your access privil
 ---
 
 ### 1. Members of EORC Uni Wuerzburg
-You should have access to EORC DSS container. This setup is set as default. 
+You should have access to EORC DSS container.
 
 #### a) Verify Access
     $ dssusrinfo all
@@ -27,7 +27,7 @@ $ module load micromamba
 $ micromamba shell init --shell bash --root-prefix=~/micromamba
 $ source ~/.bashrc
 ```
-#### c) Configure Slurm Setup
+#### c) Optional: Configure Slurm Setup (Default configuration)
 - Edit `<path/to/stac2ardcube>/slurm/get_stac_layers/slurm_setup.cmd`
 - Comment (disable) local package micromamba `micromamba run -n stac2ardcube python slurm_run.py`
 - Uncomment (enable) shared DSS package micromamba `micromamba run -p /dss/dsstbyfs02/pr94no/pr94no-dss-0001/drylands/envs/stac2ardcube python slurm_run.py`
@@ -90,7 +90,7 @@ Dont forget to sort by time for the latest log files!<br>
 ---
 <br><br>
 
-# How to cite:
+## How to cite:
 
 <br><br>
 Contact: https://www.geographie.uni-wuerzburg.de/en/earthobservation/staff/baturalp-arisoy/#c1122000
