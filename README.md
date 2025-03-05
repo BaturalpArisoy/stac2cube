@@ -35,7 +35,7 @@ $ source ~/.bashrc
 
 #### d) Update Job Configuration and Submit
 - Edit `slurm/get_stac_layers.json`
-- Edit variables for data collection (`examples.txt` will be updated with further explanations!) and save
+- Edit variables for data collection (take a look at `examples.txt`) and save
 - On MobaXTerm, middle click `submit.sh` and enter
 - If laptop pad, right click, copy file path to terminal and enter<br>
 
@@ -82,7 +82,9 @@ Editable mode (for development):<br>
 - On MobaXTerm, middle click `submit.sh` and enter
 - If laptop pad, right click, copy file path to terminal and enter<br><br>
 
+
 Congratulations, your job is submitted to HPC! You can check any error or the progress of xarray computing on `slurm/log/ .err & .out`<br>
+Note: The first time a Slurm job is created, you will receive a warning message about WhiteToolBox on both log files. This is normal and only occurs the first time.<br>
 Dont forget to sort by time for the latest log files!<br>
 
 ---

@@ -1,53 +1,183 @@
-# Sentinel 2 - Sample
+# Function get_stac_layers
+get_stac_layers(mission, polygon, resolution = None, daterange = None, bands= None, max_cc= None, clip_raster= None, cloud_masking = None, indices = None , output = None, aggregator= None, topographic_features = None, animation = None)
+
+---
+
+# Parameters:
+
+'mission' -> Str: STAC collections. Cant be None.
+- Available missions: 's2', 's2_l1c', 's1', 'l_oli', 'cop_dem'.
+- Just 's2' means 's2_l2a'. 'cop_dem' is 'Copernicus GLO-30'.
+
+'polygon' -> Path or vector file: Input polygon, defining the area to be data collected. Cant be None.
+- The input should be on geographic coordinates (WGS84). The new code will implemented to accept projected polygons.
+- The return is by default the boundingbox of the polygon. For a result of the exact shape of polygon, refer to 'clip_raster'.
+- Available vector formats: '.kml', '.kmz', '.gpkg', '.geojson', '.gml', '.shp'.
+- For better results, please avoid any shapefile format.
+
+'resolution' -> Int: The spatial resolution of stac layers. Can be None.
+- An xarray stores all the spectral bands on the same gridded system, meaning all the bands should have the same spatial resolution.
+Therefore, if resolution=10, all the spectral bands including the lower resolutions ones like rededges will be resampled to 10 meter.
+The default resampling method is bilinear (the most optimal for s2cloudless algorithm). The method can be changed in the source code (get_data.py)
+- If None, then the code will automatically select the highest resolution of the relevant mission.
+
+'daterange' -> List: The beginning and the end date of the data search. Can be None.
+- The date format should be "yyyy-mm-dd".
+- If None, then the function will get everything available in the STAC catalog.
+This is a good option, when the user wants to get the information of the available dates and the size of the file, IF the 'ouput' is None (refer to 'output').
+
+'bands' -> List: The list of spectral and radar bands. Can be None.
+- The full available band list per each mission is listed in below examples.
+- The band names should match the available bands of the relevant mission otherwise, the function will return error.
+- Must be None for 'cop_dem'.
+- If None for other than 'cop_dem', then the function will collect all available assets (not only bands but also quality layers, etc).
+Therefore, it's highly recommended to not leave this parameter empty but select the bands.
+
+'max_cc' -> Int: Max cloud coverage to query the stac search. Can be None.
+- If the user collect s2 data, then it's recommended to ignore this parameter, since 'get_cloud_layers' function provides s2cloudless cloud masking.
+- If None, then the search will be executed without any cloud constraint, meaning 'max_cc' is 100 percentage.
+
+'clip_raster' -> Boolean: True or False for clipping the raster by the input polygon. Can be None.
+- Since the default stac is the bbox of the polygon, the user might want to activate 'clip_raster'.
+- Based on the proportion of the polygon to its bbox, the processing time can be significantly reduced. (No data computing for Nan)
+- The data size will be the exactly same for both bbox and clipped raster results because Nan values are also allocated in the memory as Float32.
+- NaN values cannot be completely removed because xarrays are working in the gridded system.
+However they won't be part of any calculation, including s2cloudless algorithm.
+- if None, then 'clipping_raster' is False and the function returns bbox area.
+
+# Under development, please do not use!
+# NOT related to s2cloudless algorithm activated by 'get_cloud_layers' function!
+'cloud_masking' -> Boolean: True or False for activating native cloud masking of the relevant mission. Can be None.
+- For Sentinel 2, the native cloud masking: 'Scene Classification Layer (SCL)' (highly discouraged since s2cloudless provides much better results, however significantly faster processing speed than s2cloudless)
+- For Landsat, the native cloud masking: 'Quality Assessment (QA)'
+- If None, then 'cloud_masking' is False.
+
+'indices' -> List: List of spectral and radar indices for the relevant mission. Can be None.
+- The full available list of indices per each mission is listed in below examples.
+- The index calculation can be only done only if the relevant bands of the index are selected in 'bands' parameter, otherwise the function will return error.
+e.g. NDVI cannot be calculated if red and nir are not selected.
+Returning only index without selecting bands will be implemented in the future!
+- If None, then 'indices' won't be calculated.
+- Activating indices won't significantly increase the processing speed since index values are not 'computed' but 'calculated'. Xarray computing is the heaviest processing step of the code.
+Thefore selecting 6 bands takes much longer to process comparing to selecting 4 bands and 2 spectral indices, even thought both results will be 'band=6'. 
+
+'output' -> Path: Path to export stac as NETCDF. Can be None.
+- The output format must be NETCDF but NOT Geotiff since Geotiffs cannot handle 4 dimensional EO data.
+If the user does not know how to work around NETCDF files with xarray, please refer to exercies in 'interactive' folder. It's super simple :)
+- Output Path is HIGHLY recommended to be set at DSS because stac layers can easily reach 100 Gb which is serious issue if the user is working on the personal container.
+Check 'Data Storage' and 'Data Transfer' here: https://docs.terrabyte.lrz.de/services/overview/
+- If None, then the function will return lazy array. Meaning that the result is not computed, meaning no file to export.
+However, the result will be returned super fast. In log file, the user can see the lazy array, with the information of estimated file size, array dimension including the available date times.
+It's a good option if the user simply wants to investigate the result fastly instead of waiting long time to export the result and investigate.
+Also if the user is calling the function in a ipynb file, the function can set equal to "data_array", if necessary "data_array.to_compute()".
+Further information and examples are available in 'interactive' folder.
+
+'aggregator' -> Str: Data aggregation method (a stat) to return single multi spectral image.
+- Available aggregators: 'mean', 'median'
+- Sometimes the user simply wants to return mean RGB image of a given daterange. In that case, 'aggregator' should be activated.
+- Any available band and index can be selected.
+- Since mean and median calculations are done without array computation of every scenes within the daterange, the processing speed will be significantly faster if 'aggregator' is activated.
+Meaning the user can select much larger areas without worrying too much about processing. Still, be careful of selecting too large area! Array computation struggles with too large areas more than high availabilities of times and bands.
+- Idea of exporting mean, median, std, max and min alongside the raw data will be implemented in the future.
+- If None, then no aggregation.
+
+'topographic_features' -> List: Topographic features only for 'cop_dem' mission. CAN be None for 'cop_dem', MUST be None for the others.
+- Available features: 'slope', 'aspect', 'd_inf_flow_accumulation', 'twi'
+- TWI is based on 'slope' and 'd_inf_flow_accumulation' therefore, all of them must be selected for TWI.
+- If None, then none of the features are calculated for 'cop_dem'.
+
+# Under development
+'animation' -> Boolean: True or False for exporting RGB time series animation, displaying every collected date time.
+- Exporting gif animation requires exporting every scene as PNG. This process is taking long time.
+Therefore, it's recommended to not activate this function is long daterange is selected.
+- If None, then no animation
+
+---
+
+# EXAMPLES
+
+# Sentinel 2
+
+## Sentinel-2 L2A - Sample
+
 {
   "parameters": {
     "mission": "s2",
-    "polygon": "~/terrabyte_cube/interactive/polygons/test.gpkg",
-    "daterange": ["2021-01-01", "2022-01-01"],
+    "polygon": "/dss/dsstbyfs02/pr94no/pr94no-dss-0001/drylands/polygons/test.gpkg",
+    "resolution": 10,
+    "daterange": ["2024-04-01", "2024-05-01"],
     "bands": ["coastal", "blue", "green", "red", "rededge1", "rededge2", "rededge3", "nir", "nir08", "nir09", "swir16", "swir22"],
-    "max_cc": null,
-    "cloud_masking": "False",
     "indices": ["ndvi", "ndwi", "savi"],
-    "output": "~/terrabyte_cube/interactive/results/test.nc",
+    "max_cc": 100,
+    "cloud_masking": "False",
+    "output": "/dss/dsstbyfs02/pr94no/pr94no-dss-0001/drylands/results/test.nc",
+    "clip_raster": null,
     "aggregator": null,
-    "animation": false
+    "animation": null
+  }
+}
+
+## Sentinel-2 L1C - Sample
+
+{
+  "parameters": {
+    "mission": "s2_l1c",
+    "polygon": "/dss/dsstbyfs02/pr94no/pr94no-dss-0001/drylands/polygons/test.gpkg",
+    "resolution": 100,
+    "daterange": ["2024-04-01", "2024-05-01"],
+    "bands": ["coastal", "blue", "green", "red", "rededge1", "rededge2", "rededge3", "nir", "nir08", "nir09", "cirrus", "swir16", "swir22"],
+    "indices": ["ndvi", "ndwi", "savi"],
+    "max_cc": 20,
+    "cloud_masking": "False",
+    "output": "/dss/dsstbyfs02/pr94no/pr94no-dss-0001/drylands/results/test.nc",
+    "clip_raster": "True",
+    "aggregator": "mean",
+    "animation": null
   }
 }
 
 
-# Landsat OLI/TIRS - Sample
+# Landsat
+
+## Landsat OLI/TIRS - Sample
 {
   "parameters": {
     "mission": "l_oli",
-    "polygon": "~/terrabyte_cube/interactive/polygons/test.gpkg",
+    "polygon": "/dss/dsstbyfs02/pr94no/pr94no-dss-0001/drylands/polygons/test.gpkg",
+    "resolution": 30,
     "daterange": ["2021-01-01", "2022-01-01"],
     "bands": ["coastal", "blue", "green", "red", "nir", "swir1", "swir2", "thermal"],
     "max_cc": 10,
     "cloud_masking": "False",
     "indices": ["ndvi", "ndwi", "savi"],
-    "output": "~/terrabyte_cube/interactive/results/test.nc",
-    "aggregator": null,
-    "animation": false
+    "output": "/dss/dsstbyfs02/pr94no/pr94no-dss-0001/drylands/results/test.nc",
+    "clip_raster": null,
+    "aggregator": "median",
+    "animation": null
   }
 }
 
 
-# Sentinel 1 - Sample
+# Sentinel 1
+
+## Sentinel 1 - Sample
 {
   "parameters": {
     "mission": "s1",
-    "polygon": "~/terrabyte_cube/interactive/polygons/test.gpkg",
+    "polygon": "/dss/dsstbyfs02/pr94no/pr94no-dss-0001/drylands/polygons/test.gpkg",
     "daterange": ["2021-01-01", "2022-01-01"],
     "bands": ["vh", "vv"],
     "indices": ["vh/vv", "vv/vh", "rvi"],
-    "output": "~/terrabyte_cube/interactive/results/test.nc",
+    "output": "/dss/dsstbyfs02/pr94no/pr94no-dss-0001/drylands/results/test.nc",
     "aggregator": null,
     "animation": false
   }
 }
 
 
-# COP 30-GLO - Sample
+# COP 30-GLO
+
+## COP 30-GLO - Sample
 {
   "parameters": {
     "mission": "cop_dem",
