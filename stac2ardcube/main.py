@@ -77,6 +77,7 @@ def get_stac_layers(mission, polygon, resolution = None, daterange = None, bands
     if output is None:
         stac.attrs['crs'] = crs
         stac.attrs['transform'] = transform
+        print(stac)
         return stac # returns lazy
     else:
         print(stac)
