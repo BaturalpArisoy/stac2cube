@@ -87,6 +87,8 @@ def get_stac_layers(
         stac = clip_stac(stac, polygon, crs) # delete write_crs in clip_stac
             
     # Finalizing
+    stac['time'] = stac['time'].dt.strftime('%Y-%m-%d')
+
     if output is None:
         stac.attrs['crs'] = crs
         stac.attrs['transform'] = transform
