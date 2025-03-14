@@ -94,6 +94,8 @@ def get_stac_layers(
     if output is None:
         stac.attrs['crs'] = crs
         stac.attrs['transform'] = transform
+        stac.rio.write_crs(crs, inplace=True)
+        stac.rio.write_transform(transform, inplace=True)
         print(stac)
         return stac # returns lazy
     else:

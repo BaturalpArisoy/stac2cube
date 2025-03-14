@@ -30,7 +30,10 @@ def get_stac(mission: str, polygon, resolution, daterange: list, bands: list, ma
         }
         resolution = resolutions[mission]
     
-    bbox = polygon_2_bbox(polygon)
+    if isinstance(polygon, list):
+        bbox = polygon
+    else:
+        bbox = polygon_2_bbox(polygon)
 
     url, collection = catalogues[mission]
 

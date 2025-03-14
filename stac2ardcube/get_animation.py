@@ -9,8 +9,6 @@ import glob
 from matplotlib.ticker import ScalarFormatter
 from PIL import Image
 
-
-
 def generate_animation(stac, export_folder, animation):
     if animation == 'rgb':
         image_stac = stac.sel(band=["red", "green", "blue"])
@@ -21,7 +19,7 @@ def generate_animation(stac, export_folder, animation):
 
     _export_figures(image_stac, export_folder, animation)
     _export_animation(export_folder, animation)
-    
+
     
 def _export_animation(export_folder, animation):
     output_dir = os.path.join(export_folder, 'figures')
@@ -50,7 +48,7 @@ def _export_animation(export_folder, animation):
     animation_fig = manimation.FuncAnimation(fig, update, frames=len(image_array), interval=1000, blit=True, repeat_delay=2000)
     animation_fig.save(gif_output_path, writer='imagemagick', fps=60, dpi=300)
     
-    
+
 def _export_figures(stac, export_folder, animation):
     output_dir = os.path.join(export_folder, 'figures')
     if not os.path.exists(output_dir):
@@ -65,15 +63,10 @@ def _export_figures(stac, export_folder, animation):
         
         if animation == 'rgb':
             rgb_values = stac.isel(time=i).transpose('y', 'x', 'band').values
-            rgb_n = _normalize(rgb_values)
-            gamma = _calculate_gamma(rgb_n)
             red_n = _normalize(rgb_values[:, :, 0])
             green_n = _normalize(rgb_values[:, :, 1])
             blue_n = _normalize(rgb_values[:, :, 2])
-            red_g = _gammacorr(red_n, gamma)
-            green_g = _gammacorr(green_n, gamma)
-            blue_g = _gammacorr(blue_n, gamma)
-            rgb_image = np.dstack((red_g, green_g, blue_g))
+            rgb_image = np.dstack((red_n, green_n, blue_n))
             
             if _is_image_missing(rgb_image):
                 print(f"Skipping plot for {time_values[i].strftime('%Y%m%d_%H%M%S')} due to missing data.")
@@ -83,8 +76,6 @@ def _export_figures(stac, export_folder, animation):
             ax.imshow(rgb_image, interpolation="bicubic", 
                       extent=[stac.x.min(), stac.x.max(), stac.y.min(), stac.y.max()])
         elif animation in ['ndvi', 'ndwi']:
-            # For ndvi/ndwi, the dataset is already selected with the appropriate band.
-            # The data is assumed to be 2D per time slice.
             data = stac.isel(time=i).values
             if animation == 'ndvi':
                 cmap = "RdYlGn"
@@ -122,21 +113,14 @@ def _is_image_missing(rgb_image, threshold=0.1):
     return (black_pixels / total_pixels) > threshold
 
 
-def _normalize(band):
-    band_min, band_max = band.min(), band.max()
+def _normalize(band, clip_percentile=2):
+    """ Normalize using 2%-98% percentile to remove extreme values. """
+    band_min, band_max = np.percentile(band, [clip_percentile, 100 - clip_percentile])
+
+    # Avoid division by zero
+    if band_max == band_min:
+        return np.zeros_like(band)  # If all values are the same, return a uniform image
+
+    band = np.clip(band, band_min, band_max)  # Remove extreme values
     return (band - band_min) / (band_max - band_min)
 
-
-def _gammacorr(band, gamma):
-    return np.power(band, 1/gamma)
-
-
-def _calculate_gamma(rgb_image):
-    brightness = np.mean(rgb_image, axis=2)
-    median_brightness = np.median(brightness)
-    std_brightness = np.std(brightness)
-    if median_brightness < 0.5:
-        gamma = 2.0 + (0.5 - median_brightness) * 1.5
-    else:
-        gamma = 1.0 / (1.0 + (median_brightness - 0.5) * 1.5)
-    return gamma
