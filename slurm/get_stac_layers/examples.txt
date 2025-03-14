@@ -81,6 +81,12 @@ Meaning the user can select much larger areas without worrying too much about pr
 - Idea of exporting mean, median, std, max and min alongside the raw data will be implemented in the future.
 - If None, then no aggregation.
 
+'stats' -> List: List of stats to be calculated as extra dataarrays, along all the available times per each band/index.
+- Unlike aggregator, this won't change the stacked data but export extra dataarrays per each selected stats.
+- Available stats: 'mean', 'median', 'std', 'mix', 'max'
+- Stats calculation will be activated IF 'output' is NOT None and IF 'aggregator' is None.
+- If None, then no stat dataarrays
+
 'topographic_features' -> List: Topographic features only for 'cop_dem' mission. CAN be None for 'cop_dem', MUST be None for the others.
 - Available features: 'slope', 'aspect', 'd_inf_flow_accumulation', 'twi'
 - TWI is based on 'slope' and 'd_inf_flow_accumulation' therefore, all of them must be selected for TWI.
@@ -113,6 +119,7 @@ Therefore, it's recommended to not activate this function is long daterange is s
     "output": "/dss/dsstbyfs02/pr94no/pr94no-dss-0001/drylands/results/test.nc",
     "clip_raster": null,
     "aggregator": null,
+    "stats": ["mean", "median", "std", "min", "max"],
     "animation": null
   }
 }

@@ -5,6 +5,7 @@ from .export_cfg import export_stac
 from .get_topo import calculate_topo
 from .get_animation import generate_animation
 from .clip import clip_stac
+from .get_statistics import calculate_statistics
 
 import xarray as xr
 import rioxarray as rio
@@ -20,7 +21,8 @@ def get_stac_layers(
     cloud_masking = None,
     indices = None ,
     output = None,
-    aggregator= None,
+    aggregator = None,
+    stats = None,
     topographic_features = None,
     animation = None):
     
@@ -99,5 +101,6 @@ def get_stac_layers(
         if mission != 'cop_dem':
             if aggregator is None:
                 print(stac.time.values)
+                stac = calculate_statistics(stac, stats)
         print(stac.band.values)
         return export_stac(stac, output, crs, transform)
