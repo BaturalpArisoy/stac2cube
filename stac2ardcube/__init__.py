@@ -8,3 +8,4 @@ from .clip import *
 from .get_animation import *
 from .get_topo import *
 from .cloud_masking import *
+from .get_statistics import *

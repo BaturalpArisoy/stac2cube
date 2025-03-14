@@ -7,9 +7,10 @@
     "indices": ["ndvi", "ndwi"],
     "max_cc": 100,
     "cloud_masking": "False",
-    "output": "/dss/dsstbyfs02/pr94no/pr94no-dss-0001/drylands/results/masking_test_stac.nc",
+    "output": "/dss/dsstbyfs02/pr94no/pr94no-dss-0001/drylands/results/testing_stac.nc",
     "clip_raster": null,
     "aggregator": null,
+    "stats": ["mean", "median", "std", "min", "max"],
     "animation": false
   }
 }
