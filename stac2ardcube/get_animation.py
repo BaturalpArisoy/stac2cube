@@ -123,4 +123,3 @@ def _normalize(band, clip_percentile=2):
 
     band = np.clip(band, band_min, band_max)  # Remove extreme values
     return (band - band_min) / (band_max - band_min)
-
