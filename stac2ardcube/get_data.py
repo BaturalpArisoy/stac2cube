@@ -160,7 +160,7 @@ def _get_band_map(mission: str):
             'qa_radsat': 'QA_Radsat',
             'qa_aerosol': 'QA_Aerosol'
         },
-        "s2_placeholder": { # Will be revoked once switched to terrabyte catalog from Element84.
+        "s2_placeholder": { # Will be activated once switched to terrabyte catalog from Element84.
             'coastal': 'B01',
             'blue': 'B02',
             'green': 'B03',

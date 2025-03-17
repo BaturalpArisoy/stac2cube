@@ -12,6 +12,3 @@ def clip_stac(stac, polygon, crs):
     stac = stac.rio.clip(pproj.geometry.values, crs = crs)
     
     return stac
-
-
-

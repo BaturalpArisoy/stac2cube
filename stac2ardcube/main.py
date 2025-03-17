@@ -9,6 +9,7 @@ from .get_statistics import calculate_statistics
 
 import xarray as xr
 import rioxarray as rio
+import pandas as pd
 
 def get_stac_layers(
     mission,
@@ -89,7 +90,7 @@ def get_stac_layers(
         stac = clip_stac(stac, polygon, crs) # delete write_crs in clip_stac
             
     # Finalizing
-    stac['time'] = stac['time'].dt.strftime('%Y-%m-%d')
+    stac['time'] = stac['time'].dt.floor('D')
 
     if output is None:
         stac.attrs['crs'] = crs
