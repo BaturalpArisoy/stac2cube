@@ -93,11 +93,12 @@ def get_stac_layers(
     stac['time'] = stac['time'].dt.floor('D')
 
     if output is None:
-        stac.attrs['crs'] = crs
-        stac.attrs['transform'] = transform
         stac.rio.write_crs(crs, inplace=True)
         stac.rio.write_transform(transform, inplace=True)
-        print(stac)
+        if mission == "s2_l1c":
+            stac.attrs['crs'] = crs
+            stac.attrs['transform'] = transform
+        print(stac, flush=True)
         return stac # returns lazy
     else:
         print(stac)
@@ -106,4 +107,5 @@ def get_stac_layers(
                 print(stac.time.values)
                 stac = calculate_statistics(stac, stats)
         print(stac.band.values)
-        return export_stac(stac, output, crs, transform)
+        img = export_stac(stac, output, crs, transform)
+        return img

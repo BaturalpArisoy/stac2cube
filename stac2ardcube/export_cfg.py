@@ -28,3 +28,5 @@ def export_stac(stac, output, crs, transform):
     img.to_netcdf(output)
 
     print(f"Export is done: {output}")
+
+    return img

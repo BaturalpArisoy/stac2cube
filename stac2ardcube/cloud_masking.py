@@ -39,8 +39,10 @@ def get_cloud_layers(
 
     # Retrieve the lazy STAC DataArray.
     stac = get_stac_layers(mission=mission, polygon=polygon, daterange=daterange, bands=bands, max_cc=max_cc, clip_raster=clip_raster) #LAZY
-    print(stac, flush=True)
+    #print(stac, flush=True)
+    #crs = stac.spatial_ref.crs_wkt
     crs = stac.crs
+    #transform = stac.spatial_ref.GeoTransform
     transform = stac.transform
     
     # Instantiate the cloud detector.
@@ -116,8 +118,15 @@ def get_cloud_layers(
         #cloud_only_stack.attrs['crs'] = crs
         #cloud_only_stack.attrs['transform'] = transform
 
+        # Transform prob btw 0-100 and dtype unit8
+        cloud_prob_uint8 = (cloud_only_stack.sel(band="cloud_prob") * 100).astype(np.uint8)
+        cloud_mask_uint8 = cloud_only_stack.sel(band="cloud_mask").astype(np.uint8)
+        cloud_stac_uint8 = xr.concat([cloud_prob_uint8, cloud_mask_uint8], dim="band")
+        cloud_stac_uint8 = cloud_stac_uint8.assign_coords(band=["cloud_prob", "cloud_mask"])
+        cloud_only_stack = cloud_stac_uint8.transpose("time", "band", "y", "x")
+
         # Export the result.
-        export_stac(cloud_only_stack, output, crs, transform)
+        img = export_stac(cloud_only_stack, output, crs, transform)
         
         if masking:
             dirname, filename = os.path.split(masking)
@@ -125,10 +134,12 @@ def get_cloud_layers(
             output_filename = f"{name}_masked{ext}"
             output_mask = os.path.join(dirname, output_filename)
 
-            mask_stac_clouds(masking, cloud_only_stack, output_mask)
+            img = mask_stac_clouds(masking, cloud_only_stack, output_mask)
         
     else:
         print("No cloud layers selected. Nothing to export.")
+
+    return img
 
 
 def mask_stac_clouds(stac, cloud, output):
@@ -147,8 +158,17 @@ def mask_stac_clouds(stac, cloud, output):
         
     cloud_mask = cloud.sel(band='cloud_mask')
     masked_stac = stac.where(cloud_mask == 0)
-    
-    crs = stac.crs
-    transform = stac.transform
 
-    export_stac(masked_stac, output, crs, transform)
+    # Add information about cloud percentage
+    null_count_per_time = masked_stac.isnull().sum(dim=['band', 'y', 'x'])
+    total_elements = masked_stac.sizes['band'] * masked_stac.sizes['y'] * masked_stac.sizes['x']
+    cloud_percentage_int = ((null_count_per_time / total_elements) * 100).astype(int)
+    masked_stac = masked_stac.assign_coords(cloud_percentage=('time', cloud_percentage_int.data))
+
+
+    
+    crs = cloud.crs
+    transform = cloud.transform
+
+    img = export_stac(masked_stac, output, crs, transform)
+    return img
