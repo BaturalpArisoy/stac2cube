@@ -5,7 +5,6 @@ from tqdm import tqdm
 import numpy as np
 from affine import Affine
 
-# add write_crs
 def export_stac(stac, output, crs, transform):
 
     if isinstance(transform, np.ndarray):

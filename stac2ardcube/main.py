@@ -3,7 +3,7 @@ from .stac_processing import scale_factor
 from .get_spectral_indices import calculate_spectral_index
 from .export_cfg import export_stac
 from .get_topo import calculate_topo
-from .get_animation import generate_animation
+from .time_series_tools import generate_animation
 from .clip import clip_stac
 from .get_statistics import calculate_statistics
 
@@ -28,7 +28,7 @@ def get_stac_layers(
     animation = None):
     
     stac, baselines = get_stac(mission, polygon, resolution, daterange, bands, max_cc, cloud_masking)
-    crs = stac.spatial_ref.crs_wkt
+    crs = stac.spatial_ref.projected_crs_name
     transform = stac.rio.transform()
     
     # Cloud masking
