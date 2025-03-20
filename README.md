@@ -99,9 +99,10 @@ Dont forget to sort by time for the latest log files!<br>
 - Cleaner way to work with CRS information of data arrays (Under development)
 - Native cloud masking for Landsat and Sentinel (Under development)
 - Orbit mode selection for Sentinel-1: Ascending/Descending
+- Sentinel tile information extraction
 
 ## How to cite:
 paper to be published <3
 
 <br><br>
-Contact: https://www.geographie.uni-wuerzburg.de/en/earthobservation/staff/baturalp-arisoy/#c1122000
+Contact: https://www.geographie.uni-wuerzburg.de/en/earthobservation/staff/baturalp-arisoy/
