@@ -1,7 +1,7 @@
 {
   "parameters": {
     "mission": "s2",
-    "polygon": "/dss/dsstbyfs02/pr94no/pr94no-dss-0001/drylands/polygons/test.gpkg",
+    "polygon": "/dss/dsstbyfs02/pr94no/pr94no-dss-0001/drylands/polygons/naryn_test.gpkg",
     "resolution": 10,
     "daterange": ["2024-04-01", "2024-05-01"],
     "bands": ["blue", "green", "red", "nir"],

@@ -93,13 +93,16 @@ Dont forget to sort by time for the latest log files!<br>
 ## What's upcoming?:
 - Sentinel 2 co-registration (Under development)
 - Caching mechanism to automatically update the missing scenes
-- More advanced interactive tools for better experience (Under development)
+- [x] More advanced interactive tools for better experience (Under development)
 - Improvements of get_cloud_layers function for easier use
 - Cloud shadow detection and masking
 - Cleaner way to work with CRS information of data arrays (Under development)
 - Native cloud masking for Landsat and Sentinel (Under development)
 - Orbit mode selection for Sentinel-1: Ascending/Descending
 - Sentinel tile information extraction
+- Quite mode
+- [ ]
+- [x]
 
 ## How to cite:
 paper to be published <3
