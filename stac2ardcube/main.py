@@ -1,4 +1,5 @@
 from .get_data import get_stac
+from .vector_refiner import proj_check, polygon_2_bbox
 from .stac_processing import scale_factor
 from .get_spectral_indices import calculate_spectral_index
 from .export_cfg import export_stac
@@ -6,14 +7,15 @@ from .get_topo import calculate_topo
 from .time_series_tools import generate_animation
 from .clip import clip_stac
 from .get_statistics import calculate_statistics
+from .get_update import get_stac_parameters, update_stac
 
 import xarray as xr
 import rioxarray as rio
 import pandas as pd
 
 def get_stac_layers(
-    mission,
-    polygon,
+    mission = None,
+    polygon = None,
     resolution = None,
     daterange = None,
     bands= None,
@@ -25,8 +27,35 @@ def get_stac_layers(
     aggregator = None,
     stats = None,
     topographic_features = None,
-    animation = None):
+    animation = None,
+    update = None):
     
+    # Adjust short names
+    if mission == "s2":
+        mission = "sentinel-2-l2a"
+    if mission == "s2_l1c":
+        mission = "sentinel-2-l1c"
+    if mission == "s1":
+        mission = "sentinel-1-rtc"
+
+    if update:
+        stac_parameters = get_stac_parameters(update)
+
+        mission = stac_parameters["mission"]
+        resolution = stac_parameters["resolution"]
+        polygon = stac_parameters["polygon"]
+        bands = stac_parameters["spectral_bands"]
+        indices = stac_parameters["indices"]
+        output = update
+    else:
+        if not mission:
+            raise ValueError("Error: Please select a mission.")
+        if not polygon:
+            raise ValueError("Error: Please select a polygon or bbox list with geographic coordinates.")
+
+    #if not isinstance(polygon, list):
+    #    polygon = proj_check(polygon)
+
     stac, baselines = get_stac(mission, polygon, resolution, daterange, bands, max_cc, cloud_masking)
     crs = stac.spatial_ref.projected_crs_name
     transform = stac.rio.transform()
@@ -35,7 +64,6 @@ def get_stac_layers(
 #    if cloud_masking is True:
 #        stac = cloud_mask(stac, mission)
 
-   
     # Scale factor
     stac = scale_factor(stac, mission, baselines)
     #stac.rio.write_crs(crs, inplace=True)
@@ -61,11 +89,12 @@ def get_stac_layers(
     if mission != 'cop_dem':  
         bands = list(stac.data_vars.keys())
         stac = xr.concat([stac[band] for band in bands], dim='band')
-        stac = stac.assign_coords(band=bands)    
+        stac = stac.assign_coords(band=bands)
 
     # DataArray manipulation
     if indices is not None:
         stac = xr.concat([stac, stac_indices], dim='band')
+        stac.attrs['indices'] = indices    
 
     if mission == 'cop_dem':
         stac = xr.concat([dem, stac_topo_features], dim='band')
@@ -74,14 +103,20 @@ def get_stac_layers(
         stac = stac.transpose('time', 'band', 'y', 'x')
         stac = stac.rename('Spectral_Temporal_Stack')
 
+    # Add metadata as attributes
+    if not update:
+        stac.attrs['spectral_bands'] = bands
+        stac.attrs['mission'] = mission
+        bbox = polygon_2_bbox(polygon)
+        stac.attrs['bbox'] = bbox
+
     # Calculate stats image (optional)
     if aggregator is not None:
         print(f"stac before {aggregator}:")
         print(stac)
         print("\n-------------------------------------")
         if aggregator == 'mean':
-            stac = stac.mean(dim='time', skipna=True)
-            
+            stac = stac.mean(dim='time', skipna=True) 
         elif aggregator == 'median':
             stac = stac.median(dim='time', skipna=True)
     
@@ -93,20 +128,28 @@ def get_stac_layers(
     if aggregator is None:
       stac['time'] = stac['time'].dt.floor('D')
 
+    stac.attrs['crs'] = crs
+    stac.attrs['transform'] = transform
+
     if output is None:
         stac.rio.write_crs(crs, inplace=True)
         stac.rio.write_transform(transform, inplace=True)
-        if mission == "s2_l1c":
-            stac.attrs['crs'] = crs
-            stac.attrs['transform'] = transform
+        #if mission == "sentinel-2-l1c":
+         #   stac.attrs['crs'] = crs
+          #  stac.attrs['transform'] = transform
+        stac.attrs['crs'] = crs
+        stac.attrs['transform'] = transform
         print(stac, flush=True)
         return stac # returns lazy
     else:
+        if update:
+            stac = update_stac(stac_existing=update, stac_updated=stac)
         print(stac)
         if mission != 'cop_dem':
             if aggregator is None:
                 print(stac.time.values)
-                stac = calculate_statistics(stac, stats)
+                if stats:
+                    stac = calculate_statistics(stac, stats)
         print(stac.band.values)
         img = export_stac(stac, output, crs, transform)
         return img

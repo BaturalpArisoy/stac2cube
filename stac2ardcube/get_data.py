@@ -11,25 +11,25 @@ import os
 def get_stac(mission: str, polygon, resolution, daterange: list, bands: list, max_cc: int, cloud_masking: bool):
 
     catalogues = {
-        "s2": ("https://earth-search.aws.element84.com/v1/", 'sentinel-2-l2a'),
-        "s2_l1c": ("https://earth-search.aws.element84.com/v1/", 'sentinel-2-l1c'),
+        "sentinel-2-l2a": ("https://earth-search.aws.element84.com/v1/", 'sentinel-2-l2a'),
+        "sentinel-2-l1c": ("https://earth-search.aws.element84.com/v1/", 'sentinel-2-l1c'),
         "cop_dem": ("https://stac.terrabyte.lrz.de/public/api/", 'cop-dem-glo-30'),
         "l_oli": ("https://stac.terrabyte.lrz.de/public/api/", 'landsat-ot-c2-l2'),
-        "s1": ("https://planetarycomputer.microsoft.com/api/stac/v1", 'sentinel-1-rtc')
+        "sentinel-1-rtc": ("https://planetarycomputer.microsoft.com/api/stac/v1", 'sentinel-1-rtc')
     }
     
     if resolution is not None:     
         resolution = resolution   
     else: 
         resolutions = {
-            "s2": 10,
-            "s2_l1c": 10,
+            "sentinel-2-l2a": 10,
+            "sentinel-2-l1c": 10,
             "cop_dem": None,
             "l_oli": 30,
-            "s1": 10
+            "sentinel-1-rtc": 10
         }
         resolution = resolutions[mission]
-    
+
     if isinstance(polygon, list):
         bbox = polygon
     else:
@@ -37,7 +37,7 @@ def get_stac(mission: str, polygon, resolution, daterange: list, bands: list, ma
 
     url, collection = catalogues[mission]
 
-    if mission == 's1':
+    if mission == 'sentinel-1-rtc':
         catalog = pystacclient.open(url,
             modifier=planetary_computer.sign_inplace,
         )
@@ -51,21 +51,21 @@ def get_stac(mission: str, polygon, resolution, daterange: list, bands: list, ma
         }
     }
 
-    if mission in ('cop_dem', 's1'):
+    if mission in ('cop_dem', 'sentinel-1-rtc'):
         query = None
     
-    items, crs = _catalogue_search(catalog, collection, bbox, daterange, query)
+    items, crs, stac_mission = _catalogue_search(catalog, collection, bbox, daterange, query)
     
     band_map = _get_band_map(mission)
     if band_map is not None:
         bands = [band_map.get(band, band) for band in bands]
 
     if cloud_masking is True:
-        if mission == "s2":
+        if mission == "sentinel-2-l2a":
             bands.append('scl')
 
-    # Pre-filter duplicate items for s2_l1c based on processing baseline
-    if mission == "s2_l1c":
+    # Pre-filter duplicate items for sentinel-2-l1c based on processing baseline
+    if mission == "sentinel-2-l1c":
         from collections import defaultdict
         grouped = defaultdict(list)
         for item in items:
@@ -96,7 +96,7 @@ def get_stac(mission: str, polygon, resolution, daterange: list, bands: list, ma
             rename_dict = {band: reverse_band_map.get(band, band) for band in stac.data_vars if band in reverse_band_map}
             stac = stac.rename(rename_dict)
             
-    if mission == "s2_l1c":
+    if mission == "sentinel-2-l1c":
         date_list = [item.properties['datetime'] for item in items]
         processing_baseline_list = [item.properties["s2:processing_baseline"] for item in items]
         dates = pd.to_datetime(date_list, format='mixed').to_numpy(dtype='datetime64[ns]')
@@ -139,7 +139,8 @@ def _catalogue_search(catalog, collection, bbox, daterange, query):
        
     sample_item = items[0]
     crs = sample_item.properties.get('proj:code') or sample_item.properties.get('proj:epsg')
-    return items, crs
+    stac_mission = sample_item.to_dict().get("collection")
+    return items, crs, stac_mission
 
 
 

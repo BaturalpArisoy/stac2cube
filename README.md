@@ -1,4 +1,4 @@
-# stac2ardcube 🛰️🧊
+# stac2ardcube 🛰️🧊<br> Spatio-Temporal Asset Catalogs To Analysis-Ready Data Cubes
 Transform STAC catalogs into Analysis-Ready Data Cubes (ARDCube) for Earth Observation (EO) applications
 
 ## Overview
@@ -91,13 +91,14 @@ Dont forget to sort by time for the latest log files!<br>
 <br><br>
 
 ## What's upcoming?:
-- [ ] Sentinel 2 co-registration (Under development)
-- [ ] Caching mechanism to automatically update the missing scenes (Under development)
+- [ ] Sentinel-2 co-registration (Under development)
+- [x] Caching mechanism to automatically update the missing scenes
 - [x] More advanced interactive tools for better experience
+- [ ] Import bbox list with projected coords: proj to geographic transformation (Under development)
 - [ ] Improvements for get_cloud_layers function for simpler use
 - [ ] Cloud shadow detection and masking
 - [ ] Cleaner way to work with CRS information of data arrays (Under development)
-- [ ] Native cloud masking for Landsat and Sentinel (Under development)
+- [ ] Native cloud masking for Landsat and Sentinel-2 scenes (Under development)
 - [ ] Orbit mode selection for Sentinel-1: Ascending/Descending
 - [ ] Store further metadata: e.g. Sentinel tile information, orbit mode, full name of the missions
 - [ ] Quite mode
