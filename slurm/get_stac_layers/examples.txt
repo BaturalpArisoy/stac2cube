@@ -6,8 +6,12 @@ get_stac_layers(mission, polygon, resolution = None, daterange = None, bands= No
 # Parameters:
 
 'mission' -> Str: STAC collections. Cant be None.
-- Available missions: 's2', 's2_l1c', 's1', 'l_oli', 'cop_dem'.
-- Just 's2' means 's2_l2a'. 'cop_dem' is 'Copernicus GLO-30'.
+- Available missions: 'sentinel-2-l2a', 'sentinel-2-l1c', 'sentinel-1-rtc', 'l_oli', 'cop_dem'.
+- Can also use short names:
+s2 = sentinel-2-l2a
+s2_l1c = sentinel-2-l1c
+s1 = sentinel-1-rtc
+- 'cop_dem' is 'Copernicus GLO-30'.
 
 'polygon' -> Path or vector file: Input polygon, defining the area to be data collected. Cant be None.
 - The input should be on geographic coordinates (WGS84). The new code will implemented to accept projected polygons.
@@ -108,7 +112,7 @@ Therefore, it's recommended to not activate this function is long daterange is s
 
 {
   "parameters": {
-    "mission": "s2",
+    "mission": "sentinel-2-l2a",
     "polygon": "/dss/dsstbyfs02/pr94no/pr94no-dss-0001/drylands/polygons/test.gpkg",
     "resolution": 10,
     "daterange": ["2024-04-01", "2024-05-01"],
@@ -128,7 +132,7 @@ Therefore, it's recommended to not activate this function is long daterange is s
 
 {
   "parameters": {
-    "mission": "s2_l1c",
+    "mission": "sentinel-2-l1c",
     "polygon": "/dss/dsstbyfs02/pr94no/pr94no-dss-0001/drylands/polygons/test.gpkg",
     "resolution": 100,
     "daterange": ["2024-04-01", "2024-05-01"],
@@ -170,7 +174,7 @@ Therefore, it's recommended to not activate this function is long daterange is s
 ## Sentinel 1 - Sample
 {
   "parameters": {
-    "mission": "s1",
+    "mission": "sentinel-1-rtc",
     "polygon": "/dss/dsstbyfs02/pr94no/pr94no-dss-0001/drylands/polygons/test.gpkg",
     "daterange": ["2021-01-01", "2022-01-01"],
     "bands": ["vh", "vv"],

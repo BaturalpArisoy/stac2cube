@@ -19,7 +19,7 @@ def cloud_mask(stac, mission):
 
 def scale_factor(stac, mission, baselines):
 
-    if mission == "s2_l1c":
+    if mission == "sentinel-2-l1c":
         baselines = baselines.astype(float)
         baselines_aligned = baselines.sel(time=stac.time)
         
@@ -38,10 +38,10 @@ def _mission_cfg(mission):
 
     # relevant band (cloud), classifications (cloud), gain (scale), offset (scale) 
     cfg = {
-        "s2": ('scl', [3, 8, 9, 10], 1e-4, 0),
-        "s2_l1c": (None, None, 1e-4, -1000),
+        "sentinel-2-l2a": ('scl', [3, 8, 9, 10], 1e-4, 0),
+        "sentinel-2-l1c": (None, None, 1e-4, -1000),
         "l_oli": ('qa_pixel', [1, 2, 3, 4], 0.0000275, -0.2),
-        "s1": (None, None, 1, 0),
+        "sentinel-1-rtc": (None, None, 1, 0),
         "cop_dem": (None, None, 1, 0)
     }
 

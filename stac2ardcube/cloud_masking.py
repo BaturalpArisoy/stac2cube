@@ -33,7 +33,7 @@ def get_cloud_layers(
         
     # Variables for stac retrieval
     max_cc = 100
-    mission = 's2_l1c'
+    mission = 'sentinel-2-l1c'
     bands = ['coastal', 'blue', 'red', 'rededge1', 'nir',
              'nir08', 'nir09', 'cirrus', 'swir16', 'swir22']
 

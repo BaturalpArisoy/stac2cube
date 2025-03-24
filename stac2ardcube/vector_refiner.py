@@ -1,6 +1,57 @@
 import os
 import geopandas as gpd
 import fiona
+import pyproj
+
+def polygon_2_gdf(polygon) -> gpd.GeoDataFrame:
+    """
+    Reads a polygon file and returns a processed GeoDataFrame containing only the first geometry,
+    reprojected to WGS84.
+    """
+    gdf = _read_polygon_file(polygon)
+    if gdf is None:
+        return None
+    return _process_gdf(gdf)
+
+def polygon_2_bbox(polygon) -> list:
+    """
+    Reads a polygon file and returns the bounding box of the first geometry as a list:
+    [minx, miny, maxx, maxy]. The geometry is reprojected to WGS84.
+    """
+    gdf = polygon_2_gdf(polygon)
+    if gdf is None:
+        return None
+    bbox = gdf.total_bounds  # returns [minx, miny, maxx, maxy]
+    return [float(coord) for coord in bbox]
+
+# This function does not work as intended. Will be reworked or deleted :(
+def proj_2_geo(polygon, source_epsg=None):
+    
+    if isinstance(polygon, list):  # DELETE
+        bbox = polygon             # DELETE
+        source_epsg = source_epsg  # DELETE
+    else:
+        gdf = polygon_2_gdf(polygon)
+        crs_str = str(gdf.crs)
+        #source_epsg = int(crs_str.split(":")[1])
+        bbox = gdf.total_bounds.tolist()
+        
+    '''
+    dest_epsg = 4326
+    transformer = pyproj.Transformer.from_crs(f"EPSG:{source_epsg}", f"EPSG:{dest_epsg}", always_xy=True)
+    lon_min, lat_min = transformer.transform(bbox[0], bbox[1])
+    lon_max, lat_max = transformer.transform(bbox[2], bbox[3])
+    new_bbox = [lon_min, lat_min, lon_max, lat_max]
+    print(new_bbox)
+    '''
+    return bbox
+
+def proj_check(polygon):
+
+    gdf = polygon_2_gdf(polygon)
+    if str(gdf.crs) != 'EPSG:4326':
+        polygon = proj_2_geo(polygon)
+    return polygon
 
 def _read_polygon_file(polygon) -> gpd.GeoDataFrame:
     """
@@ -64,42 +115,6 @@ def _process_gdf(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
         gdf = gdf.to_crs(target_crs)
 
     return gdf
-
-def polygon_2_gdf(polygon) -> gpd.GeoDataFrame:
-    """
-    Reads a polygon file and returns a processed GeoDataFrame containing only the first geometry,
-    reprojected to WGS84.
-    """
-    gdf = _read_polygon_file(polygon)
-    if gdf is None:
-        return None
-    return _process_gdf(gdf)
-
-def polygon_2_bbox(polygon) -> list:
-    """
-    Reads a polygon file and returns the bounding box of the first geometry as a list:
-    [minx, miny, maxx, maxy]. The geometry is reprojected to WGS84.
-    """
-    gdf = polygon_2_gdf(polygon)
-    if gdf is None:
-        return None
-    bbox = gdf.total_bounds  # returns [minx, miny, maxx, maxy]
-    return [float(coord) for coord in bbox]
-
-# Example usage:
-if __name__ == "__main__":
-    polygon_path = "your_polygon_file.kml"  # or .gpkg, .geojson, etc.
-    
-    # Get the processed GeoDataFrame
-    gdf = polygon_2_gdf(polygon_path)
-    print("GeoDataFrame:")
-    print(gdf)
-    
-    # Get the bounding box
-    bbox = polygon_2_bbox(polygon_path)
-    print("Bounding Box:", bbox)
-
-
 
 def _shp_warning():
 
