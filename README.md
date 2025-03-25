@@ -1,5 +1,5 @@
 # stac2cube 🛰️🧊<br> Spatio-Temporal Asset Catalogs To Analysis-Ready Data Cubes
-Transform STAC catalogs into Analysis-Ready Data Cubes (ARDCube) for Earth Observation (EO) applications
+Transform STAC catalogs into Analysis-Ready Data Cubes for Earth Observation (EO) applications.
 
 ## Overview
 **stac2cube** converts STAC catalogs into Analysis-Ready Data Cubes for efficient Earth Observation (EO) processing. This tool is designed to work on HPC systems and is optimized for users working on _terrabyte_. We recommend using *MobaXTerm* for accessing the _terrabyte_ login node and editing files.
