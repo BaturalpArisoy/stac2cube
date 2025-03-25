@@ -1,4 +1,4 @@
-from stac2ardcube import main
+from stac2cube import main
 import json
 import os
 

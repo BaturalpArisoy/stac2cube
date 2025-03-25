@@ -62,7 +62,7 @@ Therefore selection of multiple cloud maskings will be possible: e.g. cloud_laye
 - Returns the masked S2 L2A NETCDF file with a suffix '_masked', in the same Path.
 This NETCDF export is different than cloud layers. Therefore, independent from 'output'.
 - Even if masking for some reason fails to be executed, cloud layers NETCDF will be already exported.
-In this case, do not run SLURM batch once again, instead use stac2ardcube.cloud_masking.mask_stac_clouds() function in the notebook. (example ipynb in 'interactive' folder)
+In this case, do not run SLURM batch once again, instead use "from stac2cube import mask_stac_clouds" function in the notebook. (example ipynb in 'interactive' folder)
 - If None, then no masking of S2 L2A, therefore only exporting cloud layers but not exporting masked S2 L2A.
 
 ---
