@@ -1,4 +1,4 @@
-# stac2ardcube 🛰️🧊<br> Spatio-Temporal Asset Catalogs To Analysis-Ready Data Cubes
+# stac2cube 🛰️🧊<br> Spatio-Temporal Asset Catalogs To Analysis-Ready Data Cubes
 Transform STAC catalogs into Analysis-Ready Data Cubes (ARDCube) for Earth Observation (EO) applications
 
 ## Overview
@@ -37,7 +37,11 @@ $ source ~/.bashrc
 - Edit `slurm/get_stac_layers.json`
 - Edit variables for data collection (take a look at `examples.txt`) and save
 - On MobaXTerm, middle click `submit.sh` and enter
-- If laptop pad, right click, copy file path to terminal and enter<br>
+- If laptop pad, right click, copy file path to terminal and enter
+- On Terminal:<br>
+
+        $ bash submit.sh
+<br>
 
 Congratulations, your job is submitted to HPC! You can check any error or the progress of xarray computing on `slurm/log/ .err & .out`<br>
 Dont forget to sort by time for the latest log files!
@@ -79,8 +83,12 @@ Editable mode (for development):<br>
 #### d) Update Job Configuration and Submit
 - Edit `slurm/get_stac_layers.json`
 - Edit variables for data collection (`examples.txt` will be updated with further explanations!) and save
-- On MobaXTerm, middle click `submit.sh` and enter
-- If laptop pad, right click, copy file path to terminal and enter<br><br>
+- On MobaXTerm, middle click `submit.sh` and enter. 
+- If laptop pad, right click, copy file path to terminal and enter
+- On Terminal:<br>
+
+        $ bash submit.sh
+<br>
 
 
 Congratulations, your job is submitted to HPC! You can check any error or the progress of xarray computing on `slurm/log/ .err & .out`<br>
@@ -100,7 +108,7 @@ Dont forget to sort by time for the latest log files!<br>
 - [ ] Cleaner way to work with CRS information of data arrays (Under development)
 - [ ] Native cloud masking for Landsat and Sentinel-2 scenes (Under development)
 - [ ] Orbit mode selection for Sentinel-1: Ascending/Descending
-- [ ] Store further metadata: e.g. Sentinel tile information, orbit mode, full name of the missions
+- [ ] Switch python package setup from setup.py to pyproject.toml: enables uv install besides pip 
 - [ ] Quite mode
 - [ ] Verbose mode
 
