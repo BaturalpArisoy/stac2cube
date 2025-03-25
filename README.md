@@ -108,7 +108,7 @@ Dont forget to sort by time for the latest log files!<br>
 - [ ] Cleaner way to work with CRS information of data arrays (Under development)
 - [ ] Native cloud masking for Landsat and Sentinel-2 scenes (Under development)
 - [ ] Orbit mode selection for Sentinel-1: Ascending/Descending
-- [ ] Switch python package setup from setup.py to pyproject.toml: enables uv install besides pip 
+- [x] Switch python package setup from setup.py to pyproject.toml: enables uv install besides pip 
 - [ ] Quite mode
 - [ ] Verbose mode
 
