@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=42", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "stac2cube"
+version = "1.0.0"
+description = "STAC to Analysis-Ready-Data Cubes w/ terrabyte by DLR & LRZ"
+authors = [
+  { name = "Baturalp Arisoy", email = "baturalp.arisoy@uni-wuerzburg.de" }
+]
+
+dependencies = [
+    "numpy",
+    "scipy",
+    "pandas",
+    "dask==2025.2.0",
+    "xarray",
+    "rioxarray",
+    "geopandas",
+    "shapely",
+    "fiona",
+    "odc-stac",
+    "pystac_client",
+    "planetary-computer",
+    "s2cloudless",
+    "netCDF4",
+    "h5netcdf",
+    "matplotlib",
+    "Pillow",
+    "branca",
+    "pyaml",
+    "tqdm",
+    "whitebox",
+    "setuptools",
+    "ipykernel",
+    "leafmap",
+    "ipywidgets"
+]
+urls = { Homepage = "https://github.com/BaturalpArisoy/stac2cube" }
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["."]

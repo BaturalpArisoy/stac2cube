@@ -3,7 +3,7 @@
 #SBATCH --output=../log/stac_xarray_output.%j.out
 #SBATCH --error=../log/stac_xarray_error.%j.err
 #SBATCH --mail-type=END
-##SBATCH --mail-user=<e-mail>
+##SBATCH --mail-user=<your-email>
 #SBATCH --account=pr94no-c
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
@@ -16,7 +16,7 @@
 module load micromamba
 
 # Local package
-#micromamba run -n stac2ardcube python slurm_run.py
+#micromamba run -n stac2cube python slurm_run.py
 
 # Shared DSS package
-micromamba run -p /dss/dsstbyfs02/pr94no/pr94no-dss-0001/drylands/envs/stac2ardcube python slurm_run.py
+micromamba run -p /dss/dsstbyfs02/pr94no/pr94no-dss-0001/drylands/envs/stac2cube python slurm_run.py

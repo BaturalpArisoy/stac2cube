@@ -1,8 +1,8 @@
-# stac2cube 🛰️🧊<br> Spatio-Temporal Asset Catalogs To Analysis-Ready Data Cubes test
+# stac2cube 🛰️🧊<br> Spatio-Temporal Asset Catalogs To Analysis-Ready Data Cubes
 Transform STAC catalogs into Analysis-Ready Data Cubes (ARDCube) for Earth Observation (EO) applications
 
 ## Overview
-**stac2ardcube** converts STAC catalogs into Analysis-Ready Data Cubes for efficient Earth Observation (EO) processing. This tool is designed to work on HPC systems and is optimized for users working on _terrabyte_. We recommend using *MobaXTerm* for accessing the _terrabyte_ login node and editing files.
+**stac2cube** converts STAC catalogs into Analysis-Ready Data Cubes for efficient Earth Observation (EO) processing. This tool is designed to work on HPC systems and is optimized for users working on _terrabyte_. We recommend using *MobaXTerm* for accessing the _terrabyte_ login node and editing files.
 
 
 ## Installation:
@@ -28,9 +28,9 @@ $ micromamba shell init --shell bash --root-prefix=~/micromamba
 $ source ~/.bashrc
 ```
 #### c) Optional: Configure Slurm Setup (Default configuration)
-- Edit `<path/to/stac2ardcube>/slurm/get_stac_layers/slurm_setup.cmd`
-- Comment (disable) local package micromamba `micromamba run -n stac2ardcube python slurm_run.py`
-- Uncomment (enable) shared DSS package micromamba `micromamba run -p /dss/dsstbyfs02/pr94no/pr94no-dss-0001/drylands/envs/stac2ardcube python slurm_run.py`
+- Edit `<path/to/stac2cube>/slurm/get_stac_layers/slurm_setup.cmd`
+- Comment (disable) local package micromamba `micromamba run -n stac2cube python slurm_run.py`
+- Uncomment (enable) shared DSS package micromamba `micromamba run -p /dss/dsstbyfs02/pr94no/pr94no-dss-0001/drylands/envs/stac2cube python slurm_run.py`
 - Do the same for `slurm/get_cloud_layers`
 
 #### d) Update Job Configuration and Submit
@@ -52,18 +52,18 @@ Dont forget to sort by time for the latest log files!
 #### a) Set Up Micromamba Environment
     $ module use /dss/dsstbyfs01/pn56su/pn56su-dss-0020/usr/share/modules/files/
     $ module load micromamba
-    $ micromamba create -n stac2ardcube
+    $ micromamba create -n stac2cube
     $ micromamba shell init --shell bash --root-prefix=~/micromamba
     $ source ~/.bashrc
-    $ micromamba activate stac2ardcube
+    $ micromamba activate stac2cube
 
-#### b) Install stac2ardcube via PIP
-Ensure you are in the directory containing setup.py and stac2ardcube env is activated, then choose your installation mode:
+#### b) Install stac2cube via PIP
+Ensure you are in the directory containing setup.py and stac2cube env is activated, then choose your installation mode:
 
     $ micromamba install pip
 You should be on the folder where `setup.py` is located.
 
-    $ cd <path_to_stac2ardcube_parent_folder>
+    $ cd <path_to_stac2cube_parent_folder>
 
 Stable mode:<br>
 
@@ -75,9 +75,9 @@ Editable mode (for development):<br>
 
 
 #### c) Configure Slurm Setup
-- Edit `<path/to/stac2ardcube>/slurm/get_stac_layers/slurm_setup.cmd`
-- Comment (disable) shared DSS package micromamba `micromamba run -p /dss/dsstbyfs02/pr94no/pr94no-dss-0001/drylands/envs/stac2ardcube python slurm_run.py`
-- Uncomment (enable) local package micromamba `micromamba run -n stac2ardcube python slurm_run.py`
+- Edit `<path/to/stac2cube>/slurm/get_stac_layers/slurm_setup.cmd`
+- Comment (disable) shared DSS package micromamba `micromamba run -p /dss/dsstbyfs02/pr94no/pr94no-dss-0001/drylands/envs/stac2cube python slurm_run.py`
+- Uncomment (enable) local package micromamba `micromamba run -n stac2cube python slurm_run.py`
 - Do the same for `slurm/get_cloud_layers`
 
 #### d) Update Job Configuration and Submit
