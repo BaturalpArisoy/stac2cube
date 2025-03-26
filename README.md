@@ -102,6 +102,7 @@ Dont forget to sort by time for the latest log files!<br>
 - [ ] Sentinel-2 co-registration (Under development)
 - [x] Caching mechanism to automatically update the missing scenes
 - [x] More advanced interactive tools for better experience
+- [x] Get table of available missions with details and what function instances they can receive
 - [ ] Import bbox list with projected coords: proj to geographic transformation (Under development)
 - [ ] Improvements for get_cloud_layers function for simpler use
 - [ ] Cloud shadow detection and masking
@@ -109,6 +110,7 @@ Dont forget to sort by time for the latest log files!<br>
 - [ ] Native cloud masking for Landsat and Sentinel-2 scenes (Under development)
 - [ ] Orbit mode selection for Sentinel-1: Ascending/Descending
 - [x] Switch python package setup from setup.py to pyproject.toml: enables uv install besides pip 
+- [ ] Add new spectral indices: EVI, Built-up Index (More upon request!)
 - [ ] Quite mode
 - [ ] Verbose mode
 
