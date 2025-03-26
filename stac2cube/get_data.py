@@ -1,6 +1,7 @@
 from .vector_refiner import polygon_2_bbox
 
 import pandas as pd
+import geopandas as gpd
 import xarray as xr
 import numpy as np
 from pystac_client import Client as pystacclient
@@ -8,13 +9,13 @@ from odc.stac import stac_load
 import planetary_computer
 import os
 
-def get_stac(mission: str, polygon, resolution, daterange: list, bands: list, max_cc: int, cloud_masking: bool):
+def get_stac(mission: str, polygon, resolution: int, daterange: list, bands: list, max_cc: int, cloud_masking: bool):
 
     catalogues = {
         "sentinel-2-l2a": ("https://earth-search.aws.element84.com/v1/", 'sentinel-2-l2a'),
         "sentinel-2-l1c": ("https://earth-search.aws.element84.com/v1/", 'sentinel-2-l1c'),
-        "cop_dem": ("https://stac.terrabyte.lrz.de/public/api/", 'cop-dem-glo-30'),
-        "l_oli": ("https://stac.terrabyte.lrz.de/public/api/", 'landsat-ot-c2-l2'),
+        "cop_dem_glo_30": ("https://stac.terrabyte.lrz.de/public/api/", 'cop-dem-glo-30'),
+        "landsat_ot_c2_l2": ("https://stac.terrabyte.lrz.de/public/api/", 'landsat-ot-c2-l2'),
         "sentinel-1-rtc": ("https://planetarycomputer.microsoft.com/api/stac/v1", 'sentinel-1-rtc')
     }
     
@@ -24,8 +25,8 @@ def get_stac(mission: str, polygon, resolution, daterange: list, bands: list, ma
         resolutions = {
             "sentinel-2-l2a": 10,
             "sentinel-2-l1c": 10,
-            "cop_dem": None,
-            "l_oli": 30,
+            "cop_dem_glo_30": None,
+            "landsat_ot_c2_l2": 30,
             "sentinel-1-rtc": 10
         }
         resolution = resolutions[mission]
@@ -51,10 +52,10 @@ def get_stac(mission: str, polygon, resolution, daterange: list, bands: list, ma
         }
     }
 
-    if mission in ('cop_dem', 'sentinel-1-rtc'):
+    if mission in ('cop_dem_glo_30', 'sentinel-1-rtc'):
         query = None
     
-    items, crs, stac_mission = _catalogue_search(catalog, collection, bbox, daterange, query)
+    items, crs, stac_mission, tiles = _catalogue_search(catalog, collection, bbox, daterange, query, mission)
     
     band_map = _get_band_map(mission)
     if band_map is not None:
@@ -112,11 +113,11 @@ def get_stac(mission: str, polygon, resolution, daterange: list, bands: list, ma
         stac = stac.sel(time=~np.isin(stac.time, duplicate_times))
         baselines = baseline_da_filtered.sel(time=~np.isin(baseline_da_filtered.time, duplicate_times))
                 
-        return stac, baselines
+        return stac, baselines, tiles
     else:
-        return stac, None
+        return stac, None, tiles
 
-def _catalogue_search(catalog, collection, bbox, daterange, query):
+def _catalogue_search(catalog, collection, bbox, daterange, query, mission):
 
     results = catalog.search(
         bbox=bbox,
@@ -135,19 +136,31 @@ def _catalogue_search(catalog, collection, bbox, daterange, query):
         os.environ['AWS_NO_SIGN_REQUEST'] = 'YES'
     
     if len(items) < 1:
-        raise ValueError("No scenes found by the given parameters. Please check your polygon's geometry or increase max cloud coverage.")
+        raise ValueError("No scenes found by the given parameters. Please check your polygon's geometry, date range or increase max cloud coverage.")
        
     sample_item = items[0]
     crs = sample_item.properties.get('proj:code') or sample_item.properties.get('proj:epsg')
     stac_mission = sample_item.to_dict().get("collection")
-    return items, crs, stac_mission
+    # Get Sentinel tile ID
+    if mission in ('sentinel-2-l2a', 'sentinel-2-l1c'):
+        gdf = gpd.GeoDataFrame.from_features(items, "epsg:4326")
+        gdf["granule"] = (
+            gdf["mgrs:utm_zone"].apply(lambda x: f"{x:02d}")
+            + gdf["mgrs:latitude_band"]
+            + gdf["mgrs:grid_square"]
+        )
+        tiles = gdf["granule"].unique()
+    else:
+        tiles = None
+
+    return items, crs, stac_mission, tiles
 
 
 
 def _get_band_map(mission: str):
     
     band_maps = {
-        "l_oli": {
+        "landsat_ot_c2_l2": {
             'coastal': 'B01',
             'blue': 'B02',
             'green': 'B03',

@@ -40,9 +40,9 @@ def _mission_cfg(mission):
     cfg = {
         "sentinel-2-l2a": ('scl', [3, 8, 9, 10], 1e-4, 0),
         "sentinel-2-l1c": (None, None, 1e-4, -1000),
-        "l_oli": ('qa_pixel', [1, 2, 3, 4], 0.0000275, -0.2),
+        "landsat_ot_c2_l2": ('qa_pixel', [1, 2, 3, 4], 0.0000275, -0.2),
         "sentinel-1-rtc": (None, None, 1, 0),
-        "cop_dem": (None, None, 1, 0)
+        "cop_dem_glo_30": (None, None, 1, 0)
     }
 
     return cfg[mission]
