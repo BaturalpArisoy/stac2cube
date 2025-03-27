@@ -60,7 +60,7 @@ $ source ~/.bashrc
     $ micromamba activate stac2cube
 
 #### b) Install stac2cube via PIP or UV
-Ensure you are in the directory containing setup.py and stac2cube env is activated, then choose your installation mode:
+Ensure that stac2cube env is activated.
 
     $ micromamba install pip
 You should be on the folder where `pyproject.toml` is located.
