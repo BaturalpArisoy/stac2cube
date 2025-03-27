@@ -1,0 +1,44 @@
+##########################################################
+
+### How to submit stac2cube features to HPC with SLURM ###
+
+##########################################################
+
+Following instruction is given on 'get_stac_layers' and can be repeated for 'get_cloud_layers' and others that will be added in the future.
+
+1) Update Job Configuration
+
+- Edit '.get_stac_layers/get_stac_layers.json' and save
+- Note that json file annotations are different than python annotations. It's easy to make typo.
+- Therefore, take a look at examples -> './get_stac_layers/examples.txt'
+- You can also find detailed explanations of parameters for the stac2cube features
+- If you are unsure of parameters, example notebooks are highly recommended -> 'stac2cube/interactive/1_get_stac_layers.ipynb'
+
+2) Submit SLURM Job
+
+- If you are using MobaXTerm, middle click `.get_stac_layers/submit.sh`
+- If laptop pad, right click, copy file path to terminal
+- Simply press enter :)
+
+- If not using MobaXTerm but on terminal or Windows PowerShell:
+- Either '$ bash submit.sh' or '$ bash path/to/submit.sh'
+- Or '$ sbatch slurm_setup.cmd'
+
+-----------------------------------------------
+Congratulations, your job is submitted to HPC! 
+-----------------------------------------------
+yeeey!                        good job!                 amazing!
+
+3) Following the Progress
+
+- You can check the progress of xarray computing on './log/ .out'
+- You can check if an error or warning rises on './log/ .err'
+- Don't forget to sort by time for the latest log files! On MobaXTerm; you have to close the editor and reopen it to track the progress.
+- My recommendation is to check the log files on https://portal.terrabyte.lrz.de. Can simply F5 the page to track the progress.
+
+Note 1: If you did a fresh installation, the first time a Slurm job is created, you will receive a first time message from WhiteToolBox on both log files. 
+This is normal and only occurs the first time.
+
+Note 2: If you don't see any newly generated .out and .err files, most likely it means that your SLURM job is waiting on the queue!
+The time passing on the queue depends on both the server status and the access privileges.
+To check if your job is sitting in the queue: 'https://portal.terrabyte.lrz.de -> Jobs -> Active Jobs' and check the status.
