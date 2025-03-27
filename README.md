@@ -1,13 +1,27 @@
 # stac2cube 🛰️🧊<br> Spatio-Temporal Asset Catalogs To Analysis-Ready Data Cubes
-Transform STAC catalogs into Analysis-Ready Data Cubes for Earth Observation (EO) applications.
-
-## Overview
 **stac2cube** converts STAC catalogs into Analysis-Ready Data Cubes for efficient Earth Observation (EO) processing. This tool is designed to work on HPC systems and is optimized for users working on _terrabyte_. We recommend using *MobaXTerm* for accessing the _terrabyte_ login node and editing files.
+
+## Feature Overview
+- **stac2cube.get_stac_layers**
+    - Collects images from STAC catalogs for the selected mission based on users parameters.
+    - Automatically preprocess spectral/radar values based on specifications of the selected mission.
+    - Generates multi-dimensional data cubes, suitable for time-series.
+    - The data cubes can be updated anytime without generating them from the scratch.
+    - Available missions: **Sentinel-2 L2A, Sentinel-2 L1C, Sentinel-1 RTC, Landsat OT C2 L2, COP DEM Glo-30 (single time)**
+- **stac2cube.get_cloud_layers**
+    - Collects images from Sentinel-2 L1C to automatically apply s2cloudless cloud probability algorithm on data cube structure.
+    - The result contains cloud probability maps and user defined binary cloud mask layers.
+    - When selected, clouds from the generated data cube are automatically masked out.
+- **stac2cube.coregister_scenes**
+    - Applies coregistration algorithm on Sentinel-2 data cubes.
+    - AROSICS package provides the coregistration algorithm<br>
+    Daniel Scheffler. (2017, July 3). AROSICS: An Automated and Robust Open-Source Image Co-Registration Software for Multi-Sensor Satellite Data (Version 0.12.1). Zenodo. https://doi.org/10.5281/zenodo.3742909
+    - Fix the global X/Y shift between consecutive Sentinel-2 items.
 
 
 ## Installation:
 
-There are two options for using this repository, depending on your access privileges.
+There are two options for using this package, depending on your access privileges.
 
 ---
 
@@ -27,24 +41,12 @@ $ module load micromamba
 $ micromamba shell init --shell bash --root-prefix=~/micromamba
 $ source ~/.bashrc
 ```
-#### c) Optional: Configure Slurm Setup (Default configuration)
-- Edit `<path/to/stac2cube>/slurm/get_stac_layers/slurm_setup.cmd`
+#### c) Optional: Check Configuration Slurm Setup (Default configuration)
+- Edit `<path/to/stac2cube>/slurm/get_stac_layers/slurm_setup.cmd>`
 - Comment (disable) local package micromamba `micromamba run -n stac2cube python slurm_run.py`
 - Uncomment (enable) shared DSS package micromamba `micromamba run -p /dss/dsstbyfs02/pr94no/pr94no-dss-0001/drylands/envs/stac2cube python slurm_run.py`
 - Do the same for `slurm/get_cloud_layers`
 
-#### d) Update Job Configuration and Submit
-- Edit `slurm/get_stac_layers.json`
-- Edit variables for data collection (take a look at `examples.txt`) and save
-- On MobaXTerm, middle click `submit.sh` and enter
-- If laptop pad, right click, copy file path to terminal and enter
-- On Terminal:<br>
-
-        $ bash submit.sh
-<br>
-
-Congratulations, your job is submitted to HPC! You can check any error or the progress of xarray computing on `slurm/log/ .err & .out`<br>
-Dont forget to sort by time for the latest log files!
 
 
 ### 2. Users who are not member of EORC Uni Wuerzburg or do not have access to EORC DSS container
@@ -57,11 +59,11 @@ Dont forget to sort by time for the latest log files!
     $ source ~/.bashrc
     $ micromamba activate stac2cube
 
-#### b) Install stac2cube via PIP
+#### b) Install stac2cube via PIP or UV
 Ensure you are in the directory containing setup.py and stac2cube env is activated, then choose your installation mode:
 
     $ micromamba install pip
-You should be on the folder where `setup.py` is located.
+You should be on the folder where `pyproject.toml` is located.
 
     $ cd <path_to_stac2cube_parent_folder>
 
@@ -75,28 +77,18 @@ Editable mode (for development):<br>
 
 
 #### c) Configure Slurm Setup
-- Edit `<path/to/stac2cube>/slurm/get_stac_layers/slurm_setup.cmd`
+- Edit `<path/to/stac2cube>/slurm/get_stac_layers/slurm_setup.cmd>`
 - Comment (disable) shared DSS package micromamba `micromamba run -p /dss/dsstbyfs02/pr94no/pr94no-dss-0001/drylands/envs/stac2cube python slurm_run.py`
 - Uncomment (enable) local package micromamba `micromamba run -n stac2cube python slurm_run.py`
 - Do the same for `slurm/get_cloud_layers`
 
-#### d) Update Job Configuration and Submit
-- Edit `slurm/get_stac_layers.json`
-- Edit variables for data collection (`examples.txt` will be updated with further explanations!) and save
-- On MobaXTerm, middle click `submit.sh` and enter. 
-- If laptop pad, right click, copy file path to terminal and enter
-- On Terminal:<br>
-
-        $ bash submit.sh
-<br>
-
-
-Congratulations, your job is submitted to HPC! You can check any error or the progress of xarray computing on `slurm/log/ .err & .out`<br>
-Note: The first time a Slurm job is created, you will receive a warning message about WhiteToolBox on both log files. This is normal and only occurs the first time.<br>
-Dont forget to sort by time for the latest log files!<br>
-
 ---
-<br><br>
+
+## Examples:
+Jupyter notebooks on how to use stac2cube features and how to process data cube structure can be found in the [interactive folder](https://github.com/BaturalpArisoy/stac2cube/tree/main/interactive).
+
+## How to run on HPC (terrabyte users only)
+A documentation file on how to use stac2cube features on terrabyte's HPC for compute-intensive processes and for faster processing time can be found in the [slurm folder](https://github.com/BaturalpArisoy/stac2cube/tree/main/slurm).
 
 ## What's upcoming?:
 - [ ] Sentinel-2 co-registration (Under development)
