@@ -19,7 +19,7 @@
     - Fix the global X/Y shift between consecutive Sentinel-2 items.
 
 
-## Installation:
+## Installation
 
 There are two options for using this package, depending on your access privileges.
 
@@ -84,13 +84,13 @@ Editable mode (for development):<br>
 
 ---
 
-## Examples:
+## Examples
 Jupyter notebooks on how to use stac2cube features and how to process data cube structure can be found in the [interactive folder](https://github.com/BaturalpArisoy/stac2cube/tree/main/interactive).
 
 ## How to run on HPC (terrabyte users only)
 A documentation file on how to use stac2cube features on terrabyte's HPC for compute-intensive processes and for faster processing time can be found in the [slurm folder](https://github.com/BaturalpArisoy/stac2cube/tree/main/slurm).
 
-## What's upcoming?:
+## What's upcoming?
 - [ ] Sentinel-2 co-registration (Under development)
 - [x] Caching mechanism to automatically update the missing scenes
 - [x] More advanced interactive tools for better experience
