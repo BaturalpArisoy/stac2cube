@@ -112,7 +112,10 @@ def get_stac_layers(
         stac.attrs['spectral_bands'] = bands
         stac.attrs['mission'] = mission
         stac.attrs['tile_id'] = tiles
-        bbox = polygon_2_bbox(polygon)
+        if isinstance(polygon, list):
+            bbox = polygon
+        else:
+            bbox = polygon_2_bbox(polygon)
         stac.attrs['bbox'] = bbox
 
     # Calculate stats image (optional)
@@ -238,7 +241,7 @@ def missions():
     }
 
     landsat_ot_c2_l2 = {
-        "name": "landsat-ot-c2-l2",
+        "name": "landsat_ot_c2_l2",
         "allias": "l_oli",
         "stac_catalog": "https://stac.terrabyte.lrz.de/public/api/",
         "default_resolution": 30,
@@ -247,7 +250,7 @@ def missions():
         "topographic_features": False,
         "max_cc": 100,
         "clip_raster": [True, False],
-        "cloud_masking": "path/to/stac.nc",
+        "cloud_masking": [True, False],
         "output": "path/to/output.nc",
         "aggregator": ["mean", "median"],
         "stats": ["mean", "median", "std", "min", "max"],

@@ -12,7 +12,7 @@ import os
 def get_stac(mission: str, polygon, resolution: int, daterange: list, bands: list, max_cc: int, cloud_masking: bool):
 
     catalogues = {
-        "sentinel-2-l2a": ("https://earth-search.aws.element84.com/v1/", 'sentinel-2-l2a'),
+        "sentinel-2-l2a": ("https://earth-search.aws.element84.com/v1/", 'sentinel-2-l2a'), #sentinel-2-c1-l2a for terrabyte
         "sentinel-2-l1c": ("https://earth-search.aws.element84.com/v1/", 'sentinel-2-l1c'),
         "cop_dem_glo_30": ("https://stac.terrabyte.lrz.de/public/api/", 'cop-dem-glo-30'),
         "landsat_ot_c2_l2": ("https://stac.terrabyte.lrz.de/public/api/", 'landsat-ot-c2-l2'),
