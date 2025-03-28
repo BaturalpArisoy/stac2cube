@@ -95,6 +95,7 @@ A documentation file on how to use stac2cube features on terrabyte's HPC for com
 - [x] Caching mechanism to automatically update the missing scenes
 - [x] More advanced interactive tools for better experience
 - [x] Get table of available missions with details and what function instances they can receive
+- [ ] Silent parameter for get_stac_layers that will automatically switch to terrabyte STAC catalogs when run on HPC*
 - [ ] Import bbox list with projected coords: proj to geographic transformation (Under development)
 - [ ] Improvements for get_cloud_layers function for simpler use
 - [ ] Cloud shadow detection and masking
@@ -105,6 +106,46 @@ A documentation file on how to use stac2cube features on terrabyte's HPC for com
 - [ ] Add new spectral indices: EVI, Built-up Index (More upon request!)
 - [ ] Quite mode
 - [ ] Verbose mode
+
+## Access and Licensing Details for STAC Catalogs
+
+### Access to STAC Catalogs
+
+- **Important**: _terrabyte_ STAC catalogs can be only computed when working on a _terrabyte_ environment.<br>
+- However, this package is designed to work on both local-machine without _terrabyte_ connection and within _terrabyte_ HPC environment.<br>
+- Therefore, a silent parameter will enable _terrabyte_ STAC catalogs when a SLURM job is activated.<br>
+- The default set-up (_terrabyte_ disabled) will feature STAC catalogs that provide "open-access data" (**not** open-source).<br>
+- Thus, note that stac2cube package **can not** guarantee unlimited access to these open-access data catalogs in the future!
+
+### STAC Catalog Licenses
+
+| Provider   | Service           | STAC API                                        | License                                                                                      | Open-Access | Open-Source |
+|------------|-------------------|-------------------------------------------------|----------------------------------------------------------------------------------------------|-------------|-------------|
+| DLR        | terrabyte         | https://stac.terrabyte.lrz.de/public/api/       | MIT License Copyright (c) 2024 Deutsches Zentrum für Luft- und Raumfahrt e.V.                | No          | No          |
+| Element 84 | Earth Search      | https://earth-search.aws.element84.com/v1/      | Apache License 2.0                                                                           | Yes         | Yes         |
+| Microsoft  | Planetary Computer| https://planetarycomputer.microsoft.com/api/    | MIT License Copyright (c) Microsoft Corporation.                                             | Yes         | No          |
+
+### Why use terrabyte then?
+
+Why do _terraybte_ users collect data from _terrabyte_ STAC catalog instead of  open-source Earth Search?
+
+- The data by Element 84 is stored in AWS S3 services. 
+- The data by DLR is stored in the servers of The Leibniz Supercomputing Centre (LRZ) in Garching/Munich.
+- When working on a _terrabyte_ environment, the data query is returned from same server instead of connecting to AWS. <br><br>
+
+#### **Example**: Query for Sentinel-2 L2A: daterange: ["2017-01-01", "2025-03-28"]; polygon: Nord Hubland/Würzburg/Germany<br>
+
+| Service          | Returned Date  | Processing Time (s)|
+|------------------|----------------|--------------------|
+|terrabyte         | 1134           | 24.0               |
+|Earth Search      | 1038           | 140.5              |
+|Planetary Computer| 1133           | 12.2               |
+
+- Indicates* that queries are faster when working on a _terrabyte_ environment.
+- Most importantly, this indicates that Earth Search archive has some missing scenes.
+- Also Earth Search STAC definitions are sometimes faulty (especially Sentinel-2 L1C) and as a developer of this package, I prefer working with _terrabyte_ API.
+
+\* This is not a full benchmark test. Querries are requested 5 times per each service and the mean time is calculated.
 
 ## How to cite:
 paper to be published <3
