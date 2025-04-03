@@ -1,6 +1,6 @@
 from .get_data import get_stac
 from .vector_refiner import proj_check, polygon_2_bbox
-from .stac_processing import scale_factor
+from .stac_processing import scale_factor, cloud_mask
 from .get_spectral_indices import calculate_spectral_index
 from .export_cfg import export_stac
 from .get_topo import calculate_topo
@@ -12,6 +12,7 @@ from .get_update import get_stac_parameters, update_stac
 import xarray as xr
 import rioxarray as rio
 import pandas as pd
+import numpy as np
 
 def get_stac_layers(
     mission = None,
@@ -30,13 +31,13 @@ def get_stac_layers(
     animation = None,
     update = None):
     
-    # Rename short names
+    # Reassign short names
     if mission == "s2":
-        mission = "sentinel-2-l2a"
+        mission = "sentinel_2_l2a"
     if mission == "s2_l1c":
-        mission = "sentinel-2-l1c"
+        mission = "sentinel_2_l1c"
     if mission == "s1":
-        mission = "sentinel-1-rtc"
+        mission = "sentinel_1_rtc"
     if mission == "l_oli":
         mission = "landsat_ot_c2_l2"
     if mission == "cop_dem":
@@ -57,6 +58,7 @@ def get_stac_layers(
         if not polygon:
             raise ValueError("Error: Please select a polygon or bbox list with geographic coordinates.")
 
+    # If projected coords are given, will transform to WGS84 coords
     #if not isinstance(polygon, list):
     #    polygon = proj_check(polygon)
 
@@ -65,8 +67,8 @@ def get_stac_layers(
     transform = stac.rio.transform()
     
     # Cloud masking
-#    if cloud_masking is True:
-#        stac = cloud_mask(stac, mission)
+    if cloud_masking is True:
+        stac = cloud_mask(stac, mission)
 
     # Scale factor
     stac = scale_factor(stac, mission, baselines)
@@ -111,7 +113,9 @@ def get_stac_layers(
     if not update:
         stac.attrs['spectral_bands'] = bands
         stac.attrs['mission'] = mission
-        stac.attrs['tile_id'] = tiles
+        if mission in ('sentinel_2_l2a', 'sentinel_2_l1c'):
+            tile_list = np.array(tiles, dtype='U10').tolist()
+            stac.attrs['tile_id'] = tile_list
         if isinstance(polygon, list):
             bbox = polygon
         else:
@@ -144,7 +148,7 @@ def get_stac_layers(
     if not output:
         stac.rio.write_crs(crs, inplace=True)
         stac.rio.write_transform(transform, inplace=True)
-        #if mission == "sentinel-2-l1c":
+        #if mission == "sentinel_2_l1c":
          #   stac.attrs['crs'] = crs
           #  stac.attrs['transform'] = transform
         stac.attrs['crs'] = crs
@@ -187,7 +191,7 @@ def missions():
     df = pd.DataFrame(columns=columns)
     
     sentinel_2_l2a = {
-        "name": "sentinel-2-l2a",
+        "name": "sentinel_2_l2a",
         "allias": "s2",
         "stac_catalog": "https://earth-search.aws.element84.com/v1/",
         "default_resolution": 10,
@@ -237,7 +241,7 @@ def missions():
         "aggregator": ["mean", "median"],
         "stats": ["mean", "median", "std", "min", "max"],
         "update": "path/to/stac.nc",
-        "animation": [True, False]
+        "animation": False
     }
 
     landsat_ot_c2_l2 = {

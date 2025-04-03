@@ -12,22 +12,22 @@ import os
 def get_stac(mission: str, polygon, resolution: int, daterange: list, bands: list, max_cc: int, cloud_masking: bool):
 
     catalogues = {
-        "sentinel-2-l2a": ("https://earth-search.aws.element84.com/v1/", 'sentinel-2-l2a'), #sentinel-2-c1-l2a for terrabyte
-        "sentinel-2-l1c": ("https://earth-search.aws.element84.com/v1/", 'sentinel-2-l1c'),
+        "sentinel_2_l2a": ("https://earth-search.aws.element84.com/v1/", 'sentinel-2-l2a'), #sentinel-2-c1-l2a for terrabyte
+        "sentinel_2_l1c": ("https://earth-search.aws.element84.com/v1/", 'sentinel-2-l1c'),
         "cop_dem_glo_30": ("https://stac.terrabyte.lrz.de/public/api/", 'cop-dem-glo-30'),
         "landsat_ot_c2_l2": ("https://stac.terrabyte.lrz.de/public/api/", 'landsat-ot-c2-l2'),
-        "sentinel-1-rtc": ("https://planetarycomputer.microsoft.com/api/stac/v1", 'sentinel-1-rtc')
+        "sentinel_1_rtc": ("https://planetarycomputer.microsoft.com/api/stac/v1", 'sentinel-1-rtc') # terrabytes sentinel-1-grd does not provide crs metadata, have to write a code that detects the crs by bbox coordinates
     }
     
     if resolution is not None:     
         resolution = resolution   
     else: 
         resolutions = {
-            "sentinel-2-l2a": 10,
-            "sentinel-2-l1c": 10,
+            "sentinel_2_l2a": 10,
+            "sentinel_2_l1c": 10,
             "cop_dem_glo_30": None,
             "landsat_ot_c2_l2": 30,
-            "sentinel-1-rtc": 10
+            "sentinel_1_rtc": 10
         }
         resolution = resolutions[mission]
 
@@ -38,7 +38,7 @@ def get_stac(mission: str, polygon, resolution: int, daterange: list, bands: lis
 
     url, collection = catalogues[mission]
 
-    if mission == 'sentinel-1-rtc':
+    if mission == 'sentinel_1_rtc':
         catalog = pystacclient.open(url,
             modifier=planetary_computer.sign_inplace,
         )
@@ -52,7 +52,7 @@ def get_stac(mission: str, polygon, resolution: int, daterange: list, bands: lis
         }
     }
 
-    if mission in ('cop_dem_glo_30', 'sentinel-1-rtc'):
+    if mission in ('cop_dem_glo_30', 'sentinel_1_rtc'):
         query = None
     
     items, crs, stac_mission, tiles = _catalogue_search(catalog, collection, bbox, daterange, query, mission)
@@ -62,11 +62,11 @@ def get_stac(mission: str, polygon, resolution: int, daterange: list, bands: lis
         bands = [band_map.get(band, band) for band in bands]
 
     if cloud_masking is True:
-        if mission == "sentinel-2-l2a":
+        if mission == "sentinel_2_l2a":
             bands.append('scl')
 
-    # Pre-filter duplicate items for sentinel-2-l1c based on processing baseline
-    if mission == "sentinel-2-l1c":
+    # Pre-filter duplicate items for sentinel_2_l1c based on processing baseline
+    if mission == "sentinel_2_l1c":
         from collections import defaultdict
         grouped = defaultdict(list)
         for item in items:
@@ -97,7 +97,7 @@ def get_stac(mission: str, polygon, resolution: int, daterange: list, bands: lis
             rename_dict = {band: reverse_band_map.get(band, band) for band in stac.data_vars if band in reverse_band_map}
             stac = stac.rename(rename_dict)
             
-    if mission == "sentinel-2-l1c":
+    if mission == "sentinel_2_l1c":
         date_list = [item.properties['datetime'] for item in items]
         processing_baseline_list = [item.properties["s2:processing_baseline"] for item in items]
         dates = pd.to_datetime(date_list, format='mixed').to_numpy(dtype='datetime64[ns]')
@@ -115,6 +115,19 @@ def get_stac(mission: str, polygon, resolution: int, daterange: list, bands: lis
                 
         return stac, baselines, tiles
     else:
+        if mission == "sentinel_1_rtc":
+            from datetime import datetime
+            orbit_state_by_day = {}
+            for item in items:
+                item_date = datetime.fromisoformat(item.properties["datetime"]).date()
+                if item_date not in orbit_state_by_day:
+                    orbit_state_by_day[item_date] = item.properties["sat:orbit_state"]
+            solar_days_in_stac = [pd.Timestamp(t).date() for t in stac.time.values]
+            aligned_orbit_states = [orbit_state_by_day.get(day, None) for day in solar_days_in_stac]
+            if None in aligned_orbit_states:
+                print("Warning: Some dates in the stac dataset did not have a matching orbit state.")
+            stac = stac.assign_coords(orbit_state=("time", aligned_orbit_states))
+        
         return stac, None, tiles
 
 def _catalogue_search(catalog, collection, bbox, daterange, query, mission):
@@ -128,7 +141,7 @@ def _catalogue_search(catalog, collection, bbox, daterange, query, mission):
     
     items = results.item_collection()
     
-    if collection == 'sentinel-2-l1c':
+    if mission == 'sentinel_2_l1c':
         for item in items:
             for asset in item.assets.values():
                 asset.href = asset.href.replace('sentinel-s2-l2a', 'sentinel-s2-l1c')
@@ -142,7 +155,7 @@ def _catalogue_search(catalog, collection, bbox, daterange, query, mission):
     crs = sample_item.properties.get('proj:code') or sample_item.properties.get('proj:epsg')
     stac_mission = sample_item.to_dict().get("collection")
     # Get Sentinel tile ID
-    if mission in ('sentinel-2-l2a', 'sentinel-2-l1c'):
+    if mission in ('sentinel_2_l2a', 'sentinel_2_l1c'):
         gdf = gpd.GeoDataFrame.from_features(items, "epsg:4326")
         gdf["granule"] = (
             gdf["mgrs:utm_zone"].apply(lambda x: f"{x:02d}")

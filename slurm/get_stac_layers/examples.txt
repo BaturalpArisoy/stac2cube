@@ -180,8 +180,7 @@ Therefore, it's recommended to not activate this function is long daterange is s
     "bands": ["vh", "vv"],
     "indices": ["vh/vv", "vv/vh", "rvi"],
     "output": "/dss/dsstbyfs02/pr94no/pr94no-dss-0001/drylands/results/test.nc",
-    "aggregator": null,
-    "animation": false
+    "aggregator": null
   }
 }
 

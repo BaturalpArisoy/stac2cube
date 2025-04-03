@@ -12,7 +12,7 @@
     - Collects images from Sentinel-2 L1C to automatically apply s2cloudless cloud probability algorithm on data cube structure.
     - The result contains cloud probability maps and user defined binary cloud mask layers.
     - When selected, clouds from the generated data cube are automatically masked out.
-- **stac2cube.coregister_scenes**
+- **stac2cube.coregister_scenes (still under-development)**
     - Applies coregistration algorithm on Sentinel-2 data cubes.
     - AROSICS package provides the coregistration algorithm<br>
     Daniel Scheffler. (2017, July 3). AROSICS: An Automated and Robust Open-Source Image Co-Registration Software for Multi-Sensor Satellite Data (Version 0.12.1). Zenodo. https://doi.org/10.5281/zenodo.3742909
@@ -91,19 +91,18 @@ Jupyter notebooks on how to use stac2cube features and how to process data cube 
 A documentation file on how to use stac2cube features on terrabyte's HPC for compute-intensive processes and for faster processing time can be found in the [slurm folder](https://github.com/BaturalpArisoy/stac2cube/tree/main/slurm).
 
 ## What's upcoming?
-- [ ] Sentinel-2 co-registration (Under development)
+- [ ] Sentinel-2 co-registration (Under development-almost done)
 - [x] Caching mechanism to automatically update the missing scenes
 - [x] More advanced interactive tools for better experience
-- [x] Get table of available missions with details and what function instances they can receive
-- [ ] Silent parameter for get_stac_layers that will automatically switch to terrabyte STAC catalogs when run on HPC*
-- [ ] Import bbox list with projected coords: proj to geographic transformation (Under development)
-- [ ] Improvements for get_cloud_layers function for simpler use
-- [ ] Cloud shadow detection and masking
-- [ ] Cleaner way to work with CRS information of data arrays (Under development)
-- [ ] Native cloud masking for Landsat and Sentinel-2 scenes (Under development)
-- [ ] Orbit mode selection for Sentinel-1: Ascending/Descending
-- [x] Switch python package setup from setup.py to pyproject.toml: enables uv install besides pip 
+- [x] Sentinel-1: Orbit-state selection: Ascending/Descending
+- [ ] Sentinel-1: Automatic preprocessing, e.g. SNAP tools.
 - [ ] Add new spectral indices: EVI, Built-up Index (More upon request!)
+- [ ] Silent parameter for get_stac_layers that will automatically switch to terrabyte STAC catalogs when run on HPC
+- [ ] Import bbox list with projected coords: proj to geographic transformation (Under development)
+- [ ] Improvements for get_cloud_layers function: mask calculation function, mask l2a data directly
+- [ ] Cloud shadow detection and masking for Sentinel-2
+- [x] Native cloud masking for Landsat and Sentinel-2 scenes (Under development)
+- [x] Switch python package setup from setup.py to pyproject.toml: enables uv install besides pip 
 - [ ] Quite mode
 - [ ] Verbose mode
 
@@ -112,7 +111,7 @@ A documentation file on how to use stac2cube features on terrabyte's HPC for com
 ### Access to STAC Catalogs
 
 - **Important**: _terrabyte_ STAC catalogs can be only computed when working on a _terrabyte_ environment.<br>
-- However, this package is designed to work on both local-machine without _terrabyte_ connection and within _terrabyte_ HPC environment.<br>
+- However, stac2cube package is designed to work on both local-machine without _terrabyte_ connection and within _terrabyte_ HPC environment.<br>
 - Therefore, a silent parameter will enable _terrabyte_ STAC catalogs when a SLURM job is activated.<br>
 - The default set-up (_terrabyte_ disabled) will feature STAC catalogs that provide "open-access data" (**not** open-source).<br>
 - Thus, note that stac2cube package **can not** guarantee unlimited access to these open-access data catalogs in the future!
@@ -133,7 +132,9 @@ Why do _terraybte_ users collect data from _terrabyte_ STAC catalog instead of  
 - The data by DLR is stored in the servers of The Leibniz Supercomputing Centre (LRZ) in Garching/Munich.
 - When working on a _terrabyte_ environment, the data query is returned from same server instead of connecting to AWS. <br><br>
 
-#### **Example**: Query for Sentinel-2 L2A: daterange: ["2017-01-01", "2025-03-28"]; polygon: Nord Hubland/Würzburg/Germany<br>
+#### **Example**: Query for Sentinel-2 L2A: 
+- daterange: ["2017-01-01", "2025-03-28"]
+- polygon: Nord Hubland/Würzburg/Germany<br>
 
 | Service          | Returned Date  | Processing Time (s)|
 |------------------|----------------|--------------------|
@@ -145,7 +146,7 @@ Why do _terraybte_ users collect data from _terrabyte_ STAC catalog instead of  
 - Most importantly, this indicates that Earth Search archive has some missing scenes.
 - Also Earth Search STAC definitions are sometimes faulty (especially Sentinel-2 L1C) and as a developer of this package, I prefer working with _terrabyte_ API.
 
-\* This is not a full benchmark test. Querries are requested 5 times per each service and the mean time is calculated.
+\* Queries are iterated 10 times per each service and the average time per run is calculated (timeit module).
 
 ## How to cite:
 paper to be published <3
