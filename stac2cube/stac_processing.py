@@ -1,7 +1,7 @@
 import numpy as np
 import xarray as xr
 
-'''
+
 def cloud_mask(stac, mission):
 
     cfg = _mission_cfg(mission)
@@ -15,11 +15,11 @@ def cloud_mask(stac, mission):
     stac_masked = stac_masked.drop_vars(layer_name)
 
     return stac_masked
-'''
+
 
 def scale_factor(stac, mission, baselines):
 
-    if mission == "sentinel-2-l1c":
+    if mission == "sentinel_2_l1c":
         baselines = baselines.astype(float)
         baselines_aligned = baselines.sel(time=stac.time)
         
@@ -38,10 +38,10 @@ def _mission_cfg(mission):
 
     # relevant band (cloud), classifications (cloud), gain (scale), offset (scale) 
     cfg = {
-        "sentinel-2-l2a": ('scl', [3, 8, 9, 10], 1e-4, 0),
-        "sentinel-2-l1c": (None, None, 1e-4, -1000),
+        "sentinel_2_l2a": ('scl', [8, 9, 10], 1e-4, 0), #scl 3 is cloud shadows
+        "sentinel_2_l1c": (None, None, 1e-4, -1000),
         "landsat_ot_c2_l2": ('qa_pixel', [1, 2, 3, 4], 0.0000275, -0.2),
-        "sentinel-1-rtc": (None, None, 1, 0),
+        "sentinel_1_rtc": (None, None, 1, 0),
         "cop_dem_glo_30": (None, None, 1, 0)
     }
 

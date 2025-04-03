@@ -2,7 +2,7 @@ import xarray as xr
 
 def calculate_spectral_index(stac, mission, indices):
 
-    if mission == 'sentinel-1-rtc':
+    if mission == 'sentinel_1_rtc':
         vh = stac.vh
         vv = stac.vv
     else:
