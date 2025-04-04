@@ -98,6 +98,7 @@ A documentation file on how to use stac2cube features on terrabyte's HPC for com
 - [x] Sentinel-1: Orbit-state selection: Ascending/Descending
 - [ ] Sentinel-1: Automatic preprocessing, e.g. SNAP tools.
 - [ ] Add new spectral indices: EVI, Built-up Index (More upon request!)
+- [ ] Add SLURM job array to submit multiple json files at once
 - [ ] Silent parameter for get_stac_layers that will automatically switch to terrabyte STAC catalogs when run on HPC
 - [ ] Import bbox list with projected coords: proj to geographic transformation (Under development)
 - [ ] Improvements for get_cloud_layers function: mask calculation function, mask l2a data directly

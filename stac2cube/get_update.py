@@ -38,6 +38,9 @@ def get_stac_parameters(stac_existing):
     spectral_bands = stac_existing.spectral_bands
     # Indices
     indices = stac_existing.indices
+    #Daterange
+    daterange = [min(stac_existing.time.values), max(stac_existing.time.values)]
+    daterange = [np.datetime_as_string(dt, unit='D') for dt in daterange]
 
 
     stac_parameters = {
@@ -45,7 +48,8 @@ def get_stac_parameters(stac_existing):
         "resolution": resolution,
         "polygon": bbox,
         "spectral_bands": spectral_bands,
-        "indices": indices
+        "indices": indices,
+        "daterange": daterange
     }
 
     return stac_parameters
