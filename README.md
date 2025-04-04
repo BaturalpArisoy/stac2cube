@@ -92,6 +92,7 @@ A documentation file on how to use stac2cube features on terrabyte's HPC for com
 
 ## What's upcoming?
 - [ ] Sentinel-2 co-registration (Under development-almost done)
+- [ ] Merge Landsat TM and OLI missions.
 - [x] Caching mechanism to automatically update the missing scenes
 - [x] More advanced interactive tools for better experience
 - [x] Sentinel-1: Orbit-state selection: Ascending/Descending
