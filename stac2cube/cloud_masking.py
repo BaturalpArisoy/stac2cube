@@ -224,6 +224,7 @@ def mask_from_probability(cloud_probability, threshold=0.7, average_over=4, dila
 '''
 
 from .main import get_stac_layers
+from .get_update import get_stac_parameters
 from s2cloudless import S2PixelCloudDetector
 import numpy as np
 import xarray as xr
@@ -237,7 +238,7 @@ from rasterio.errors import NotGeoreferencedWarning
 warnings.filterwarnings("ignore", category=NotGeoreferencedWarning)
 
 
-def get_cloud_layers(polygon, daterange, output, threshold=None, clip_raster=None, masking=None):
+def get_cloud_layers(polygon=None, daterange=None, output=None, threshold=None, clip_raster=None, masking=None):
     """
     Retrieves Sentinel-2 imagery using STAC, computes cloud probabilities for each time slice,
     and (optionally) computes cloud masks based on the provided threshold(s). If no threshold is provided,
@@ -257,6 +258,17 @@ def get_cloud_layers(polygon, daterange, output, threshold=None, clip_raster=Non
     Returns:
         Exported product (via export_stac).
     """
+
+    if masking:
+        stac_parameters = get_stac_parameters(masking)
+        polygon = stac_parameters["polygon"]
+        daterange = stac_parameters["daterange"]
+    else:
+        if not daterange:
+            raise ValueError("Error: Please select a daterange.")
+        if not polygon:
+            raise ValueError("Error: Please select a polygon or bbox list with geographic coordinates.")
+
     # --- STAC Retrieval ---
     # Default maximum cloud cover and mission configuration.
     max_cc = 100
@@ -338,9 +350,10 @@ def get_cloud_layers(polygon, daterange, output, threshold=None, clip_raster=Non
     if masking:
         dirname, filename = os.path.split(masking)
         name, ext = os.path.splitext(filename)
-        output_filename = f"{name}_masked{ext}"
+        output_filename = f"{name}_masked{str(threshold)}{ext}"
         output_mask = os.path.join(dirname, output_filename)
-        img = mask_stac_clouds(masking, cloud_only_stack, output_mask)
+        mask_layer = f"cloud_mask_{str(threshold)}"
+        img = mask_stac_clouds(masking, cloud_only_stack, mask_layer, output_mask)
 
     return img
 
