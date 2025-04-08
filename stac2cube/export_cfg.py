@@ -27,8 +27,8 @@ def export_stac(stac, output, crs, transform):
 
     # Unfortunately, no access to overwite netcdf files if netcdf is read as dataset. For now, it deletes the previous one and export the new one.
     # .close() does not work.
-    # This technic is sadly not optimal because in case of a processing error during exporting, the previous netcdf file will be already deleted.
-    # Look for alternative!
+    # This approach is sadly not optimal because in case of a processing error during exporting, the previous netcdf file will be already deleted.
+    # Look for an alternative!
     if os.path.exists(output):
         os.remove(output)
 
