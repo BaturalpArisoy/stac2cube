@@ -58,7 +58,7 @@ def get_cloud_layers(polygon=None, daterange=None, output=None, threshold=None, 
 
     # Retrieve the lazy STAC DataArray.
     stac = get_stac_layers(mission=mission, polygon=polygon, daterange=daterange,
-                           bands=bands, max_cc=max_cc, clip_raster=clip_raster)
+                           bands=bands, max_cc=max_cc, clip_raster=clip_raster, q=True)
     crs = stac.crs
     transform = stac.transform
     bbox = stac.bbox
