@@ -13,40 +13,30 @@ def get_stac_parameters(stac_existing):
             stac_existing = stac_existing.Spectral_Temporal_Stack
         elif "Cloud_Stack" in list(stac_existing.data_vars):
             stac_existing = stac_existing.Cloud_Stack
-    #if isinstance(stac_existing, xr.Dataset):
-     #   stac_existing = stac_existing.Spectral_Temporal_Stack
     
-    # Mission
-    mission = stac_existing.mission
-    # Resolution
-    if stac_existing.name == 'Cloud_Stack':
-        resolution = 10
-    else:
-        resolution = abs(stac_existing.y.resolution).item()
     # Polygon
     bbox = stac_existing.bbox
     bbox = bbox.tolist()
-    # Get projected coordinates, slightly different polygon. Deactivated for now.
-    '''
-    x_min = stac_existing.coords["x"].min().item()
-    x_max = stac_existing.coords["x"].max().item()
-    y_min = stac_existing.coords["y"].min().item()
-    y_max = stac_existing.coords["y"].max().item()
-    bbox = [x_min, y_min, x_max, y_max]
-    print(bbox)
-    proj_str = stac_existing.crs
-    crs_obj = pyproj.CRS.from_string(proj_str)
-    source_epsg = crs_obj.to_epsg()
-    bbox = proj_2_geo(polygon=bbox, source_epsg=source_epsg)
-    '''
-    # Spectral bands
-    spectral_bands = stac_existing.spectral_bands
-    # Indices
-    indices = stac_existing.indices
     #Daterange
     daterange = [min(stac_existing.time.values), max(stac_existing.time.values)]
     daterange = [np.datetime_as_string(dt, unit='D') for dt in daterange]
 
+    if stac_existing.name == 'Cloud_Stack':
+        mission = 'sentinel_2_l1c'
+        spectral_bands = ['coastal', 'blue', 'red', 'rededge1', 'nir',
+             'nir08', 'nir09', 'cirrus', 'swir16', 'swir22']
+        indices = []
+        resolution = 10
+    else:
+        # Mission
+        mission = stac_existing.mission
+        # Resolution
+        resolution = abs(stac_existing.y.resolution).item()
+        # Spectral bands
+        spectral_bands = stac_existing.spectral_bands
+        # Indices
+        indices = stac_existing.indices
+    
     stac_parameters = {
         "mission": mission,
         "resolution": resolution,
