@@ -29,7 +29,8 @@ def get_stac_layers(
     stats = None,
     topographic_features = None,
     animation = None,
-    update = None):
+    update = None,
+    q = None):
     
     # Reassign short names
     if mission == "s2":
@@ -126,9 +127,10 @@ def get_stac_layers(
 
     # Calculate stats image (optional)
     if aggregator:
-        print(f"stac before {aggregator}:")
-        print(stac)
-        print("\n-------------------------------------")
+        if not q:
+            print(f"stac before {aggregator}:")
+            print(stac)
+            print("\n-------------------------------------")
         if aggregator == 'mean':
             stac = stac.mean(dim='time', skipna=True) 
         elif aggregator == 'median':
@@ -155,17 +157,21 @@ def get_stac_layers(
           #  stac.attrs['transform'] = transform
         stac.attrs['crs'] = crs
         stac.attrs['transform'] = transform
-        print(stac, flush=True)
+        if not q:
+            print(stac, flush=True)
         return stac # returns lazy
     else:
         if update:
             stac = update_stac(stac_existing=update, stac_updated=stac)
-        print(stac)
+        if not q:
+            print(stac)
         if mission != 'cop_dem_glo_30':
             if not aggregator:
-                print(stac.time.values)
+                if not q:
+                    print(stac.time.values)
                 if stats:
                     stac = calculate_statistics(stac, stats)
-        print(stac.band.values)
+        if not q:
+            print(stac.band.values)
         img = export_stac(stac, output, crs, transform)
         return img

@@ -60,19 +60,6 @@ def update_stac(stac_existing, stac_updated):
     
     stac_missing, missing_times = find_missing_times(stac_existing, stac_updated)
 
-    # Compare the time coordinates to determine missing dates
-    #existing_times = set(stac_existing.time.values)
-    #updating_times = set(stac_updated.time.values)
-
-    # Identify the missing times (i.e., dates present in the lazy array but not in the computed one)
-    #missing_times = sorted(list(updating_times - existing_times))
-
-    # Select only the missing dates from the lazy array
-    #stac_missing = stac_updated.sel(time=missing_times)
-
-    #num_added = len(missing_times)
-    #print(f"{num_added} new date{'s' if num_added != 1 else ''} found!")
-
     # Compute the missing slices (only these will be computed now)
     computed_missing = stac_missing.compute()
 
@@ -92,8 +79,6 @@ def update_stac(stac_existing, stac_updated):
         formatted_date = np.datetime_as_string(dt, unit='D')
         print(f" - {formatted_date}")
     print("-------------------------")
-    print("\nUpdated STAC DataArray summary:")
-    #print(updated)
 
     return updated
 
