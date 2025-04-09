@@ -42,6 +42,7 @@ def get_cloud_layers(polygon=None, daterange=None, output=None, threshold=None, 
     if update:
         stac_parameters = get_stac_parameters(update)
         polygon = stac_parameters["polygon"]
+        output = update
     else:
         if not daterange:
             raise ValueError("Error: Please select a daterange.")
@@ -64,7 +65,10 @@ def get_cloud_layers(polygon=None, daterange=None, output=None, threshold=None, 
 
     if update:
         stac_existing = xr.open_dataset(update)
-        stac = find_missing_times(stac_existing, stac)[0]
+        stac_existing = stac_existing.Cloud_Stack
+        stac, missing_times = find_missing_times(stac_existing, stac)
+        if not missing_times:
+            raise ValueError("The probability map is up to date. Nothing to update!")
 
     # --- Cloud Probability Calculation ---
     # Set the parameters for the cloud detector.
@@ -102,9 +106,15 @@ def get_cloud_layers(polygon=None, daterange=None, output=None, threshold=None, 
                          coords={"time": times, "y": stac.y, "x": stac.x})
     cp_da = cp_da.expand_dims(dim={"band": ["cloud_prob"]})
 
-    # add if update concat here
-
     cp_da.name = "Cloud_Stack"
+
+    
+    def update_prob_maps(stac_existing, cloud_only_stack):
+        stac_existing = stac_existing.sel(band="cloud_prob")
+        stac_existing = stac_existing.expand_dims(dim={"band": 1})
+        cloud_only_stack = xr.concat([stac_existing, cloud_only_stack], dim="time")
+        cloud_only_stack = cloud_only_stack.sortby("time")
+        return cloud_only_stack
 
     # --- Determine Output Based on 'threshold' Parameter ---
     # If no threshold(s) are provided, return only the probability layer.
@@ -113,28 +123,41 @@ def get_cloud_layers(polygon=None, daterange=None, output=None, threshold=None, 
         cloud_prob_uint8 = (cp_da.sel(band="cloud_prob") * 100).astype(np.uint8)
         cloud_only_stack = cloud_prob_uint8.expand_dims(dim="band")
         cloud_only_stack = cloud_only_stack.assign_coords(band=["cloud_prob"])
+        
+        if update:
+            cloud_only_stack = update_prob_maps(stac_existing, cloud_only_stack)
+        
         cloud_only_stack = cloud_only_stack.transpose("time", "band", "y", "x")
+
+
+
     else:
-        # If threshold(s) are provided, compute the cloud masks using mask_from_probability.
-        # This function supports either a single threshold or a list of thresholds.
-        mask_da = mask_from_probability(cp_da.sel(band="cloud_prob"),
-                                        threshold=threshold,
-                                        average_over=average_over,
-                                        dilation_size=dilation_size)
         # Also convert cloud probability to uint8.
         cloud_prob_uint8 = (cp_da.sel(band="cloud_prob") * 100).astype(np.uint8)
         cloud_prob_uint8 = cloud_prob_uint8.expand_dims(dim="band")
-        cloud_prob_uint8 = cloud_prob_uint8.assign_coords(band=["cloud_prob"])
+        cloud_only_stack = cloud_prob_uint8.assign_coords(band=["cloud_prob"])
+
+        if update:
+            cloud_only_stack = update_prob_maps(stac_existing, cloud_only_stack)
+
+        # If threshold(s) are provided, compute the cloud masks using mask_from_probability.
+        # This function supports either a single threshold or a list of thresholds.
+        mask_da = mask_from_probability(cloud_only_stack.sel(band="cloud_prob"),
+                                        threshold=threshold,
+                                        average_over=average_over,
+                                        dilation_size=dilation_size)
+        
 
         # Concatenate the probability layer with the generated mask(s) along the band dimension.
-        cloud_only_stack = xr.concat([cloud_prob_uint8, mask_da], dim="band")
+        cloud_only_stack = xr.concat([cloud_only_stack, mask_da], dim="band")
         cloud_only_stack = cloud_only_stack.transpose("time", "band", "y", "x")
 
     # Add data array attributes
-    cloud_only_stack.attrs['bbox'] = bbox
-    cloud_only_stack.attrs['mission'] = mission
-    cloud_only_stack.attrs['spectral_bands'] = bands
-    cloud_only_stack.attrs['indices'] = []
+    if not update:
+        cloud_only_stack.attrs['bbox'] = bbox
+        #cloud_only_stack.attrs['mission'] = mission
+        #cloud_only_stack.attrs['spectral_bands'] = bands
+        #cloud_only_stack.attrs['indices'] = []
     
     # --- Export and Optional Masking ---
     # Export the resulting stack.
