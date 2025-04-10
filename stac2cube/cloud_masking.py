@@ -14,7 +14,7 @@ from rasterio.errors import NotGeoreferencedWarning
 warnings.filterwarnings("ignore", category=NotGeoreferencedWarning)
 
 
-def get_cloud_layers(polygon=None, daterange=None, output=None, threshold=None, clip_raster=None, masking=None, update=None):
+def get_cloud_layers(polygon=None, daterange=None, output=None, threshold=None, clip_raster=None, masking=None, update=None, slurm_timer=None):
     """
     Retrieves Sentinel-2 imagery using STAC, computes cloud probabilities for each time slice,
     and (optionally) computes cloud masks based on the provided threshold(s). If no threshold is provided,
@@ -83,6 +83,11 @@ def get_cloud_layers(polygon=None, daterange=None, output=None, threshold=None, 
     times = []  # To store the time coordinate for each processed slice
     total = len(stac.time)
 
+    if slurm_timer:
+        import time
+        slurm_timer = slurm_timer * 3600
+        start_time = time.time()
+
     for i, t in enumerate(stac.time.values, start=1):
         # Retrieve and compute the current time slice.
         img = stac.sel(time=t).compute()
@@ -99,6 +104,16 @@ def get_cloud_layers(polygon=None, daterange=None, output=None, threshold=None, 
 
         print(f"Processed time slice: {i}/{total} (time: {t})", flush=True)
         del img, img_transposed, img_np
+
+        if slurm_timer:
+            # Calculate the elapsed time
+            elapsed = time.time() - start_time
+            hours, rem = divmod(elapsed, 3600)
+            minutes, seconds = divmod(rem, 60)
+            # Check if the elapsed time has reached or exceeded the threshold
+            if elapsed >= slurm_timer:
+                print("Time threshold reached! Exiting loop and exporting the collected cloud maps...")
+                break
 
     # Assemble the cloud probability DataArray.
     cp_stack = np.stack(cloud_prob_results, axis=0)  # shape: (time, y, x)
