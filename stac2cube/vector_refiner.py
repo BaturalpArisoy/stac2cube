@@ -8,7 +8,7 @@ def polygon_2_gdf(polygon) -> gpd.GeoDataFrame:
     Reads a polygon file and returns a processed GeoDataFrame containing only the first geometry,
     reprojected to WGS84.
     """
-    gdf = _read_polygon_file(polygon)
+    gdf = read_polygon_file(polygon)
     if gdf is None:
         return None
     return _process_gdf(gdf)
@@ -53,7 +53,7 @@ def proj_check(polygon):
         polygon = proj_2_geo(polygon)
     return polygon
 
-def _read_polygon_file(polygon) -> gpd.GeoDataFrame:
+def read_polygon_file(polygon) -> gpd.GeoDataFrame:
     """
     Reads a polygon file from various geospatial formats and returns a GeoDataFrame.
     """

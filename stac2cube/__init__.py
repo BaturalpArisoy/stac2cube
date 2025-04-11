@@ -11,3 +11,4 @@ from .cloud_masking import *
 from .get_statistics import *
 from .get_update import *
 from .tables import *
+from .batch_processing import *

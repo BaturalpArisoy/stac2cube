@@ -7,11 +7,12 @@
     - Automatically preprocess spectral/radar values based on specifications of the selected mission.
     - Generates multi-dimensional data cubes, suitable for time-series.
     - The data cubes can be updated anytime without generating them from the scratch.
-    - Available missions: **Sentinel-2 L2A, Sentinel-2 L1C, Sentinel-1 RTC, Landsat OT C2 L2, COP DEM Glo-30 (single time)**
+    - Available missions: **Sentinel-2 L2A, Sentinel-2 L1C, Sentinel-1 RTC, Landsat C2 L2, COP DEM Glo-30 (single time)**
 - **stac2cube.get_cloud_layers**
     - Collects images from Sentinel-2 L1C to automatically apply s2cloudless cloud probability algorithm on data cube structure.
     - The result contains cloud probability maps and user defined binary cloud mask layers.
     - When selected, clouds from the generated data cube are automatically masked out.
+    - Can be updated anytime.
 - **stac2cube.coregister_scenes (still under-development)**
     - Applies coregistration algorithm on Sentinel-2 data cubes.
     - AROSICS package provides the coregistration algorithm<br>
@@ -93,6 +94,7 @@ A documentation file on how to use stac2cube features on terrabyte's HPC for com
 ## What's upcoming?
 - [ ] Sentinel-2 co-registration (Under development-almost done)
 - [ ] Merge Landsat TM and OLI missions for terrabyte catalogues.
+- [ ] multi_stac_layers function to run multi polygon (each result must be exported)
 - [x] Caching mechanism to automatically update the missing scenes: get_stac_layers, get_cloud_layers
 - [x] More advanced interactive tools for better experience
 - [x] Sentinel-1: Orbit-state selection: Ascending/Descending

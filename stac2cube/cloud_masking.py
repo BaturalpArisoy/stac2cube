@@ -15,25 +15,6 @@ warnings.filterwarnings("ignore", category=NotGeoreferencedWarning)
 
 
 def get_cloud_layers(polygon=None, daterange=None, output=None, threshold=None, clip_raster=None, masking=None, update=None, slurm_timer=None):
-    """
-    Retrieves Sentinel-2 imagery using STAC, computes cloud probabilities for each time slice,
-    and (optionally) computes cloud masks based on the provided threshold(s). If no threshold is provided,
-    the function returns only the cloud probability layer. Otherwise, it returns a combined DataArray
-    that includes the cloud probability (as "cloud_prob") and the mask(s) for each provided threshold,
-    with mask band names like "cloud_mask_70" (for threshold=70).
-
-    Parameters:
-        polygon: Geometry for data retrieval.
-        daterange: Date range for filtering imagery.
-        output: Output path for the exported product.
-        threshold (None, float, or list): If provided, threshold(s) in the 0-100 range used to generate masks.
-            If not provided, only cloud probability is returned.
-        clip_raster: Optional clipping geometry.
-        masking: Optional parameter for additional masking.
-
-    Returns:
-        Exported product (via export_stac).
-    """
 
     if masking:
         stac_parameters = get_stac_parameters(masking)
@@ -123,7 +104,6 @@ def get_cloud_layers(polygon=None, daterange=None, output=None, threshold=None, 
 
     cp_da.name = "Cloud_Stack"
 
-    
     def update_prob_maps(stac_existing, cloud_only_stack):
         stac_existing = stac_existing.sel(band="cloud_prob")
         stac_existing = stac_existing.expand_dims(dim={"band": 1})
@@ -144,8 +124,6 @@ def get_cloud_layers(polygon=None, daterange=None, output=None, threshold=None, 
         
         cloud_only_stack = cloud_only_stack.transpose("time", "band", "y", "x")
 
-
-
     else:
         # Also convert cloud probability to uint8.
         cloud_prob_uint8 = (cp_da.sel(band="cloud_prob") * 100).astype(np.uint8)
@@ -162,7 +140,6 @@ def get_cloud_layers(polygon=None, daterange=None, output=None, threshold=None, 
                                         average_over=average_over,
                                         dilation_size=dilation_size)
         
-
         # Concatenate the probability layer with the generated mask(s) along the band dimension.
         cloud_only_stack = xr.concat([cloud_only_stack, mask_da], dim="band")
         cloud_only_stack = cloud_only_stack.transpose("time", "band", "y", "x")
@@ -190,9 +167,7 @@ def get_cloud_layers(polygon=None, daterange=None, output=None, threshold=None, 
 
 
 def mask_stac_clouds(stac, cloud, mask_layer, output):
-    """
-    Applies the cloud mask to the provided STAC dataset and exports the masked result.
-    """
+
     if isinstance(stac, (str, os.PathLike)):
         stac = xr.open_dataset(stac)
         stac = stac.Spectral_Temporal_Stack
@@ -222,12 +197,7 @@ def mask_stac_clouds(stac, cloud, mask_layer, output):
 
 
 def mask_from_probability(cloud_probability, threshold=0.7, average_over=4, dilation_size=2):
-    """
-    Generates binary cloud masks from a cloud probability DataArray.
-    Accepts a single threshold or a list of thresholds (provided in the 0-100 range).
-    Returns a DataArray with dimensions (time, band, y, x) where each mask band is named
-    according to its threshold (e.g., "cloud_mask_70").
-    """
+
     if not isinstance(threshold, list):
         thresholds = [threshold]
     else:

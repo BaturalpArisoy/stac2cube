@@ -15,7 +15,7 @@ def get_stac(mission: str, polygon, resolution: int, daterange: list, bands: lis
         "sentinel_2_l2a": ("https://earth-search.aws.element84.com/v1/", 'sentinel-2-l2a'), #sentinel-2-c1-l2a for terrabyte
         "sentinel_2_l1c": ("https://earth-search.aws.element84.com/v1/", 'sentinel-2-l1c'),
         "cop_dem_glo_30": ("https://stac.terrabyte.lrz.de/public/api/", 'cop-dem-glo-30'),
-        "landsat_ot_c2_l2": ("https://stac.terrabyte.lrz.de/public/api/", 'landsat-ot-c2-l2'),
+        "landsat_c2_l2": ("https://planetarycomputer.microsoft.com/api/stac/v1", 'landsat-c2-l2'), #landsat-ot-c2-l2
         "sentinel_1_rtc": ("https://planetarycomputer.microsoft.com/api/stac/v1", 'sentinel-1-rtc') # terrabytes sentinel-1-grd does not provide crs metadata, have to write a code that detects the crs by bbox coordinates
     }
     
@@ -26,7 +26,7 @@ def get_stac(mission: str, polygon, resolution: int, daterange: list, bands: lis
             "sentinel_2_l2a": 10,
             "sentinel_2_l1c": 10,
             "cop_dem_glo_30": None,
-            "landsat_ot_c2_l2": 30,
+            "landsat_c2_l2": 30,
             "sentinel_1_rtc": 10
         }
         resolution = resolutions[mission]
@@ -38,7 +38,7 @@ def get_stac(mission: str, polygon, resolution: int, daterange: list, bands: lis
 
     url, collection = catalogues[mission]
 
-    if mission == 'sentinel_1_rtc':
+    if mission in ('sentinel_1_rtc', 'landsat_c2_l2'):
         catalog = pystacclient.open(url,
             modifier=planetary_computer.sign_inplace,
         )
@@ -64,6 +64,8 @@ def get_stac(mission: str, polygon, resolution: int, daterange: list, bands: lis
     if cloud_masking is True:
         if mission == "sentinel_2_l2a":
             bands.append('scl')
+        if mission == "landsat_c2_l2":
+            bands.append('qa_pixel')
 
     # Pre-filter duplicate items for sentinel_2_l1c based on processing baseline
     if mission == "sentinel_2_l1c":
@@ -186,6 +188,19 @@ def _get_band_map(mission: str):
             'qa_pixel': 'QA_Pixel',
             'qa_radsat': 'QA_Radsat',
             'qa_aerosol': 'QA_Aerosol'
+        },
+        "landsat_c2_l2": {
+            'coastal': 'coastal',
+            'blue': 'blue',
+            'green': 'green',
+            'red': 'red',
+            'nir': 'nir08',
+            'swir1': 'swir16',
+            'swir2': 'swir22',
+            'thermal': 'lwir11', # SCALE FACTOR FOR THERMAL IS MISSING!
+            'qa_pixel': 'qa_pixel',
+            'qa_radsat': 'qa_radsat',
+            'qa_aerosol': 'qa_aerosol'
         },
         "s2_placeholder": { # Will be activated once switched to terrabyte catalog from Element84.
             'coastal': 'B01',

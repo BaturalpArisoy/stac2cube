@@ -40,7 +40,7 @@ def get_stac_layers(
     if mission == "s1":
         mission = "sentinel_1_rtc"
     if mission == "l_oli":
-        mission = "landsat_ot_c2_l2"
+        mission = "landsat_c2_l2"
     if mission == "cop_dem":
         mission = "cop_dem_glo_30"
 
