@@ -24,7 +24,7 @@ Make sure that the stac layers were collected without max_cc constraints.
 'clip_raster' -> Boolean: True or False for clipping the raster by the input polygon. Can be None.
 - Since the default stac is the bbox of the polygon, the user might want to activate 'clip_raster'.
 - Based on the proportion of the polygon to its bbox, the processing time can be significantly reduced. (No data computing for Nan)
-- The data size will be the exactly same for both bbox and clipped raster results because Nan values are also allocated in the memory as Float32.
+- The data size will be also reduced at the end.
 - NaN values cannot be completely removed because xarrays are working in the gridded system.
 However they won't be part of any calculation, including s2cloudless algorithm.
 - if None, then 'clipping_raster' is False and the function returns bbox area.
@@ -67,7 +67,7 @@ In this case, do not run SLURM batch once again, instead use "from stac2cube imp
 
 ---
 
-# EXAMPLE
+# EXAMPLES
 
 {
   "parameters": {

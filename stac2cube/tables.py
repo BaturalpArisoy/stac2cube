@@ -77,10 +77,10 @@ def missions():
         "animation": False
     }
 
-    landsat_ot_c2_l2 = {
-        "name": "landsat_ot_c2_l2",
+    landsat_c2_l2 = {
+        "name": "landsat_c2_l2",
         "allias": "l_oli",
-        "stac_catalog": "https://stac.terrabyte.lrz.de/public/api/",
+        "stac_catalog": "https://planetarycomputer.microsoft.com/api/stac/v1",
         "default_resolution": 30,
         "bands": ["coastal", "blue", "green", "red", "nir", "swir1", "swir2", "thermal"],
         "indices": ["ndvi", "ndwi", "savi"],
@@ -113,8 +113,13 @@ def missions():
         "animation": False
     }
     
-    df = pd.concat([df, pd.DataFrame([sentinel_2_l2a, sentinel_2_l1c, sentinel_1_rtc, landsat_ot_c2_l2, cop_dem_glo_30])], ignore_index=True)
+    df = pd.concat([df, pd.DataFrame([sentinel_2_l2a, sentinel_2_l1c, sentinel_1_rtc, landsat_c2_l2, cop_dem_glo_30])], ignore_index=True)
     df.style.set_properties(**{'text-align': 'left'})
     pd.set_option('display.max_colwidth', None)
 
     return df
+
+
+
+def missions_terrabyte():
+    pass

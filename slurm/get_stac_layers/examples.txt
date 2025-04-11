@@ -44,16 +44,16 @@ Therefore, it's highly recommended to not leave this parameter empty but select 
 'clip_raster' -> Boolean: True or False for clipping the raster by the input polygon. Can be None.
 - Since the default stac is the bbox of the polygon, the user might want to activate 'clip_raster'.
 - Based on the proportion of the polygon to its bbox, the processing time can be significantly reduced. (No data computing for Nan)
-- The data size will be the exactly same for both bbox and clipped raster results because Nan values are also allocated in the memory as Float32.
+- The data size will be also reduced at the end.
 - NaN values cannot be completely removed because xarrays are working in the gridded system.
 However they won't be part of any calculation, including s2cloudless algorithm.
 - if None, then 'clipping_raster' is False and the function returns bbox area.
 
-# Under development, please do not use!
 # NOT related to s2cloudless algorithm activated by 'get_cloud_layers' function!
 'cloud_masking' -> Boolean: True or False for activating native cloud masking of the relevant mission. Can be None.
 - For Sentinel 2, the native cloud masking: 'Scene Classification Layer (SCL)' (highly discouraged since s2cloudless provides much better results, however significantly faster processing speed than s2cloudless)
 - For Landsat, the native cloud masking: 'Quality Assessment (QA)'
+- Cloud shadow classes are not activated.
 - If None, then 'cloud_masking' is False.
 
 'indices' -> List: List of spectral and radar indices for the relevant mission. Can be None.
@@ -196,3 +196,6 @@ Therefore, it's recommended to not activate this function is long daterange is s
     "topographic_features": ["slope", "aspect", "d_inf_flow_accumulation", "twi"]
   }
 }
+
+
+# Update Sentine-2
