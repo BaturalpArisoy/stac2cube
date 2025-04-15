@@ -1,5 +1,5 @@
 from .get_data import get_stac
-from .vector_refiner import proj_check, polygon_2_bbox
+from .vector_refiner import proj_check, polygon_2_bbox, read_polygon_file
 from .stac_processing import scale_factor, cloud_mask
 from .get_spectral_indices import calculate_spectral_index
 from .export_cfg import export_stac
@@ -50,6 +50,7 @@ def get_stac_layers(
         mission = stac_parameters["mission"]
         resolution = stac_parameters["resolution"]
         polygon = stac_parameters["polygon"]
+        #geometry = stac_parameters["geometry"] # update-clip raster
         bands = stac_parameters["spectral_bands"]
         indices = stac_parameters["indices"]
         if not isinstance(indices, list):
@@ -123,7 +124,11 @@ def get_stac_layers(
             bbox = polygon
         else:
             bbox = polygon_2_bbox(polygon)
+            #gdf = read_polygon_file(polygon) # update-clip raster
+            #geom = list(gdf.iloc[0].geometry.exterior.coords) # update-clip raster
+            #stac.attrs['geometry'] = geom # update-clip raster
         stac.attrs['bbox'] = bbox
+        
 
     # Calculate stats image (optional)
     if aggregator:
@@ -140,6 +145,12 @@ def get_stac_layers(
     
     # Clip netcdf as clip raster
     if clip_raster:
+        #if update: # update-clip raster
+            #import geopandas as gpd # update-clip raster
+            #from shapely.geometry import Polygon # update-clip raster
+            #poly = Polygon(geometry) # update-clip raster
+            #polygon = gpd.GeoDataFrame(index=[0], geometry=[poly]) # update-clip raster
+            #polygon.set_crs(stac.crs, inplace=True) # update-clip raster
         stac = clip_stac(stac, polygon, crs) # delete write_crs in clip_stac
             
     # Finalizing

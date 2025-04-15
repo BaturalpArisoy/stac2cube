@@ -94,7 +94,7 @@ A documentation file on how to use stac2cube features on terrabyte's HPC for com
 ## What's upcoming?
 - [ ] Sentinel-2 co-registration (Under development-almost done)
 - [ ] Merge Landsat TM and OLI missions for terrabyte catalogues.
-- [ ] multi_stac_layers function to run multi polygon (each result must be exported)
+- [ ] Batch processing tools for all the steps (under development).
 - [x] Caching mechanism to automatically update the missing scenes: get_stac_layers, get_cloud_layers
 - [x] More advanced interactive tools for better experience
 - [x] Sentinel-1: Orbit-state selection: Ascending/Descending

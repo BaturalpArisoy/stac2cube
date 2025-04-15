@@ -17,6 +17,11 @@ def get_stac_parameters(stac_existing):
     # Polygon
     bbox = stac_existing.bbox
     bbox = bbox.tolist()
+    # Full geometry # update-clip raster
+    #if hasattr(stac_existing, "geometry"):
+     #   geometry = stac_existing.geometry
+    #else:
+     #   geometry = []
     #Daterange
     daterange = [min(stac_existing.time.values), max(stac_existing.time.values)]
     daterange = [np.datetime_as_string(dt, unit='D') for dt in daterange]
@@ -41,6 +46,7 @@ def get_stac_parameters(stac_existing):
         "mission": mission,
         "resolution": resolution,
         "polygon": bbox,
+      #  "geometry": geometry, # update-clip raster
         "spectral_bands": spectral_bands,
         "indices": indices,
         "daterange": daterange
