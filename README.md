@@ -31,7 +31,7 @@ Installation is possible with an environment manager like micromamba.
 ### 1) Change directory to where environment.yml file is located 
     $ cd "path/to/stac2cube/"
 
-### 2) Install stac2cube via PIP or UV
+### 2) Install stac2cube via micromamba
     $ micromamba env create -n stac2cube2 -f environment.yml
 
 ---
