@@ -15,7 +15,7 @@ from PIL import Image
 # GENERATE ANIMATION
 #####################
 
-def generate_animation(stac, export_folder, display_mode):
+def generate_animation(stac, export_folder, display_mode, frame_interval_ms=1000):
     """
     Create figures for each time slice and export a GIF animation.
     After the GIF is created, all figures in the figures folder are deleted.
@@ -24,16 +24,22 @@ def generate_animation(stac, export_folder, display_mode):
       stac (xarray.DataArray): Data array with dimensions (time, band, y, x).
       export_folder (str): Folder to save figures and animation.
       display_mode (str): One of 'rgb', 'ndvi', or 'ndwi'.
+      frame_interval_ms (int): Delay between frames in milliseconds.
+                               Smaller = faster animation. Default is 1000 ms.
     """
     if display_mode == 'rgb':
         image_stac = stac.sel(band=["red", "green", "blue"])
+        vmin = None
+        vmax = None
     elif display_mode in ['ndvi', 'ndwi']:
         image_stac = stac.sel(band=display_mode)
+        # Global limits over entire time series for consistent colour scale
+        vmin, vmax = _get_global_limits(image_stac)
     else:
         raise ValueError(f"Unknown display_mode: {display_mode}")
 
-    _export_figures(image_stac, export_folder, display_mode)
-    _export_animation(export_folder, display_mode)
+    _export_figures(image_stac, export_folder, display_mode, vmin=vmin, vmax=vmax)
+    _export_animation(export_folder, display_mode, frame_interval_ms)
     _cleanup_figures(export_folder)
     
 #############################
@@ -52,8 +58,12 @@ def interactive_time_view(stac, display_mode, widget_type='slider'):
     """
     if display_mode == 'rgb':
         data_stac = stac.sel(band=["red", "green", "blue"])
+        vmin = None
+        vmax = None
     elif display_mode in ['ndvi', 'ndwi']:
         data_stac = stac.sel(band=display_mode)
+        # Use same idea: global limits for consistent colour mapping
+        vmin, vmax = _get_global_limits(data_stac)
     else:
         raise ValueError(f"Unknown display_mode: {display_mode}")
         
@@ -75,15 +85,22 @@ def interactive_time_view(stac, display_mode, widget_type='slider'):
                 ax.text(0.5, 0.5, 'Missing Data', fontsize=18,
                         ha='center', va='center', transform=ax.transAxes)
             else:
-                ax.imshow(rgb_image, interpolation="bicubic",
-                          extent=[data_stac.x.min(), data_stac.x.max(), data_stac.y.min(), data_stac.y.max()])
+                ax.imshow(
+                    rgb_image,
+                    interpolation="bicubic",
+                    extent=[data_stac.x.min(), data_stac.x.max(),
+                            data_stac.y.min(), data_stac.y.max()]
+                )
         elif display_mode in ['ndvi', 'ndwi']:
             data = data_stac.isel(time=index).values
             cmap = "RdYlGn" if display_mode == 'ndvi' else "Blues"
             title_str += " (NDVI)" if display_mode == 'ndvi' else " (NDWI)"
-            ax.imshow(data, cmap=cmap,
-                      extent=[data_stac.x.min(), data_stac.x.max(), data_stac.y.min(), data_stac.y.max()],
-                      vmin=-1, vmax=1)
+            ax.imshow(
+                data, cmap=cmap,
+                extent=[data_stac.x.min(), data_stac.x.max(),
+                        data_stac.y.min(), data_stac.y.max()],
+                vmin=vmin, vmax=vmax
+            )
         else:
             ax.text(0.5, 0.5, 'Unknown display_mode', fontsize=18,
                     ha='center', va='center', transform=ax.transAxes)
@@ -122,13 +139,17 @@ def interactive_time_view(stac, display_mode, widget_type='slider'):
 # HELPER FUNCTIONS
 #############################
 
-def _export_figures(stac, export_folder, display_mode):
+def _export_figures(stac, export_folder, display_mode, vmin=None, vmax=None):
     output_dir = os.path.join(export_folder, 'figures')
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
 
     num_time_slices = stac.time.size
     time_values = pd.to_datetime(stac.time.values)
+
+    # If NDVI/NDWI and no limits provided, compute here as fallback
+    if display_mode in ['ndvi', 'ndwi'] and (vmin is None or vmax is None):
+        vmin, vmax = _get_global_limits(stac)
 
     for i in range(num_time_slices):
         fig, ax = plt.subplots(figsize=(8, 8))
@@ -146,8 +167,12 @@ def _export_figures(stac, export_folder, display_mode):
                 plt.close()
                 continue
 
-            ax.imshow(rgb_image, interpolation="bicubic", 
-                      extent=[stac.x.min(), stac.x.max(), stac.y.min(), stac.y.max()])
+            ax.imshow(
+                rgb_image,
+                interpolation="bicubic", 
+                extent=[stac.x.min(), stac.x.max(),
+                        stac.y.min(), stac.y.max()]
+            )
         elif display_mode in ['ndvi', 'ndwi']:
             data = stac.isel(time=i).values
             if display_mode == 'ndvi':
@@ -156,9 +181,12 @@ def _export_figures(stac, export_folder, display_mode):
             else:
                 cmap = "Blues"
                 title_str += " (NDWI)"
-            ax.imshow(data, cmap=cmap, 
-                      extent=[stac.x.min(), stac.x.max(), stac.y.min(), stac.y.max()], 
-                      vmin=-1, vmax=1)
+            ax.imshow(
+                data, cmap=cmap, 
+                extent=[stac.x.min(), stac.x.max(),
+                        stac.y.min(), stac.y.max()], 
+                vmin=vmin, vmax=vmax
+            )
         else:
             print(f"Unknown display_mode: {display_mode}. Skipping time slice {i}.")
             plt.close()
@@ -179,7 +207,10 @@ def _export_figures(stac, export_folder, display_mode):
         plt.savefig(filename, dpi=100)
         plt.close()
     
-def _export_animation(export_folder, display_mode):
+def _export_animation(export_folder, display_mode, frame_interval_ms=1000):
+    if frame_interval_ms <= 0:
+        raise ValueError("frame_interval_ms must be a positive integer.")
+
     output_dir = os.path.join(export_folder, 'figures')
     gif_output_path = os.path.join(export_folder, 'animations', f'animated_{display_mode}.gif')
 
@@ -203,8 +234,18 @@ def _export_animation(export_folder, display_mode):
         im.set_array(image_array[i])
         return im, 
 
-    animation_fig = manimation.FuncAnimation(fig, update, frames=len(image_array), interval=1000, blit=True, repeat_delay=2000)
-    animation_fig.save(gif_output_path, writer='imagemagick', fps=60, dpi=300)
+    # Derive fps from interval (avoid fps=0)
+    fps = max(1, int(1000 / frame_interval_ms))
+
+    animation_fig = manimation.FuncAnimation(
+        fig,
+        update,
+        frames=len(image_array),
+        interval=frame_interval_ms,
+        blit=True,
+        repeat_delay=2000,
+    )
+    animation_fig.save(gif_output_path, writer='imagemagick', fps=fps, dpi=300)
 
 def _cleanup_figures(export_folder):
     """
@@ -231,3 +272,18 @@ def _is_image_missing(rgb_image, threshold=0.1):
     black_pixels = np.sum(np.all(rgb_image == 0, axis=2))
     total_pixels = rgb_image.shape[0] * rgb_image.shape[1]
     return (black_pixels / total_pixels) > threshold
+
+def _get_global_limits(stac, lower_percentile=2, upper_percentile=98):
+    """
+    Compute global vmin/vmax for NDVI/NDWI over the whole time series.
+    Uses percentiles to be robust against outliers.
+    """
+    vals = stac.values  # expected shape: (time, y, x)
+    vmin = float(np.nanpercentile(vals, lower_percentile))
+    vmax = float(np.nanpercentile(vals, upper_percentile))
+
+    if vmin == vmax:
+        vmin -= 1e-6
+        vmax += 1e-6
+
+    return vmin, vmax

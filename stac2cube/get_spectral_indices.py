@@ -3,13 +3,31 @@ import xarray as xr
 def calculate_spectral_index(stac, mission, indices):
 
     if mission == 'sentinel_1_rtc':
-        vh = stac.vh
-        vv = stac.vv
+        if hasattr(stac, "vh"):
+            vh = stac.vh
+        else:
+            vh = stac.sel(band="vh")
+        if hasattr(stac, "vv"):
+            vv = stac.vv
+        else:
+            vv = stac.sel(band="vv")
     else:
-        red = stac.red
-        green = stac.green
-        blue = stac.blue
-        nir = stac.nir
+        if hasattr(stac, "red"):
+            red = stac.red
+        else:
+            red = stac.sel(band="red")
+        if hasattr(stac, "green"):
+            green = stac.green
+        else:
+            green = stac.sel(band="green")
+        if hasattr(stac, "blue"):
+            blue = stac.blue
+        else:
+            blue = stac.sel(band="blue")
+        if hasattr(stac, "nir"):
+            nir = stac.nir
+        else:
+            nir = stac.sel(band="nir")
 
     stac_indices = []
 

@@ -1,14 +1,14 @@
 {
   "parameters": {
     "mission": "s2",
-    "polygon": "/dss/dsstbyfs02/pr94no/pr94no-dss-0001/drylands/polygons/test.gpkg",
+    "polygon": "/dss/dsstbyfs02/pr94no/pr94no-dss-0001/drylands/polygons/naryn_aktal_roi.gpkg",
     "resolution": 10,
-    "daterange": ["2024-04-01", "2024-05-01"],
+    "daterange": ["2015-01-01", "2025-10-01"],
     "bands": ["blue", "green", "red", "nir"],
     "indices": ["ndvi", "ndwi"],
     "max_cc": 100,
     "cloud_masking": "False",
-    "output": "/dss/dsstbyfs02/pr94no/pr94no-dss-0001/drylands/results/test.nc",
+    "output": "/dss/dsstbyfs02/pr94no/pr94no-dss-0001/drylands/results/naryn_aktal_roi.nc",
     "clip_raster": null,
     "aggregator": null,
     "stats": ["mean", "median", "std", "min", "max"],

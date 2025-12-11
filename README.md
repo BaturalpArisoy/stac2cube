@@ -13,75 +13,26 @@
     - The result contains cloud probability maps and user defined binary cloud mask layers.
     - When selected, clouds from the generated data cube are automatically masked out.
     - Can be updated anytime.
-- **stac2cube.coregister_scenes (still under-development)**
+- **stac2cube.coregister_scenes (currently only available on the interactive notebook)**
     - Applies coregistration algorithm on Sentinel-2 data cubes.
     - AROSICS package provides the coregistration algorithm<br>
     Daniel Scheffler. (2017, July 3). AROSICS: An Automated and Robust Open-Source Image Co-Registration Software for Multi-Sensor Satellite Data (Version 0.12.1). Zenodo. https://doi.org/10.5281/zenodo.3742909
     - Fix the global X/Y shift between consecutive Sentinel-2 items.
+- **stac2cube.superresolve_cube (currently only available on the interactive notebook)**
+    - Applies super-resolution algorithm on Sentinel-2 data cubes.
+    - SEN2SR package provides DNN based super-resolution algorithm<br>
+    Aybar, Cesar and Contreras, Julio and Donike, Simon and Portalés-Julià, Enrique and Mateo-García, Gonzalo and Gómez-Chova, Luis, A Radiometrically and Spatially Consistent Super-Resolution Framework for Sentinel-2. Available at SSRN: https://ssrn.com/abstract=5247739 or https://dx.doi.org/10.2139/ssrn.5247739
+    - Currently super resolve 10-meters RGBN bands to 2.5-meters (soon 20-meters bands will be also super-resolved to 2.5-meters).
 
 
 ## Installation
+Installation is possible with an environment manager like micromamba.
 
-There are two options for using this package, depending on your access privileges.
+### 1) Change directory to where environment.yml file is located 
+    $ cd "path/to/stac2cube/"
 
----
-
-### 1. Members of EORC Uni Wuerzburg
-You should have access to EORC DSS container.
-
-#### a) Verify Access
-    $ dssusrinfo all
-`pr94no-dss-0001` should be in the list.
-
-#### b) Initialize Micromamba
-If EORC DSS listed and micromamba hasn't been activated yet,
-micromamba should be initialized on the _terrabyte_ login-node:
-```sh
-$ module use /dss/dsstbyfs01/pn56su/pn56su-dss-0020/usr/share/modules/files/
-$ module load micromamba
-$ micromamba shell init --shell bash --root-prefix=~/micromamba
-$ source ~/.bashrc
-```
-#### c) Optional: Check Configuration Slurm Setup (Default configuration)
-- Edit `<path/to/stac2cube>/slurm/get_stac_layers/slurm_setup.cmd>`
-- Comment (disable) local package micromamba `micromamba run -n stac2cube python slurm_run.py`
-- Uncomment (enable) shared DSS package micromamba `micromamba run -p /dss/dsstbyfs02/pr94no/pr94no-dss-0001/drylands/envs/stac2cube python slurm_run.py`
-- Do the same for `slurm/get_cloud_layers`
-
-
-
-### 2. Users who are not member of EORC Uni Wuerzburg or do not have access to EORC DSS container
-
-#### a) Set Up Micromamba Environment
-    $ module use /dss/dsstbyfs01/pn56su/pn56su-dss-0020/usr/share/modules/files/
-    $ module load micromamba
-    $ micromamba create -n stac2cube
-    $ micromamba shell init --shell bash --root-prefix=~/micromamba
-    $ source ~/.bashrc
-    $ micromamba activate stac2cube
-
-#### b) Install stac2cube via PIP or UV
-Ensure that stac2cube env is activated.
-
-    $ micromamba install pip
-You should be on the folder where `pyproject.toml` is located.
-
-    $ cd <path_to_stac2cube_parent_folder>
-
-Stable mode:<br>
-
-    $ pip install .
-
-Editable mode (for development):<br>
-
-    $ pip install -e .
-
-
-#### c) Configure Slurm Setup
-- Edit `<path/to/stac2cube>/slurm/get_stac_layers/slurm_setup.cmd>`
-- Comment (disable) shared DSS package micromamba `micromamba run -p /dss/dsstbyfs02/pr94no/pr94no-dss-0001/drylands/envs/stac2cube python slurm_run.py`
-- Uncomment (enable) local package micromamba `micromamba run -n stac2cube python slurm_run.py`
-- Do the same for `slurm/get_cloud_layers`
+### 2) Install stac2cube via PIP or UV
+    $ micromamba env create -n stac2cube2 -f environment.yml
 
 ---
 
@@ -92,7 +43,7 @@ Jupyter notebooks on how to use stac2cube features and how to process data cube 
 A documentation file on how to use stac2cube features on terrabyte's HPC for compute-intensive processes and for faster processing time can be found in the [slurm folder](https://github.com/BaturalpArisoy/stac2cube/tree/main/slurm).
 
 ## What's upcoming?
-- [ ] Sentinel-2 co-registration (Under development-almost done)
+- [x] Sentinel-2 co-registration
 - [ ] Merge Landsat TM and OLI missions for terrabyte catalogues.
 - [ ] Batch processing tools for all the steps (under development).
 - [x] Caching mechanism to automatically update the missing scenes: get_stac_layers, get_cloud_layers

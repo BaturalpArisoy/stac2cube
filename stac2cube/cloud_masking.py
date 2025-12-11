@@ -238,3 +238,24 @@ def mask_from_probability(cloud_probability, threshold=0.7, average_over=4, dila
     final_mask_da.name = "Cloud_Stack"
 
     return final_mask_da
+
+
+def cloud_filter(inp, max_cloud):
+    """
+    Keep only time steps where cloud_percentage <= max_cloud.
+
+    - if inp is a netcdf path (str): open it, take ds["Spectral_Temporal_Stack"], filter
+    - if inp is an xr.Dataset: take ds["Spectral_Temporal_Stack"], filter
+    - if inp is an xr.DataArray: filter directly
+    """
+    if isinstance(inp, str):
+        da = xr.open_dataset(inp)["Spectral_Temporal_Stack"]
+    elif isinstance(inp, xr.Dataset):
+        da = inp["Spectral_Temporal_Stack"]
+    else:  # assume xr.DataArray
+        da = inp
+
+    #da = da.where(da["cloud_percentage"] <= int(max_cloud), drop=True)
+    #da = da.rio.write_crs(da.crs)
+
+    return da.where(da["cloud_percentage"] <= int(max_cloud), drop=True)
