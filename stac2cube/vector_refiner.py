@@ -107,7 +107,7 @@ def _process_gdf(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
       - Reprojecting to WGS84 (EPSG:4326) if needed
     """
     # Select only the first geometry
-    gdf = gdf.iloc[[0]]
+    #gdf = gdf.iloc[[0]]
 
     # Define target CRS
     target_crs = 'EPSG:4326'

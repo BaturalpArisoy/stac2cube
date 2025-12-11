@@ -1,0 +1,166 @@
+{
+    "type": "Feature",
+    "stac_version": "1.1.0",
+    "stac_extensions": [
+        "https://stac-extensions.github.io/mlm/v1.4.0/schema.json"
+    ],
+    "id": "SEN2SRLite_NonReference_RGBN_x4",
+    "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+            [
+                [
+                    -180.0,
+                    -90.0
+                ],
+                [
+                    -180.0,
+                    90.0
+                ],
+                [
+                    180.0,
+                    90.0
+                ],
+                [
+                    180.0,
+                    -90.0
+                ],
+                [
+                    -180.0,
+                    -90.0
+                ]
+            ]
+        ]
+    },
+    "bbox": [
+        -180,
+        -90,
+        180,
+        90
+    ],
+    "properties": {
+        "start_datetime": "1900-01-01T00:00:00Z",
+        "end_datetime": "9999-01-01T00:00:00Z",
+        "description": "A Swift Parameter-free Attention Network (SPAN) trained on the SEN2NAIPv2 dataset to enhance RGBN Sentinel-2 bands, improving spatial resolution from 10 meters to 2.5 meters.",
+        "dependencies": [
+            "torch",
+            "safetensors.torch",
+            "sen2sr"
+        ],
+        "mlm:framework": "pytorch",
+        "mlm:framework_version": "2.1.2+cu121",
+        "file:size": 1889984,
+        "mlm:memory_size": 1,
+        "mlm:accelerator": "cuda",
+        "mlm:accelerator_constrained": false,
+        "mlm:accelerator_summary": "Unknown",
+        "mlm:name": "CNN_Light_SR",
+        "mlm:architecture": "SPAN",
+        "mlm:tasks": [
+            "super-resolution"
+        ],
+        "mlm:input": [
+            {
+                "name": "4 Band Sentinel-2 10m bands",
+                "bands": [
+                    "B04",
+                    "B03",
+                    "B02",
+                    "B08"
+                ],
+                "input": {
+                    "shape": [
+                        -1,
+                        4,
+                        128,
+                        128
+                    ],
+                    "dim_order": [
+                        "batch",
+                        "channel",
+                        "height",
+                        "width"
+                    ],
+                    "data_type": "float16"
+                },
+                "pre_processing_function": null
+            }
+        ],
+        "mlm:output": [
+            {
+                "name": "super-resolution",
+                "tasks": [
+                    "super-resolution"
+                ],
+                "result": {
+                    "shape": [
+                        -1,
+                        4,
+                        512,
+                        512
+                    ],
+                    "dim_order": [
+                        "batch",
+                        "channel",
+                        "height",
+                        "width"
+                    ],
+                    "data_type": "float16"
+                },
+                "classification:classes": [],
+                "post_processing_function": null
+            }
+        ],
+        "mlm:total_parameters": 472496,
+        "mlm:pretrained": true,
+        "datetime": null
+    },
+    "links": [],
+    "assets": {
+        "trainable": {
+            "href": "https://huggingface.co/tacofoundation/SEN2SR/resolve/main/SEN2SRLite/NonReference_RGBN_x4/model.safetensor",
+            "type": "application/octet-stream; application=safetensor",
+            "title": "Pytorch model weights checkpoint",
+            "description": "The weights of the model in safetensor format.",
+            "mlm:artifact_type": "safetensor.torch.save_file",
+            "roles": [
+                "mlm:model",
+                "mlm:weights",
+                "data"
+            ]
+        },
+        "hardconstraint": {
+            "href": "https://huggingface.co/tacofoundation/SEN2SR/resolve/main/SEN2SRLite/NonReference_RGBN_x4/hard_constraint.safetensor",
+            "type": "application/octet-stream; application=safetensor",
+            "title": "Pytorch hard constraint weights checkpoint. It is used to load faster the hard constraint module.",
+            "description": "The weights of the model in safetensor format.",
+            "mlm:artifact_type": "safetensor.torch.save_file",
+            "roles": [
+                "mlm:model",
+                "mlm:weights",
+                "data"
+            ]
+        },
+        "source_code": {
+            "href": "https://huggingface.co/tacofoundation/SEN2SR/resolve/main/SEN2SRLite/NonReference_RGBN_x4/load.py",
+            "type": "text/x-python",
+            "title": "Model load script",
+            "description": "Python script to load the model.",
+            "roles": [
+                "mlm:source_code",
+                "code"
+            ]
+        },
+        "example_data": {
+            "href": "https://huggingface.co/tacofoundation/SEN2SR/resolve/main/SEN2SRLite/NonReference_RGBN_x4/example_data.safetensor",
+            "type": "application/octet-stream; application=safetensors",
+            "title": "Example Sentinel-2 image",
+            "description": "Example Sentinel-2 image for model inference.",
+            "roles": [
+                "mlm:example_data",
+                "data"
+            ]
+        }
+    },
+    "collection": "SEN2SRLite"
+}

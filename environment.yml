@@ -1,0 +1,74 @@
+name: stac2cube
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+
+  # Windows-only runtime (safe to keep one file for both OS)
+  #- vs2015_runtime  # [win]
+
+  # --- core compiled geo stack ---
+  - gdal
+  - proj
+  - geos
+  - pyproj
+  - rasterio
+  - fiona
+  - geopandas
+  - rioxarray
+  - shapely
+  - affine
+
+  # JP2 driver plugin for Sentinel-2 .jp2 (needed on Linux)
+  - libgdal-jp2openjpeg  # [linux]
+
+  # --- AROSICS ---
+  - arosics
+  - geoarray
+
+  # --- core scientific stack ---
+  - numpy<2
+  - scipy
+  - pandas
+  - xarray
+  - dask
+  - tqdm
+
+  # --- STAC / EO stack ---
+  - odc-stac
+  - pystac-client
+  - planetary-computer
+  - s2cloudless
+
+  # --- IO formats ---
+  - netcdf4
+  - h5netcdf
+
+  # --- viz / notebooks ---
+  - matplotlib
+  - pillow
+  - branca
+  - ipython
+  - ipywidgets
+  - jupyterlab
+  - ipykernel
+
+  # --- other tools ---
+  - opencv
+  - whitebox
+  - pyaml
+  - leafmap
+
+   # --- GPU PyTorch from pytorch/nvidia ---
+  - pytorch=2.2.2
+  - torchvision=0.17.2
+  - pytorch-cuda=12.1  # brings CUDA 12 libs, incl. nvJitLink, into the env
+
+  # --- pip installs (CPU torch by default; works everywhere) ---
+  - pip:
+      - sen2sr
+      - mlstac
+      - -e .

@@ -6,7 +6,7 @@ from tqdm import tqdm
 import numpy as np
 from affine import Affine
 
-def export_stac(stac, output, crs, transform):
+def export_stac(stac, output, crs=None, transform=None):
 
     if isinstance(transform, np.ndarray):
         if transform.size == 0:
@@ -14,8 +14,17 @@ def export_stac(stac, output, crs, transform):
         else:
             transform = Affine(*transform.ravel()[:6])
     
-    stac.rio.write_crs(crs, inplace=True)
-    stac.rio.write_transform(transform, inplace=True)
+    if crs is None:
+        crs = stac.crs
+        stac.rio.write_crs(crs, inplace=True)
+    else:
+        stac.rio.write_crs(crs, inplace=True)
+    if transform is None:
+        transform = stac.transform
+        transform = Affine(*transform.ravel()[:6])
+        stac.rio.write_transform(transform, inplace=True)
+    else:
+        stac.rio.write_transform(transform, inplace=True)
     stac.attrs['crs'] = crs
     stac.attrs['transform'] = transform
       

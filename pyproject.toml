@@ -1,43 +1,42 @@
 [build-system]
-requires = ["setuptools>=42", "wheel"]
+requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "stac2cube"
 version = "1.0.0"
 description = "STAC to Analysis-Ready-Data Cubes w/ terrabyte by DLR & LRZ"
-authors = [
-  { name = "Baturalp Arisoy", email = "baturalp.arisoy@uni-wuerzburg.de" }
-]
+authors = [{ name = "Baturalp Arisoy", email = "baturalp.arisoy@uni-wuerzburg.de" }]
+requires-python = ">=3.10"
+urls = { Homepage = "https://github.com/BaturalpArisoy/stac2cube" }
 
 dependencies = [
-    "numpy",
-    "scipy",
-    "pandas",
-    "dask==2025.2.0",
-    "xarray",
-    "rioxarray",
-    "geopandas",
-    "shapely",
-    "fiona",
-    "odc-stac",
-    "pystac_client",
-    "planetary-computer",
-    "s2cloudless",
-    "netCDF4",
-    "h5netcdf",
-    "matplotlib",
-    "Pillow",
-    "branca",
-    "pyaml",
-    "tqdm",
-    "whitebox",
-    "setuptools",
-    "ipykernel",
-    "leafmap",
-    "ipywidgets"
+  "numpy<2",
+  "scipy",
+  "pandas",
+  "xarray",
+  "dask",
+  "tqdm",
+  "odc-stac",
+  "pystac-client",
+  "planetary-computer",
+  "s2cloudless",
+  "affine",
+  "PyYAML",
+  "pyaml"
 ]
-urls = { Homepage = "https://github.com/BaturalpArisoy/stac2cube" }
+
+[project.optional-dependencies]
+geo = ["rioxarray", "rasterio", "fiona", "geopandas", "shapely", "pyproj"]
+io = ["netCDF4", "h5netcdf"]
+notebook = ["ipython", "ipykernel", "ipywidgets", "jupyterlab", "matplotlib", "Pillow", "branca", "leafmap"]
+tools = ["whitebox", "opencv-python"]
+coreg = ["arosics", "geoarray"]
+ml = [
+  "sen2sr",
+  "mlstac",
+  # torch intentionally NOT here (CUDA installs are machine-specific)
+]
 
 [tool.setuptools]
 include-package-data = true

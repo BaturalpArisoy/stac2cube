@@ -155,7 +155,13 @@ def get_stac_layers(
             
     # Finalizing
     if not aggregator:
-      stac['time'] = stac['time'].dt.floor('D')
+        stac['time'] = stac['time'].dt.floor('D')
+
+        if cloud_masking is True:
+            null_count_per_time = stac.isnull().sum(dim=['band', 'y', 'x'])
+            total_elements = stac.sizes['band'] * stac.sizes['y'] * stac.sizes['x']
+            cloud_percentage_int = ((null_count_per_time / total_elements) * 100).astype(int)
+            stac = stac.assign_coords(cloud_percentage=('time', cloud_percentage_int.data))
 
     stac.attrs['crs'] = crs
     stac.attrs['transform'] = transform

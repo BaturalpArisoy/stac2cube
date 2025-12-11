@@ -1,4 +1,4 @@
-# Function get_stac_layers
+# Function get_cloud_layers
 get_cloud_layers(polygon, daterange, output, cloud_layers=None, clip_raster=None, threshold= None, masking= None)
 
 - This function is designed to collect layers for cloud masking for Sentinel 2 mission. Does not work for Landsat.

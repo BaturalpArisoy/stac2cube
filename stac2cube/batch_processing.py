@@ -1,5 +1,5 @@
 import os
-from .vector_refiner import read_polygon_file
+from .vector_refiner import polygon_2_gdf
 from .main import get_stac_layers
 
 
@@ -21,7 +21,7 @@ def multi_stac_layers(
     animation = None,
     q = None):
 
-    gdf = read_polygon_file(polygon)
+    gdf = polygon_2_gdf(polygon)
 
     for i in range(len(gdf)):
         print(f"{i+1}/{len(gdf)} is being computed.", flush=True)
