@@ -113,14 +113,14 @@ Therefore, it's recommended to not activate this function is long daterange is s
 {
   "parameters": {
     "mission": "sentinel-2-l2a",
-    "polygon": "/dss/dsstbyfs02/pr94no/pr94no-dss-0001/drylands/polygons/test.gpkg",
+    "polygon": "/dss/.../polygons/naryn_test.gpkg",
     "resolution": 10,
     "daterange": ["2024-04-01", "2024-05-01"],
     "bands": ["coastal", "blue", "green", "red", "rededge1", "rededge2", "rededge3", "nir", "nir08", "nir09", "swir16", "swir22"],
     "indices": ["ndvi", "ndwi", "savi"],
     "max_cc": 100,
     "cloud_masking": "False",
-    "output": "/dss/dsstbyfs02/pr94no/pr94no-dss-0001/drylands/results/test.nc",
+    "output": "/dss/.../results/test.nc",
     "clip_raster": null,
     "aggregator": null,
     "stats": ["mean", "median", "std", "min", "max"],
@@ -133,14 +133,14 @@ Therefore, it's recommended to not activate this function is long daterange is s
 {
   "parameters": {
     "mission": "sentinel-2-l1c",
-    "polygon": "/dss/dsstbyfs02/pr94no/pr94no-dss-0001/drylands/polygons/test.gpkg",
+    "polygon": "/dss/.../polygons/naryn_test.gpkg",
     "resolution": 100,
     "daterange": ["2024-04-01", "2024-05-01"],
     "bands": ["coastal", "blue", "green", "red", "rededge1", "rededge2", "rededge3", "nir", "nir08", "nir09", "cirrus", "swir16", "swir22"],
     "indices": ["ndvi", "ndwi", "savi"],
     "max_cc": 20,
     "cloud_masking": "False",
-    "output": "/dss/dsstbyfs02/pr94no/pr94no-dss-0001/drylands/results/test.nc",
+    "output": "/dss/.../results/test.nc",
     "clip_raster": "True",
     "aggregator": "mean",
     "animation": null
@@ -154,14 +154,14 @@ Therefore, it's recommended to not activate this function is long daterange is s
 {
   "parameters": {
     "mission": "l_oli",
-    "polygon": "/dss/dsstbyfs02/pr94no/pr94no-dss-0001/drylands/polygons/test.gpkg",
+    "polygon": "/dss/.../polygons/naryn_test.gpkg",
     "resolution": 30,
     "daterange": ["2021-01-01", "2022-01-01"],
     "bands": ["coastal", "blue", "green", "red", "nir", "swir1", "swir2", "thermal"],
     "max_cc": 10,
     "cloud_masking": "False",
     "indices": ["ndvi", "ndwi", "savi"],
-    "output": "/dss/dsstbyfs02/pr94no/pr94no-dss-0001/drylands/results/test.nc",
+    "output": "/dss/.../results/test.nc",
     "clip_raster": null,
     "aggregator": "median",
     "animation": null
@@ -175,11 +175,11 @@ Therefore, it's recommended to not activate this function is long daterange is s
 {
   "parameters": {
     "mission": "sentinel-1-rtc",
-    "polygon": "/dss/dsstbyfs02/pr94no/pr94no-dss-0001/drylands/polygons/test.gpkg",
+    "polygon": "/dss/.../polygons/naryn_test.gpkg",
     "daterange": ["2021-01-01", "2022-01-01"],
     "bands": ["vh", "vv"],
     "indices": ["vh/vv", "vv/vh", "rvi"],
-    "output": "/dss/dsstbyfs02/pr94no/pr94no-dss-0001/drylands/results/test.nc",
+    "output": "/dss/.../results/test.nc",
     "aggregator": null
   }
 }
@@ -191,8 +191,8 @@ Therefore, it's recommended to not activate this function is long daterange is s
 {
   "parameters": {
     "mission": "cop_dem",
-    "polygon": "~/terrabyte_cube/interactive/polygons/test.gpkg",
-    "output": "~/terrabyte_cube/interactive/results/test.nc",
+    "polygon": "/dss/.../polygons/naryn_test.gpkg",
+    "output": "/dss/.../results/test.nc",
     "topographic_features": ["slope", "aspect", "d_inf_flow_accumulation", "twi"]
   }
 }
