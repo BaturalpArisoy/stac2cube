@@ -79,7 +79,7 @@ A documentation file on how to use stac2cube features on terrabyte's HPC for com
 |------------|-------------------|-------------------------------------------------|----------------------------------------------------------------------------------------------|-------------|-------------|
 | DLR        | terrabyte         | https://stac.terrabyte.lrz.de/public/api/       | MIT License Copyright (c) 2024 Deutsches Zentrum für Luft- und Raumfahrt e.V.                | No          | No          |
 | Element 84 | Earth Search      | https://earth-search.aws.element84.com/v1/      | Apache License 2.0                                                                           | Yes         | Yes         |
-| Microsoft  | Planetary Computer| https://planetarycomputer.microsoft.com/api/    | MIT License Copyright (c) Microsoft Corporation.                                             | Yes         | No          |
+| Microsoft  | Planetary Computer| https://planetarycomputer.microsoft.com/api/stac/v1    | MIT License Copyright (c) Microsoft Corporation.                                             | Yes         | No          |
 
 ### Why use terrabyte then?
 
