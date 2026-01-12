@@ -1,4 +1,5 @@
-![stac2cube logo](stac2cube_logo-removebg-preview.jpg)
+<img src="stac2cube_logo-removebg-preview.jpg" alt="stac2cube logo" width="220">
+
 # stac2cube <br> Spatio-Temporal Asset Catalogs To Analysis-Ready Data Cubes
 **stac2cube** converts STAC catalogs into Analysis-Ready Data Cubes for efficient Earth Observation (EO) processing. This tool is designed to work both on any local-machine and HPC system by _terrabyte_. We recommend using *MobaXTerm* for accessing the _terrabyte_ login node and editing files.
 
