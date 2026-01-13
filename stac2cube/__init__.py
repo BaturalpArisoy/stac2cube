@@ -12,3 +12,5 @@ from .get_statistics import *
 from .get_update import *
 from .tables import *
 from .batch_processing import *
+from .coregistration import *
+from .super_resolution import *

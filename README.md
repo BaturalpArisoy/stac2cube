@@ -15,12 +15,12 @@
     - The result contains cloud probability maps and user defined binary cloud mask layers.
     - When selected, clouds from the generated data cube are automatically masked out.
     - Can be updated anytime.
-- **stac2cube.coregister_scenes (currently only available on the interactive notebook)**
+- **stac2cube.coregister_cube**
     - Applies coregistration algorithm on Sentinel-2 data cubes.
     - AROSICS package provides the coregistration algorithm<br>
     Daniel Scheffler. (2017, July 3). AROSICS: An Automated and Robust Open-Source Image Co-Registration Software for Multi-Sensor Satellite Data (Version 0.12.1). Zenodo. https://doi.org/10.5281/zenodo.3742909
     - Fix the global X/Y shift between consecutive Sentinel-2 items.
-- **stac2cube.superresolve_cube (currently only available on the interactive notebook)**
+- **stac2cube.super_resolve_cube**
     - Applies super-resolution algorithm on Sentinel-2 data cubes.
     - SEN2SR package provides DNN based super-resolution algorithm<br>
     Aybar, Cesar and Contreras, Julio and Donike, Simon and Portalés-Julià, Enrique and Mateo-García, Gonzalo and Gómez-Chova, Luis, A Radiometrically and Spatially Consistent Super-Resolution Framework for Sentinel-2. Available at SSRN: https://ssrn.com/abstract=5247739 or https://dx.doi.org/10.2139/ssrn.5247739
