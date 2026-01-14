@@ -29,9 +29,6 @@
 
 ## Installation
 Installation is possible with a package manager like Micromamba & Anaconda.<br><br>
-**IMPORTANT NOTE**: The current installation structure works on both Linux and Windows environement for *get_stac_layers*, *get_cloud_layers* and *coregister_scenes*, however *superresolve_cube* might potentially not work on Windows environement. Soon will be a major installation adjustment with updated files and the super resolution issue on Windows should be resolved. Until then, please work on a Linux setup to work with super resolution tasks. <br>
-Thank you!
-
 ### 1) Change directory to where environment.yml file is located 
     $ cd "path/to/stac2cube/"
 
