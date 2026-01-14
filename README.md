@@ -26,6 +26,8 @@
     Aybar, Cesar and Contreras, Julio and Donike, Simon and Portalés-Julià, Enrique and Mateo-García, Gonzalo and Gómez-Chova, Luis, A Radiometrically and Spatially Consistent Super-Resolution Framework for Sentinel-2. Available at SSRN: https://ssrn.com/abstract=5247739 or https://dx.doi.org/10.2139/ssrn.5247739
     - Currently super resolve 10-meters RGBN bands to 2.5-meters (soon 20-meters bands will be also super-resolved to 2.5-meters).
 
+<h2 align="center">stac2cube Methodology Pipeline</h2>
+<img src="assets/methodology.png" alt="stac2cube logo">
 
 ## Installation
 Installation is possible with a package manager like Micromamba & Anaconda.<br><br>
