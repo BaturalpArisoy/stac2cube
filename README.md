@@ -23,7 +23,7 @@
 - **stac2cube.super_resolve_cube**
     - Applies super-resolution algorithm on Sentinel-2 data cubes.
     - SEN2SR package provides DNN based super-resolution algorithm<br>
-    Aybar, Cesar and Contreras, Julio and Donike, Simon and Portalés-Julià, Enrique and Mateo-García, Gonzalo and Gómez-Chova, Luis, A Radiometrically and Spatially Consistent Super-Resolution Framework for Sentinel-2. Available at SSRN: https://ssrn.com/abstract=5247739 or https://dx.doi.org/10.2139/ssrn.5247739
+    Aybar, C., Contreras, J., Donike, S., Portalés-Julià, E., Mateo-García, G., & Gómez-Chova, L. (2026). A radiometrically and spatially consistent super-resolution framework for Sentinel-2. Remote Sensing of Environment, 334, 115222. https://doi.org/10.1016/j.rse.2025.115222
     - Currently super resolve 10-meters RGBN bands to 2.5-meters (soon 20-meters bands will be also super-resolved to 2.5-meters).
 
 <h2 align="center">stac2cube Methodology Pipeline</h2>
