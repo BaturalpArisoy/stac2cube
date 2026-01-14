@@ -1,14 +1,12 @@
 name: stac2cube
 channels:
-  - pytorch
-  - nvidia
   - conda-forge
 dependencies:
   - python=3.11
   - pip
 
   # Windows-only runtime (safe to keep one file for both OS)
-  #- vs2015_runtime  # [win]
+  - vs2015_runtime  # [win]
 
   # --- core compiled geo stack ---
   - gdal
@@ -62,13 +60,10 @@ dependencies:
   - pyaml
   - leafmap
 
-   # --- GPU PyTorch from pytorch/nvidia ---
-  - pytorch=2.2.2
-  - torchvision=0.17.2
-  - pytorch-cuda=12.1  # brings CUDA 12 libs, incl. nvJitLink, into the env
-
   # --- pip installs (CPU torch by default; works everywhere) ---
   - pip:
+      - torch==2.2.2
+      - torchvision==0.17.2
       - sen2sr
       - mlstac
       - -e .
