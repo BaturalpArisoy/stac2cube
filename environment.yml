@@ -5,8 +5,8 @@ dependencies:
   - python=3.11
   - pip
 
-  # Windows-only runtime (safe to keep one file for both OS)
-  - vs2015_runtime  # [win]
+  # Windows-only runtime
+  # - vs2015_runtime  # [win]
 
   # --- core compiled geo stack ---
   - gdal

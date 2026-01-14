@@ -36,7 +36,10 @@ Thank you!
     $ cd "path/to/stac2cube/"
 
 ### 2) Install stac2cube via e.g. Micromamba
+#### a) LINUX
     $ micromamba env create -n stac2cube2 -f environment.yml
+#### b) WINDOWS
+    $ micromamba env create -n stac2cube -f environment.yml; micromamba install -n stac2cube -c conda-forge vs2015_runtime
 
 ---
 
