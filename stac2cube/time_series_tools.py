@@ -1,289 +1,426 @@
 import os
-import glob
-import pandas as pd
-import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 import xarray as xr
-import matplotlib.animation as animation
-import matplotlib.animation as manimation
+import matplotlib.pyplot as plt
 import ipywidgets as widgets
-from IPython.display import display
-from matplotlib.ticker import ScalarFormatter
+
+from IPython.display import display, clear_output
+from matplotlib.ticker import FuncFormatter, MaxNLocator
 from PIL import Image
 
-#####################
-# GENERATE ANIMATION
-#####################
+# ==========================================================
+# COORDS: extent + origin for projected coords (UTM)
+# ==========================================================
+def _get_extent_and_origin(stac_mode: xr.DataArray):
+    """
+    Build extent for imshow() from projected x/y coordinates (e.g., UTM).
+    Returns (extent, origin) so the image is shown north-up.
+    """
+    x = stac_mode["x"].values
+    y = stac_mode["y"].values
 
-def generate_animation(stac, export_folder, display_mode, frame_interval_ms=1000):
+    xmin, xmax = float(np.min(x)), float(np.max(x))
+    ymin, ymax = float(np.min(y)), float(np.max(y))
+
+    # If y is decreasing (common in rasters), origin should be "upper"
+    origin = "upper" if y[0] > y[-1] else "lower"
+    extent = [xmin, xmax, ymin, ymax]
+
+    return extent, origin
+
+
+# ==========================================================
+# LAZY DETECTION (Dask-backed)
+# ==========================================================
+def _is_lazy_xarray(da: xr.DataArray) -> bool:
     """
-    Create figures for each time slice and export a GIF animation.
-    After the GIF is created, all figures in the figures folder are deleted.
-    
-    Parameters:
-      stac (xarray.DataArray): Data array with dimensions (time, band, y, x).
-      export_folder (str): Folder to save figures and animation.
-      display_mode (str): One of 'rgb', 'ndvi', or 'ndwi'.
-      frame_interval_ms (int): Delay between frames in milliseconds.
-                               Smaller = faster animation. Default is 1000 ms.
+    True if the DataArray is backed by a lazy array (typically dask).
     """
-    if display_mode == 'rgb':
-        image_stac = stac.sel(band=["red", "green", "blue"])
-        vmin = None
-        vmax = None
-    elif display_mode in ['ndvi', 'ndwi']:
-        image_stac = stac.sel(band=display_mode)
-        # Global limits over entire time series for consistent colour scale
-        vmin, vmax = _get_global_limits(image_stac)
+    data = da.data
+    # Avoid hard dependency on dask
+    return hasattr(data, "compute") and not isinstance(data, np.ndarray)
+
+
+# ==========================================================
+# BAND SELECTION
+# ==========================================================
+def _select_mode(stac: xr.DataArray, display_mode: str) -> xr.DataArray:
+    if display_mode == "rgb":
+        return stac.sel(band=["red", "green", "blue"])
+    elif display_mode in ["ndvi", "ndwi"]:
+        return stac.sel(band=display_mode)
     else:
         raise ValueError(f"Unknown display_mode: {display_mode}")
 
-    _export_figures(image_stac, export_folder, display_mode, vmin=vmin, vmax=vmax)
-    _export_animation(export_folder, display_mode, frame_interval_ms)
-    _cleanup_figures(export_folder)
-    
-#############################
-# INTERACTIVE TIME VIEW
-#############################
 
-def interactive_time_view(stac, display_mode, widget_type='slider'):
+# ==========================================================
+# OPTIONAL CROP (projected coords)
+# ==========================================================
+def _apply_crop(stac_mode: xr.DataArray, crop):
     """
-    Displays an interactive time-series view of Sentinel-2 data.
-    Choose between a slider and a dropdown widget for selecting the time slice.
-    
-    Parameters:
-      stac (xarray.DataArray): The data array with dimensions (time, band, y, x).
-      display_mode (str): One of 'rgb', 'ndvi', or 'ndwi'.
-      widget_type (str): 'slider' for a slider widget or 'dropdown' for a dropdown widget.
+    crop = (xmin, xmax, ymin, ymax) in projected coords
+    Handles ascending or descending y.
     """
-    if display_mode == 'rgb':
-        data_stac = stac.sel(band=["red", "green", "blue"])
-        vmin = None
-        vmax = None
-    elif display_mode in ['ndvi', 'ndwi']:
-        data_stac = stac.sel(band=display_mode)
-        # Use same idea: global limits for consistent colour mapping
-        vmin, vmax = _get_global_limits(data_stac)
+    if crop is None:
+        return stac_mode
+
+    xmin, xmax, ymin, ymax = crop
+    y0, y1 = float(stac_mode.y.values[0]), float(stac_mode.y.values[-1])
+
+    if y0 > y1:
+        # descending y
+        return stac_mode.sel(x=slice(xmin, xmax), y=slice(ymax, ymin))
     else:
-        raise ValueError(f"Unknown display_mode: {display_mode}")
-        
-    time_values = pd.to_datetime(data_stac.time.values)
-    num_time_slices = data_stac.time.size
+        # ascending y
+        return stac_mode.sel(x=slice(xmin, xmax), y=slice(ymin, ymax))
 
-    def plot_time_slice(index):
-        fig, ax = plt.subplots(figsize=(8, 8))
-        title_str = time_values[index].strftime('%d-%m-%Y')
-        
-        if display_mode == 'rgb':
-            rgb_values = data_stac.isel(time=index).transpose('y', 'x', 'band').values
-            red_n = _normalize(rgb_values[:, :, 0])
-            green_n = _normalize(rgb_values[:, :, 1])
-            blue_n = _normalize(rgb_values[:, :, 2])
-            rgb_image = np.dstack((red_n, green_n, blue_n))
-            
-            if _is_image_missing(rgb_image):
-                ax.text(0.5, 0.5, 'Missing Data', fontsize=18,
-                        ha='center', va='center', transform=ax.transAxes)
-            else:
-                ax.imshow(
-                    rgb_image,
-                    interpolation="bicubic",
-                    extent=[data_stac.x.min(), data_stac.x.max(),
-                            data_stac.y.min(), data_stac.y.max()]
-                )
-        elif display_mode in ['ndvi', 'ndwi']:
-            data = data_stac.isel(time=index).values
-            cmap = "RdYlGn" if display_mode == 'ndvi' else "Blues"
-            title_str += " (NDVI)" if display_mode == 'ndvi' else " (NDWI)"
-            ax.imshow(
-                data, cmap=cmap,
-                extent=[data_stac.x.min(), data_stac.x.max(),
-                        data_stac.y.min(), data_stac.y.max()],
-                vmin=vmin, vmax=vmax
-            )
-        else:
-            ax.text(0.5, 0.5, 'Unknown display_mode', fontsize=18,
-                    ha='center', va='center', transform=ax.transAxes)
-        
-        ax.set_title(title_str, fontsize=14)
-        ax.set_xlabel('X', fontsize=12)
-        ax.set_ylabel('Y', fontsize=12)
-        ax.tick_params(axis='x', rotation=45)
-        plt.show()
-    
-    if widget_type == 'slider':
-        slider_layout = widgets.Layout(width='800px')
-        time_widget = widgets.IntSlider(
-            min=0, 
-            max=num_time_slices-1, 
-            step=1, 
-            value=0, 
-            description='Time', 
-            layout=slider_layout
-        )
-    elif widget_type == 'dropdown':
-        options = [(t.strftime('%d-%m-%Y'), i) for i, t in enumerate(time_values)]
-        time_widget = widgets.Dropdown(
-            options=options,
-            value=0,
-            description='Date:',
-            disabled=False,
-            layout=widgets.Layout(width='300px')
-        )
+
+# ==========================================================
+# MISSING FRAME DETECTION
+# ==========================================================
+def _missing_frame(arr: np.ndarray, nan_fraction_thresh=0.9, variance_thresh=1e-12) -> bool:
+    """
+    Robust missing test:
+    - mostly NaN
+    - or near-constant frame (all zeros / no signal)
+    """
+    if arr.size == 0:
+        return True
+
+    nan_frac = np.mean(~np.isfinite(arr))
+    if nan_frac >= nan_fraction_thresh:
+        return True
+
+    finite = arr[np.isfinite(arr)]
+    if finite.size == 0:
+        return True
+
+    if np.nanvar(finite) <= variance_thresh:
+        return True
+
+    return False
+
+
+# ==========================================================
+# SCALING POLICY
+# ==========================================================
+def _get_scaling_policy(data_stac: xr.DataArray, display_mode: str):
+    """
+    RGB:
+      - per-frame percentile normalization
+      - auto exposure gain (controlled, not too bright)
+      - avoids color speckles by handling invalid pixels consistently
+
+    NDVI/NDWI:
+      - lazy: fixed vmin/vmax (no global compute)
+      - eager: global percentiles (computed once)
+    """
+    lazy = _is_lazy_xarray(data_stac)
+
+    if display_mode == "rgb":
+        return {
+            "rgb_p_low": 2,
+            "rgb_p_high": 98,
+            "rgb_auto_gain": True,
+            "rgb_target_luma": 0.38,  # lower = slightly darker
+            "rgb_gain_min": 0.9,
+            "rgb_gain_max": 1.25,
+            "rgb_gamma": 1.0,         # keep off (1.0)
+        }
+
+    # NDVI/NDWI
+    if lazy:
+        return {"vmin": -1.0, "vmax": 1.0}
     else:
-        raise ValueError(f"Unknown widget_type: {widget_type}. Use 'slider' or 'dropdown'.")
-    
-    widgets.interact(plot_time_slice, index=time_widget)
+        vals = data_stac.values
+        vmin = float(np.nanpercentile(vals, 2))
+        vmax = float(np.nanpercentile(vals, 98))
+        if vmin == vmax:
+            vmin -= 1e-6
+            vmax += 1e-6
+        return {"vmin": vmin, "vmax": vmax}
 
-#############################
-# HELPER FUNCTIONS
-#############################
 
-def _export_figures(stac, export_folder, display_mode, vmin=None, vmax=None):
-    output_dir = os.path.join(export_folder, 'figures')
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
+# ==========================================================
+# RGB NORMALIZATION (per-frame, robust)
+# ==========================================================
+def _normalize_rgb_frame(rgb_yxb: np.ndarray, p_low=2, p_high=98) -> np.ndarray:
+    """
+    Per-frame robust RGB normalization:
+    - percentile clip per band
+    - valid pixels only if all 3 bands finite
+    - invalid pixels -> neutral gray (prevents random red/blue speckles)
+    Returns float RGB in [0,1]
+    """
+    rgb = rgb_yxb.astype(np.float32, copy=False)
 
-    num_time_slices = stac.time.size
-    time_values = pd.to_datetime(stac.time.values)
+    valid = np.all(np.isfinite(rgb), axis=2)
+    out = np.zeros_like(rgb, dtype=np.float32)
 
-    # If NDVI/NDWI and no limits provided, compute here as fallback
-    if display_mode in ['ndvi', 'ndwi'] and (vmin is None or vmax is None):
-        vmin, vmax = _get_global_limits(stac)
+    for i in range(3):
+        band = rgb[:, :, i]
+        band = np.where(np.isfinite(band), band, np.nan)
 
-    for i in range(num_time_slices):
-        fig, ax = plt.subplots(figsize=(8, 8))
-        title_str = time_values[i].strftime('%d-%m-%Y')
-        
-        if display_mode == 'rgb':
-            rgb_values = stac.isel(time=i).transpose('y', 'x', 'band').values
-            red_n = _normalize(rgb_values[:, :, 0])
-            green_n = _normalize(rgb_values[:, :, 1])
-            blue_n = _normalize(rgb_values[:, :, 2])
-            rgb_image = np.dstack((red_n, green_n, blue_n))
-            
-            if _is_image_missing(rgb_image):
-                print(f"Skipping plot for {time_values[i].strftime('%Y%m%d_%H%M%S')} due to missing data.")
-                plt.close()
-                continue
+        lo = float(np.nanpercentile(band, p_low))
+        hi = float(np.nanpercentile(band, p_high))
 
-            ax.imshow(
-                rgb_image,
-                interpolation="bicubic", 
-                extent=[stac.x.min(), stac.x.max(),
-                        stac.y.min(), stac.y.max()]
-            )
-        elif display_mode in ['ndvi', 'ndwi']:
-            data = stac.isel(time=i).values
-            if display_mode == 'ndvi':
-                cmap = "RdYlGn"
-                title_str += " (NDVI)"
-            else:
-                cmap = "Blues"
-                title_str += " (NDWI)"
-            ax.imshow(
-                data, cmap=cmap, 
-                extent=[stac.x.min(), stac.x.max(),
-                        stac.y.min(), stac.y.max()], 
-                vmin=vmin, vmax=vmax
-            )
-        else:
-            print(f"Unknown display_mode: {display_mode}. Skipping time slice {i}.")
-            plt.close()
+        if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
+            out[:, :, i] = 0.5
             continue
 
-        ax.set_title(title_str, fontsize=14)
-        ax.tick_params(axis='x', rotation=45)
-        ax.xaxis.set_major_formatter(ScalarFormatter(useMathText=True))
-        ax.yaxis.set_major_formatter(ScalarFormatter(useMathText=True))
-        ax.ticklabel_format(axis='x', style='sci', scilimits=(0, 0))
-        ax.ticklabel_format(axis='y', style='sci', scilimits=(0, 0))
-        ax.set_xlabel('X', fontsize=12)
-        ax.set_ylabel('Y', fontsize=12)
+        band = np.clip(band, lo, hi)
+        out[:, :, i] = (band - lo) / (hi - lo)
 
-        timestamp = time_values[i].strftime('%Y%m%d_%H%M%S')
-        filename = f"{output_dir}/{display_mode.upper()}_{timestamp}.png"
-        plt.tight_layout()
-        plt.savefig(filename, dpi=100)
-        plt.close()
-    
-def _export_animation(export_folder, display_mode, frame_interval_ms=1000):
+    out[~valid] = 0.5
+    return np.clip(out, 0, 1)
+
+
+def _rgb_to_uint8(rgb_01: np.ndarray, gamma: float = 1.0, gain: float = 1.0) -> np.ndarray:
+    """
+    Convert RGB float [0,1] -> uint8 with gain + optional gamma.
+    """
+    rgb_01 = np.clip(rgb_01, 0, 1)
+    rgb_01 = np.clip(rgb_01 * gain, 0, 1)
+
+    if gamma is not None and gamma > 0 and gamma != 1.0:
+        rgb_01 = np.power(rgb_01, gamma)
+
+    return (rgb_01 * 255).astype(np.uint8)
+
+
+# ==========================================================
+# NDVI/NDWI -> RGB image
+# ==========================================================
+def _nd_to_rgb_uint8(data: np.ndarray, cmap_name: str, vmin: float, vmax: float) -> np.ndarray:
+    """
+    Convert a 2D NDVI/NDWI array into an RGB uint8 image using a colormap.
+    """
+    import matplotlib.cm as cm
+    import matplotlib.colors as colors
+
+    norm = colors.Normalize(vmin=vmin, vmax=vmax, clip=True)
+    cmap = cm.get_cmap(cmap_name)
+    rgba = cmap(norm(data))  # float RGBA in [0,1]
+    rgb = (rgba[:, :, :3] * 255).astype(np.uint8)
+    return rgb
+
+
+# ==========================================================
+# FRAME RENDERING (single time index)
+# ==========================================================
+def _render_frame_as_uint8(stac_mode: xr.DataArray, display_mode: str, idx: int, scaling):
+    """
+    Returns a uint8 RGB image.
+    Lazy-safe: computes ONLY the selected time slice.
+    """
+
+    if display_mode == "rgb":
+        frame = stac_mode.isel(time=idx).transpose("y", "x", "band")
+        rgb = frame.values  # lazy -> computes only this slice
+
+        if _missing_frame(rgb):
+            return None
+
+        rgb01 = _normalize_rgb_frame(
+            rgb,
+            p_low=scaling.get("rgb_p_low", 2),
+            p_high=scaling.get("rgb_p_high", 98),
+        )
+
+        # controlled auto exposure
+        gain = 1.0
+        if scaling.get("rgb_auto_gain", True):
+            luma = float(np.mean(rgb01))
+            target = float(scaling.get("rgb_target_luma", 0.38))
+
+            if np.isfinite(luma) and luma > 1e-6:
+                gain = target / luma
+                gain = float(np.clip(
+                    gain,
+                    scaling.get("rgb_gain_min", 0.9),
+                    scaling.get("rgb_gain_max", 1.25),
+                ))
+
+        return _rgb_to_uint8(
+            rgb01,
+            gamma=scaling.get("rgb_gamma", 1.0),
+            gain=gain,
+        )
+
+    # NDVI / NDWI
+    frame = stac_mode.isel(time=idx)
+    data = frame.values  # lazy -> computes only this slice
+
+    if _missing_frame(data):
+        return None
+
+    cmap = "RdYlGn" if display_mode == "ndvi" else "Blues"
+    return _nd_to_rgb_uint8(data, cmap_name=cmap, vmin=scaling["vmin"], vmax=scaling["vmax"])
+
+
+# ==========================================================
+# PUBLIC API 1: INTERACTIVE TIME VIEW (lazy-safe)
+# ==========================================================
+def interactive_time_view(
+    stac: xr.DataArray,
+    display_mode: str,
+    widget_type: str = "slider",
+    figsize=(8, 8),
+    crop=None,  # optional projected crop
+):
+    """
+    Lazy-safe interactive viewer.
+    - computes ONLY selected time slice
+    - shows projected UTM axes (Easting/Northing) with nice short ticks
+    """
+    stac_mode = _select_mode(stac, display_mode)
+    stac_mode = _apply_crop(stac_mode, crop)
+
+    extent, origin = _get_extent_and_origin(stac_mode)
+    time_values = pd.to_datetime(stac_mode.time.values)
+    n = stac_mode.time.size
+
+    scaling = _get_scaling_policy(stac_mode, display_mode)
+    out = widgets.Output()
+
+    def plot_idx(idx: int):
+        with out:
+            clear_output(wait=True)
+
+            img = _render_frame_as_uint8(stac_mode, display_mode, idx, scaling)
+            fig, ax = plt.subplots(figsize=figsize)
+
+            title = time_values[idx].strftime("%d-%m-%Y")
+            if display_mode == "ndvi":
+                title += " (NDVI)"
+            elif display_mode == "ndwi":
+                title += " (NDWI)"
+
+            if img is None:
+                ax.text(0.5, 0.5, "Missing Data", fontsize=16, ha="center", va="center")
+                ax.set_axis_off()
+                plt.show()
+                plt.close(fig)
+                return
+
+            ax.imshow(img, interpolation="nearest", extent=extent, origin=origin)
+            ax.set_title(title, fontsize=14)
+
+            # short coords like you wanted
+            ax.set_xlabel("Easting (10³ m)")
+            ax.set_ylabel("Northing (10⁴ m)")
+
+            ax.tick_params(axis="x", rotation=45)
+            ax.xaxis.set_major_locator(MaxNLocator(nbins=6, integer=True))
+            ax.yaxis.set_major_locator(MaxNLocator(nbins=6, integer=True))
+
+            ax.xaxis.set_major_formatter(FuncFormatter(lambda v, p: f"{v/1000:.0f}"))
+            ax.yaxis.set_major_formatter(FuncFormatter(lambda v, p: f"{v/10000:.0f}"))
+
+            ax.xaxis.offsetText.set_visible(False)
+            ax.yaxis.offsetText.set_visible(False)
+
+            plt.tight_layout()
+            plt.show()
+            plt.close(fig)
+
+    if widget_type == "slider":
+        w = widgets.IntSlider(
+            min=0,
+            max=n - 1,
+            step=1,
+            value=0,
+            description="Time",
+            layout=widgets.Layout(width="800px"),
+        )
+    elif widget_type == "dropdown":
+        options = [(t.strftime("%d-%m-%Y"), i) for i, t in enumerate(time_values)]
+        w = widgets.Dropdown(
+            options=options,
+            value=0,
+            description="Date:",
+            layout=widgets.Layout(width="300px"),
+        )
+    else:
+        raise ValueError("widget_type must be 'slider' or 'dropdown'")
+
+    display(w, out)
+    widgets.interact(plot_idx, idx=w)
+
+
+# ==========================================================
+# PUBLIC API 2: GIF EXPORT (no ffmpeg, lazy-safe)
+# ==========================================================
+def generate_animation(
+    stac: xr.DataArray,
+    output_path: str,
+    display_mode: str,
+    frame_interval_ms: int = 700,
+    crop=None,                 # optional: (xmin, xmax, ymin, ymax)
+    max_size: int | None = 900,# resize longest side to this (smaller file). None = no resize
+    colors: int = 128,         # palette size (64/128/256). Lower = smaller file
+    dither: bool = False,      # dithering makes file bigger + noisy; False is cleaner for EO
+):
+    """
+    Streaming GIF export (no PNGs, no ffmpeg).
+    - lazy-safe: computes one frame at a time
+    - small file size controls: max_size + colors
+
+    output_path: user-defined path, will append .gif if missing
+    """
     if frame_interval_ms <= 0:
-        raise ValueError("frame_interval_ms must be a positive integer.")
+        raise ValueError("frame_interval_ms must be > 0")
 
-    output_dir = os.path.join(export_folder, 'figures')
-    gif_output_path = os.path.join(export_folder, 'animations', f'animated_{display_mode}.gif')
+    # Ensure output folder exists
+    output_dir = os.path.dirname(output_path)
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
 
-    anim_output_dir = os.path.dirname(gif_output_path)
-    if not os.path.exists(anim_output_dir):
-        os.makedirs(anim_output_dir)
-        
-    files = sorted(glob.glob(f"{output_dir}/*.png"))
-    image_array = []
-    for my_file in files:
-        image = Image.open(my_file)
-        image_array.append(image)
+    if not output_path.lower().endswith(".gif"):
+        output_path += ".gif"
 
-    print('Number of images:', len(image_array))
-    
-    fig, ax = plt.subplots()
-    ax.axis('off')
-    im = ax.imshow(image_array[0], animated=True)
+    stac_mode = _select_mode(stac, display_mode)
+    stac_mode = _apply_crop(stac_mode, crop)
 
-    def update(i):
-        im.set_array(image_array[i])
-        return im, 
+    n = stac_mode.time.size
+    scaling = _get_scaling_policy(stac_mode, display_mode)
 
-    # Derive fps from interval (avoid fps=0)
-    fps = max(1, int(1000 / frame_interval_ms))
+    frames: list[Image.Image] = []
 
-    animation_fig = manimation.FuncAnimation(
-        fig,
-        update,
-        frames=len(image_array),
-        interval=frame_interval_ms,
-        blit=True,
-        repeat_delay=2000,
+    for i in range(n):
+        arr = _render_frame_as_uint8(stac_mode, display_mode, i, scaling)
+        if arr is None:
+            continue
+
+        img = Image.fromarray(arr, mode="RGB")
+
+        # optional resize for file size
+        if max_size is not None:
+            w, h = img.size
+            longest = max(w, h)
+            if longest > max_size:
+                scale = max_size / longest
+                new_w = max(1, int(round(w * scale)))
+                new_h = max(1, int(round(h * scale)))
+                img = img.resize((new_w, new_h), resample=Image.BILINEAR)
+
+        # convert to palette image to reduce GIF size
+        dith = Image.FLOYDSTEINBERG if dither else Image.NONE
+        img = img.convert("P", palette=Image.Palette.ADAPTIVE, colors=int(colors), dither=dith)
+
+        frames.append(img)
+
+    if len(frames) == 0:
+        raise RuntimeError("No valid frames found. GIF cannot be created.")
+
+    frames[0].save(
+        output_path,
+        save_all=True,
+        append_images=frames[1:],
+        duration=frame_interval_ms,
+        loop=0,
+        optimize=True,
     )
-    animation_fig.save(gif_output_path, writer='imagemagick', fps=fps, dpi=300)
 
-def _cleanup_figures(export_folder):
-    """
-    Delete all PNG files in the figures folder.
-    """
-    figures_dir = os.path.join(export_folder, 'figures')
-    files = glob.glob(os.path.join(figures_dir, '*.png'))
-    for file_path in files:
-        try:
-            os.remove(file_path)
-        except Exception as e:
-            print(f"Error deleting file {file_path}: {e}")
-
-def _normalize(band, clip_percentile=2):
-    band_min, band_max = np.nanpercentile(band, [clip_percentile, 100 - clip_percentile])
-    if band_max == band_min:
-        return np.zeros_like(band)
-    band = np.clip(band, band_min, band_max)
-    normalized = (band - band_min) / (band_max - band_min)
-    normalized = np.nan_to_num(normalized, nan=0.5)
-    return normalized
-
-def _is_image_missing(rgb_image, threshold=0.1):
-    black_pixels = np.sum(np.all(rgb_image == 0, axis=2))
-    total_pixels = rgb_image.shape[0] * rgb_image.shape[1]
-    return (black_pixels / total_pixels) > threshold
-
-def _get_global_limits(stac, lower_percentile=2, upper_percentile=98):
-    """
-    Compute global vmin/vmax for NDVI/NDWI over the whole time series.
-    Uses percentiles to be robust against outliers.
-    """
-    vals = stac.values  # expected shape: (time, y, x)
-    vmin = float(np.nanpercentile(vals, lower_percentile))
-    vmax = float(np.nanpercentile(vals, upper_percentile))
-
-    if vmin == vmax:
-        vmin -= 1e-6
-        vmax += 1e-6
-
-    return vmin, vmax
+    print(f"GIF saved: {output_path}  (frames={len(frames)}, colors={colors}, max_size={max_size})")
