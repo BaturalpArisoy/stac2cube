@@ -1,0 +1,44 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "stac2cube"
+type: software
+
+authors:
+  - family-names: Arisoy
+    given-names: Baturalp
+  - family-names: Betz
+    given-names: Florian
+  - family-names: Stauch
+    given-names: Georg
+  - family-names: Klein
+    given-names: Doris
+  - family-names: Dech
+    given-names: Stefan
+  - family-names: Ullmann
+    given-names: Tobias
+
+repository-code: "https://github.com/BaturalpArisoy/stac2cube"
+url: "https://github.com/BaturalpArisoy/stac2cube"
+
+version: "1.1.0"
+date-released: 2025-12-17
+
+preferred-citation:
+  type: unpublished
+  year: 2026
+  title: "Scalable Earth Observation Data Cubes for Advanced Analytics of Dynamic Earth Surface Processes: An Open-Source Package for Customized Processing of Sentinel-2 Data on HPCs and Beyond"
+  authors:
+    - family-names: Arisoy
+      given-names: Baturalp
+    - family-names: Betz
+      given-names: Florian
+    - family-names: Stauch
+      given-names: Georg
+    - family-names: Klein
+      given-names: Doris
+    - family-names: Dech
+      given-names: Stefan
+    - family-names: Ullmann
+      given-names: Tobias
+  institution:
+    name: "University of Würzburg; German Aerospace Center (DLR)"
