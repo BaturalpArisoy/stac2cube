@@ -147,7 +147,7 @@ Why do _terraybte_ users collect data from _terrabyte_ STAC catalog instead of  
 \* Queries are iterated 10 times per each service and the average time per run is calculated (timeit module).
 
 ## How to cite:
-to be announced
+Arisoy, B., Betz, F., Stauch, G., Klein, D., Dech, S., & Ullmann, T. (2026). Scalable Earth Observation Data Cubes for Advanced Analytics of Dynamic Earth Surface Processes: An Open-Source Package for Customized Processing of Sentinel-2 Data on HPCs and Beyond [Unpublished manuscript]. University of Würzburg; German Aerospace Center (DLR).
 
 <br><br>
 Contact: https://www.geographie.uni-wuerzburg.de/en/earthobservation/staff/baturalp-arisoy/
