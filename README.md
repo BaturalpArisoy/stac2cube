@@ -10,7 +10,7 @@ ARD cubes are designed by 3 major components for Sentinel-2:
 - Spatially co-registered scenes with **AROSICS**, resolving 1-2 global X-Y pixel shifts between consecutive Sentinel-2 scenes. Sub-pixel (below 10-m) shifts can still occur.
 - RGBN are super-resolved to 2.5-m with **SEN2SR**. 
 
-Leading a final datacube that is cloud masked with customized threshold, pixels are aligned and represented with higher spatial resolution.
+Leading a final datacube that is cloud masked with customized threshold, pixels are spatially aligned and represented with higher spatial resolution.
 
 This tool is designed to function both on any local-machine and HPC system using SLURM jobs.
 
@@ -26,7 +26,7 @@ This tool is designed to function both on any local-machine and HPC system using
 
 
 ## Feature Overview
-Below is an example of 2 animations showing before and after ARD cube generation.
+a) Below is an example of 2 animations showing before and after ARD cube generation.
 
 <div align="center">
   <h2>Before (Initial Data Cube)</h2>
@@ -44,37 +44,31 @@ Below is an example of 2 animations showing before and after ARD cube generation
   </a>
 </div>
 
-<br>
+<br><br><br>
+
+b) Below is an example of threshold based cloud masking. The higher threshold values are especially good when SCL masks out river corridors in cloud-free scenes.<br> Note: Red color is visual only.
+
+<div align="center">
+  <h2>SCL cloud masking and masks with several threshold values</h2>
+  <a href="assets/cloud_masking_example.png">
+    <img src="assets/cloud_masking_example.png" alt="Cloud masking">
+  </a>
+</div>
 
 
-- **stac2cube.get_stac_layers**
-    - Collects images from STAC catalogs for the selected mission based on users parameters.
-    - Automatically preprocess spectral/radar values based on specifications of the selected mission.
-    - Generates multi-dimensional data cubes, suitable for time-series.
-    - The data cubes can be updated anytime without generating them from the scratch.
-    - Available missions: **Sentinel-2 L2A, Sentinel-2 L1C, Sentinel-1 RTC, Landsat C2 L2, COP DEM Glo-30 (single time)**
-- **stac2cube.get_cloud_layers**
-    - Collects images from Sentinel-2 L1C to automatically apply s2cloudless cloud probability algorithm on data cube structure.
-    - The result contains cloud probability maps and user defined binary cloud mask layers.
-    - When selected, clouds from the generated data cube are automatically masked out.
-    - Can be updated anytime.
-- **stac2cube.coregister_cube**
-    - Applies coregistration algorithm on Sentinel-2 data cubes.
-    - AROSICS package provides the coregistration algorithm<br>
-    Daniel Scheffler. (2017, July 3). AROSICS: An Automated and Robust Open-Source Image Co-Registration Software for Multi-Sensor Satellite Data (Version 0.12.1). Zenodo. https://doi.org/10.5281/zenodo.3742909
-    - Fix the global X/Y shift between consecutive Sentinel-2 items.
-- **stac2cube.super_resolve_cube**
-    - Applies super-resolution algorithm on Sentinel-2 data cubes.
-    - SEN2SR package provides DNN based super-resolution algorithm<br>
-    Aybar, C., Contreras, J., Donike, S., Portalés-Julià, E., Mateo-García, G., & Gómez-Chova, L. (2026). A radiometrically and spatially consistent super-resolution framework for Sentinel-2. Remote Sensing of Environment, 334, 115222. https://doi.org/10.1016/j.rse.2025.115222
-    - Currently super resolve 10-meters RGBN bands to 2.5-meters (soon 20-meters bands will be also super-resolved to 2.5-meters).
 
 ## Installation
-Installation is possible with a package manager like Micromamba & Anaconda.<br><br>
-### Step 1: Change directory to where environment.yml file is located 
+Installation is possible with a package manager like Micromamba & Anaconda.<br>
+
+Following steps are example how to install with Micromamba, note that some of the syntax can be different with Anaconda.<br><br>
+
+### Step 1: Clone the repository to your current working directory
+    $ git clone https://github.com/BaturalpArisoy/stac2cube.git
+
+### Step 2: Change directory to cloned stac2cube folder 
     $ cd "path/to/stac2cube/"
 
-### Step 2: Install stac2cube via e.g. Micromamba
+### Step 3: Install stac2cube via Micromamba (this might take a while!)
 #### a) LINUX
     $ micromamba env create -n stac2cube2 -f environment.yml
 #### b) WINDOWS
@@ -82,11 +76,40 @@ Installation is possible with a package manager like Micromamba & Anaconda.<br><
 
 ---
 
-## Examples
-Jupyter notebooks on how to use stac2cube features and how to process data cube structure can be found in the [interactive folder](https://github.com/BaturalpArisoy/stac2cube/tree/main/interactive).
+## Examples and how to run?
+Well documented, interactive notebooks on how to use stac2cube features, how to process data cubes and how to store them can be found in the [interactive folder](https://github.com/BaturalpArisoy/stac2cube/tree/main/interactive).
+
+Each step is documented by the numbers and the general explanation is given below:
+
+1. **Initial Data Cube**
+    - Collects images from STAC catalogs for the selected mission based on users parameters.
+    - Automatically preprocess spectral/radar values based on specifications of the selected mission.
+    - Generates multi-dimensional data cubes, suitable for time-series.
+    - The data cubes can be updated anytime without generating them from the scratch.
+    - Available missions: **Sentinel-2 L2A, Sentinel-2 L1C, Sentinel-1 RTC, Landsat C2 L2, COP DEM Glo-30 (single time)**
+2. **Cloud Mask Data Cube**
+    - Collects images from Sentinel-2 L1C to automatically apply s2cloudless cloud probability algorithm on previously generated initial data cube.
+    - The result contains cloud probability maps and user defined binary cloud mask layers.
+    - When selected, clouds from the initial data cube are automatically masked out.
+    - Can be updated anytime.
+3. **Co-register Data Cube**
+    - Applies coregistration algorithm on Sentinel-2 data cubes.
+    - The best result is when clouds are masked! 
+        - Therefore if *2_CloudMask_Data_Cube* is skipped, make sure to use Scene Classification Layer masking by setting "cloud_masking = True" on *1_Initial_Data_Cube*
+    - AROSICS package provides the coregistration algorithm<br>
+    Daniel Scheffler. (2017, July 3). AROSICS: An Automated and Robust Open-Source Image Co-Registration Software for Multi-Sensor Satellite Data (Version 0.12.1). Zenodo. https://doi.org/10.5281/zenodo.3742909
+    - Fix the global X/Y shift between consecutive Sentinel-2 items.
+    - IMPORTANT: Larger the area, better quality coregistration result. See the information on interactive notebook.
+4. **Super-resolve Data Cube**
+    - Applies super-resolution algorithm on Sentinel-2 data cubes. 
+    - SEN2SR package provides DNN based super-resolution algorithm<br>
+    Aybar, C., Contreras, J., Donike, S., Portalés-Julià, E., Mateo-García, G., & Gómez-Chova, L. (2026). A radiometrically and spatially consistent super-resolution framework for Sentinel-2. Remote Sensing of Environment, 334, 115222. https://doi.org/10.1016/j.rse.2025.115222
+    - Currently super resolve 10-meters RGBN bands to 2.5-meters (soon 20-meters bands will be also super-resolved to 2.5-meters).
+5. **Batch Processing** (under development!)
+    - (when completed) If the user knows what parameters to use for each function above, can set batch processing instead of using each step separetly :) 
 
 ## How to run on HPC (terrabyte users only)
-A documentation file on how to use stac2cube features on terrabyte's HPC for compute-intensive processes and for faster processing time can be found in the [slurm folder](https://github.com/BaturalpArisoy/stac2cube/tree/main/slurm).
+A documentation file on how to use stac2cube features on terrabyte's HPC for compute-intensive processes and for faster processing time can be found in the [slurm folder](https://github.com/BaturalpArisoy/stac2cube/tree/main/slurm). Don't forget to look at *how_to_use.txt*.
 
 ## What's upcoming?
 - [x] Sentinel-2 co-registration

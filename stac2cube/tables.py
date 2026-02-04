@@ -6,7 +6,7 @@ def missions():
     columns = [
         "name",
         "allias",
-        "stac_catalog",
+        #"stac_catalog",
         "default_resolution",
         "bands",
         "indices",
@@ -26,7 +26,7 @@ def missions():
     sentinel_2_l2a = {
         "name": "sentinel_2_l2a",
         "allias": "s2",
-        "stac_catalog": "https://earth-search.aws.element84.com/v1/",
+        #"stac_catalog": "https://earth-search.aws.element84.com/v1/",
         "default_resolution": 10,
         "bands": ["coastal", "blue", "green", "red", "rededge1", "rededge2", "rededge3", "nir", "nir08", "nir09", "swir16", "swir22"],
         "indices": ["ndvi", "ndwi", "savi"],
@@ -44,7 +44,7 @@ def missions():
     sentinel_2_l1c = {
         "name": "sentinel_2_l1c",
         "allias": "s2_l1c",
-        "stac_catalog": "https://earth-search.aws.element84.com/v1/",
+        #"stac_catalog": "https://earth-search.aws.element84.com/v1/",
         "default_resolution": 10,
         "bands": ["coastal", "blue", "green", "red", "rededge1", "rededge2", "rededge3", "nir", "nir08", "nir09", "cirrus", "swir16", "swir22"],
         "indices": ["ndvi", "ndwi", "savi"],
@@ -62,7 +62,7 @@ def missions():
     sentinel_1_rtc = {
         "name": "sentinel_1_rtc",
         "allias": "s1",
-        "stac_catalog": "https://planetarycomputer.microsoft.com/api/stac/v1",
+        #"stac_catalog": "https://planetarycomputer.microsoft.com/api/stac/v1",
         "default_resolution": 10,
         "bands": ["vh", "vv"],
         "indices": ["vh/vv", "vv/vh", "rvi"],
@@ -80,7 +80,7 @@ def missions():
     landsat_c2_l2 = {
         "name": "landsat_c2_l2",
         "allias": "l_oli",
-        "stac_catalog": "https://planetarycomputer.microsoft.com/api/stac/v1",
+        #"stac_catalog": "https://planetarycomputer.microsoft.com/api/stac/v1",
         "default_resolution": 30,
         "bands": ["coastal", "blue", "green", "red", "nir", "swir1", "swir2", "thermal"],
         "indices": ["ndvi", "ndwi", "savi"],
@@ -98,7 +98,7 @@ def missions():
     cop_dem_glo_30 = {
         "name": "cop_dem_glo_30",
         "allias": "cop_dem",
-        "stac_catalog": "https://stac.terrabyte.lrz.de/public/api/",
+        #"stac_catalog": "https://stac.terrabyte.lrz.de/public/api/",
         "default_resolution": False,
         "bands": False,
         "indices": False,
@@ -123,3 +123,108 @@ def missions():
 
 def missions_terrabyte():
     pass
+
+
+# stac2cube/notebook_help.py
+
+from IPython.display import display, Markdown
+import ipywidgets as widgets
+
+HELP_MD = r"""
+## stac2cube parameter help
+
+**mission**  
+- Both `name` and `alias` work. Must not be `None`.  
+- See `missions()` → `name` or `alias`.
+
+**output**  
+- Keep `None` to return a super-fast lazy array without computation (still good for quick visualization).  
+- To export, set a NetCDF path, e.g. `./results/test.nc`.
+
+**polygon**  
+- Polygon formats: `gpkg`, `geojson`, `kml`, `kmz`, `shp`  
+- Can be geographic (WGS84) or projected (e.g., UTM).  
+- Can also be WGS84 bbox list: `[xmin, ymin, xmax, ymax]` (NOT projected coords). useful tool: `http://bboxfinder.com/`  
+- If you don’t know the area, set `None` and use the optional leafmap selection cell.  
+- If you have a polygon with multiple features, only the first feature is used. For multiple areas, run `5_Batch_Processing.ipynb`.
+
+**resolution**  
+- If `None` → uses default resolution (see `missions()` → `default_resolution`).
+
+**daterange**  
+- If `None` → every available date.  
+- Otherwise: `["YYYY-MM-DD", "YYYY-MM-DD"]`.
+
+**bands**  
+- If `None` → all mission bands (and SCL).  
+- See `missions()` → `bands`.
+
+**indices**  
+- If `None` → no indices.  
+- See `missions()` → `indices`.
+
+**clip_raster**  
+- If `True`, raster is clipped to polygon area; if `False`, covers polygon bounding box.  
+- Keep `False` if you plan co-registration (bbox shape works best).  
+- After co-registration you can clip using `clip_stac()`.
+
+**max_cc**  
+- Maximum cloud coverage % from STAC metadata.  
+- Keeping `100` is recommended for maximum availability.
+
+**cloud_masking**  
+- Scene Classification Layer masking (NOT s2cloudless threshold masking).  
+- Keep `False` if you want to generate cloud mask cube and choose your own threshold (`2_Cloudmask_Data_Cube.ipynb`).  
+- Set `True` for quick/rough masking (example: large areas).
+
+**stats**  
+- If `None` → no stats cubes.  
+- Only works when `output` is a file path (not `None`).  
+- See `missions()` → `stats`.
+
+**aggregator**  
+- If `None` → no aggregation.  
+- Aggregates along time dimension (e.g., `"mean"` or `"median"`, not together).  
+- See `missions()` → `aggregators`.
+
+**q**  
+- `True` hides print outputs except progress bar.
+"""
+
+def show_parameter_help(
+    title: str = "Show parameter help",
+    icon: str = "info-circle",
+    open_by_default: bool = False,
+):
+    """
+    Display a toggle button that reveals/hides the stac2cube parameter help markdown.
+    Returns (toggle, output_widget) so notebooks can further customize/layout if desired.
+    """
+    toggle = widgets.ToggleButton(
+        value=open_by_default,
+        description=title if not open_by_default else "Hide parameter help",
+        icon=icon,
+        tooltip="Click to show/hide the parameter documentation",
+    )
+
+    out = widgets.Output()
+
+    def _render(show: bool):
+        with out:
+            out.clear_output()
+            if show:
+                display(Markdown(HELP_MD))
+
+    def _on_toggle(change):
+        if change.get("name") != "value":
+            return
+        toggle.description = "Hide parameter help" if change["new"] else "Show parameter help"
+        _render(change["new"])
+
+    toggle.observe(_on_toggle, names="value")
+
+    # render initial state
+    _render(open_by_default)
+
+    display(toggle, out)
+    return toggle, out

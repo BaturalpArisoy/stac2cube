@@ -165,35 +165,31 @@ def get_cloud_layers(polygon=None, daterange=None, output=None, threshold=None, 
 
     return img
 
+def mask_stac_clouds(stac, cloud, mask_layer, output): 
+    if isinstance(stac, (str, os.PathLike)): 
+        stac = xr.open_dataset(stac) 
+        stac = stac.Spectral_Temporal_Stack 
 
-def mask_stac_clouds(stac, cloud, mask_layer, output):
+    if isinstance(cloud, (str, os.PathLike)): 
+        cloud = xr.open_dataset(cloud) 
+        cloud = cloud.Cloud_Stack 
 
-    if isinstance(stac, (str, os.PathLike)):
-        stac = xr.open_dataset(stac)
-        stac = stac.Spectral_Temporal_Stack
-    if isinstance(cloud, (str, os.PathLike)):
-        cloud = xr.open_dataset(cloud)
-        cloud = cloud.Cloud_Stack
+    if isinstance(stac, xr.Dataset): 
+        stac = stac.Spectral_Temporal_Stack 
 
-    if isinstance(stac, xr.Dataset):
-        stac = stac.Spectral_Temporal_Stack
-    if isinstance(cloud, xr.Dataset):
-        cloud = cloud.Cloud_Stack
+    if isinstance(cloud, xr.Dataset): 
+        cloud = cloud.Cloud_Stack 
 
-    cloud_mask = cloud.sel(band=mask_layer)
-    masked_stac = stac.where(cloud_mask == 0)
+    cloud_mask = cloud.sel(band=mask_layer) 
+    masked_stac = stac.where(cloud_mask == 0) 
 
-    # Calculate cloud percentage per time slice.
-    null_count_per_time = masked_stac.isnull().sum(dim=['band', 'y', 'x'])
-    total_elements = masked_stac.sizes['band'] * masked_stac.sizes['y'] * masked_stac.sizes['x']
-    cloud_percentage_int = ((null_count_per_time / total_elements) * 100).astype(int)
-    masked_stac = masked_stac.assign_coords(cloud_percentage=('time', cloud_percentage_int.data))
+    # Calculate cloud percentage per time slice. 
+    null_count_per_time = masked_stac.isnull().sum(dim=['band', 'y', 'x']) 
+    total_elements = masked_stac.sizes['band'] * masked_stac.sizes['y'] * masked_stac.sizes['x'] 
+    cloud_percentage_int = ((null_count_per_time / total_elements) * 100).astype(int) 
+    masked_stac = masked_stac.assign_coords(cloud_percentage=('time', cloud_percentage_int.data)) 
 
-    crs = cloud.crs
-    transform = cloud.transform
-
-    img = export_stac(masked_stac, output, crs, transform)
-    return img
+    export_stac(masked_stac, output)
 
 
 def mask_from_probability(cloud_probability, threshold=0.7, average_over=4, dilation_size=2):
