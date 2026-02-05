@@ -26,7 +26,7 @@ This tool is designed to function both on any local-machine and HPC system using
 
 
 ## Feature Overview
-a) Below is an example of 2 animations showing before and after ARD cube generation.
+Below is an example of 2 animations showing before and after ARD cube generation.
 
 <div align="center">
   <h2>Before (Initial Data Cube)</h2>
@@ -44,16 +44,7 @@ a) Below is an example of 2 animations showing before and after ARD cube generat
   </a>
 </div>
 
-<br><br><br>
-
-b) Below is an example of threshold based cloud masking. The higher threshold values are especially good when SCL masks out river corridors in cloud-free scenes.<br> Note: Red color is visual only.
-
-<div align="center">
-  <h2>SCL cloud masking and masks with several threshold values</h2>
-  <a href="assets/cloud_masking_example.png">
-    <img src="assets/cloud_masking_example.png" alt="Cloud masking">
-  </a>
-</div>
+<br><br>
 
 
 

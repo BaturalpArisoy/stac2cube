@@ -228,3 +228,79 @@ def show_parameter_help(
 
     display(toggle, out)
     return toggle, out
+
+COREG_HELP_MD = r"""
+## Co-registration parameter help
+
+**input_path**  
+- Can be a `DataArray`, `Dataset`, or a NetCDF file path.
+
+**grid_size**  
+- The strength of the area scan. The higher, the longer it takes, but it scans more potential matching areas.  
+- If the current setup still removes scenes with low cloud percentages, try increasing `grid_size`.
+
+**max_cc**  
+- Maximum cloud percentage of scenes (from cloud-masked data cube; either SCL or s2cloudless). Scenes beyond this threshold are excluded.  
+- The algorithm is designed so that it detects some cloudy scenes that cannot be co-registered and automatically deletes them from the time series.  
+- In this sense, the algorithm also acts as an automatic cloud-filtering system.
+
+**time_period**  
+- Selection of the time range: `["YYYY-MM-DD", "YYYY-MM-DD"]`.
+
+**min_reliability_keep**  
+- Threshold for the co-registration reliability score (percent).  
+- Scenes with a score lower than this value are dropped. Very low scores often indicate highly cloudy scenes.
+
+**min_reliability_update_ref**  
+- Threshold for the co-registration reliability score (percent).  
+- Scenes with a score lower than this value are kept, but the algorithm will not select them as reference for the co-registration of the next scene.
+
+**max_cloud_update_ref**  
+- Maximum cloud percentage for selecting a scene as reference.  
+- Scenes above this threshold will not be selected as reference for the co-registration of the next scene.
+
+**output_path**  
+- If `None`, the co-registered file will be exported to the same folder as the input, with the extra prefix `"_cr"`.  
+- Otherwise, assign a path to a NetCDF file.
+"""
+
+
+def show_coregistration_parameter_help(
+    title: str = "Show co-registration parameter help",
+    icon: str = "info-circle",
+    open_by_default: bool = False,
+):
+    """
+    Display a toggle button that reveals/hides the co-registration parameter help markdown.
+    Returns (toggle, output_widget) so notebooks can further customize/layout if desired.
+    """
+    toggle = widgets.ToggleButton(
+        value=open_by_default,
+        description=title if not open_by_default else "Hide co-registration parameter help",
+        icon=icon,
+        tooltip="Click to show/hide the co-registration parameter documentation",
+    )
+
+    out = widgets.Output()
+
+    def _render(show: bool):
+        with out:
+            out.clear_output()
+            if show:
+                display(Markdown(COREG_HELP_MD))
+
+    def _on_toggle(change):
+        if change.get("name") != "value":
+            return
+        toggle.description = (
+            "Hide co-registration parameter help"
+            if change["new"]
+            else "Show co-registration parameter help"
+        )
+        _render(change["new"])
+
+    toggle.observe(_on_toggle, names="value")
+
+    _render(open_by_default)
+    display(toggle, out)
+    return toggle, out
