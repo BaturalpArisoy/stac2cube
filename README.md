@@ -76,7 +76,6 @@ Each step is documented by the numbers and the general explanation is given belo
 
 1. **Initial Data Cube**
     - Collects images from STAC catalogs for the selected mission based on users parameters.
-    - Automatically preprocess spectral/radar values based on specifications of the selected mission.
     - Generates multi-dimensional data cubes, suitable for time-series.
     - The data cubes can be updated anytime without generating them from the scratch.
     - Available missions: **Sentinel-2 L2A, Sentinel-2 L1C, Sentinel-1 RTC, Landsat C2 L2, COP DEM Glo-30 (single time)**
@@ -87,12 +86,10 @@ Each step is documented by the numbers and the general explanation is given belo
     - Can be updated anytime.
 3. **Co-register Data Cube**
     - Applies coregistration algorithm on Sentinel-2 data cubes.
-    - The best result is when clouds are masked! 
-        - Therefore if *2_CloudMask_Data_Cube* is skipped, make sure to use Scene Classification Layer masking by setting "cloud_masking = True" on *1_Initial_Data_Cube*
     - AROSICS package provides the coregistration algorithm<br>
     Daniel Scheffler. (2017, July 3). AROSICS: An Automated and Robust Open-Source Image Co-Registration Software for Multi-Sensor Satellite Data (Version 0.12.1). Zenodo. https://doi.org/10.5281/zenodo.3742909
     - Fix the global X/Y shift between consecutive Sentinel-2 items.
-    - IMPORTANT: Larger the area, better quality coregistration result. See the information on interactive notebook.
+    - IMPORTANT: Please read notes in the notebook for better quality results.
 4. **Super-resolve Data Cube**
     - Applies super-resolution algorithm on Sentinel-2 data cubes. 
     - SEN2SR package provides DNN based super-resolution algorithm<br>
