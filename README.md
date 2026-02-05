@@ -51,7 +51,7 @@ Below is an example of 2 animations showing before and after ARD cube generation
 ## Installation
 Installation is possible with a package manager like Micromamba & Anaconda.<br>
 
-Following steps are example how to install with Micromamba, note that some of the syntax can be different with Anaconda.<br><br>
+Following steps are example how to install with Micromamba or Anaconda.<br><br>
 
 ### Step 1: Clone the repository to your current working directory
     $ git clone https://github.com/BaturalpArisoy/stac2cube.git
@@ -59,11 +59,13 @@ Following steps are example how to install with Micromamba, note that some of th
 ### Step 2: Change directory to cloned stac2cube folder 
     $ cd "path/to/stac2cube/"
 
-### Step 3: Install stac2cube via Micromamba (this might take a while!)
+### Step 3: Install stac2cube via Micromamba or Anaconda Prompt (this might take a while!)
 #### a) LINUX
     $ micromamba env create -n stac2cube2 -f environment.yml
-#### b) WINDOWS
+#### b1) WINDOWS Micromamba
     $ micromamba env create -n stac2cube -f environment.yml; micromamba install -n stac2cube -c conda-forge vs2015_runtime
+#### b2) WINDOWS Anaconda Prompt
+    $ conda env create -n stac2cube -f environment.yml && conda activate stac2cube && conda install -c conda-forge vs2015_runtime
 
 ---
 
