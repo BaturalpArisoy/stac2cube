@@ -259,6 +259,15 @@ COREG_HELP_MD = r"""
 - Maximum cloud percentage for selecting a scene as reference.  
 - Scenes above this threshold will not be selected as reference for the co-registration of the next scene.
 
+**first_scene_mode**  
+- The mode of selecting the first reference in the time series. (the first reference is crucial for the co-registration of the rest of the scenes).
+- `first` selects the first scene, while `composite` creates a composite of the first `composite_window_days` days and selects the median as the first reference.
+- `first` is recommended if the first scene is cloud-free, potentially a vegetation season scene. Otherwise, `composite` is recommended to create a more robust reference.
+
+**composite_window_days**  
+- Integer number of days for creating the composite if `first_scene_mode` is set to `composite`.  
+- e.g. if the first scene is on `2020-01-15` and `composite_window_days` is set to `30`, the composite will calculate median of all scenes from `2020-01-15` to `2020-02-15` as the first reference.
+
 **output_path**  
 - If `None`, the co-registered file will be exported to the same folder as the input, with the extra prefix `"_cr"`.  
 - Otherwise, assign a path to a NetCDF file.
