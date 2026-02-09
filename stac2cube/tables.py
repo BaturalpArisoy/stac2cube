@@ -268,6 +268,12 @@ COREG_HELP_MD = r"""
 - Integer number of days for creating the composite if `first_scene_mode` is set to `composite`.  
 - e.g. if the first scene is on `2020-01-15` and `composite_window_days` is set to `30`, the composite will calculate median of all scenes from `2020-01-15` to `2020-02-15` as the first reference.
 
+**iteration**  
+- The number of iterations to set how many time to run the co-registration process.  
+- Default is `1`, however increasing the number of iterations can further improve the co-registration quality.
+- `4` to `5` times is usually enough for good results.
+- If the first_scene_mode is set to `composite`, the mode will be switched to `first` after the first iteration.
+
 **output_path**  
 - If `None`, the co-registered file will be exported to the same folder as the input, with the extra prefix `"_cr"`.  
 - Otherwise, assign a path to a NetCDF file.
