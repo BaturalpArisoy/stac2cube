@@ -61,7 +61,7 @@ Following steps are example how to install with Micromamba or Anaconda.<br><br>
 
 ### Step 3: Install stac2cube via Micromamba or Anaconda Prompt (this might take a while!)
 #### a) LINUX
-    $ micromamba env create -n stac2cube2 -f environment.yml
+    $ micromamba env create -n stac2cube -f environment.yml
 #### b1) WINDOWS Micromamba
     $ micromamba env create -n stac2cube -f environment.yml; micromamba install -n stac2cube -c conda-forge vs2015_runtime
 #### b2) WINDOWS Anaconda Prompt
