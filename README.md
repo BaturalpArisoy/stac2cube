@@ -58,15 +58,19 @@ The result is a data cube that is cloud-masked with customizable thresholds, spa
 
 
 ## Installation
-Installation is possible with a package manager like Micromamba & Anaconda.<br>
+Installation is possible with package managers like [Micromamba](https://mamba.readthedocs.io/en/latest/installation/micromamba-installation.html) & [Anaconda](https://www.anaconda.com/docs/getting-started/anaconda/install).<br>
 
 Following steps are example how to install with Micromamba or Anaconda.<br><br>
 
 ### Step 1: Clone the repository to your current working directory
     $ git clone https://github.com/BaturalpArisoy/stac2cube.git
 
+If git is not available for you, download and unzip the file: https://github.com/BaturalpArisoy/stac2cube/archive/refs/heads/main.zip
+
 ### Step 2: Change directory to cloned stac2cube folder 
     $ cd "path/to/stac2cube/"
+
+*environment.yml* file should be present in this path, please double check.
 
 ### Step 3: Install stac2cube via Micromamba or Anaconda Prompt (this might take a while!)
 #### a) LINUX
