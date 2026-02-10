@@ -176,9 +176,10 @@ Why do _terraybte_ users collect data from _terrabyte_ STAC catalog instead of  
 Arisoy, B., Betz, F., Stauch, G., Klein, D., Dech, S., and Ullmann, T.: Scalable Earth Observation Data Cubes for Advanced Analytics of Dynamic Earth Surface Processes: An Open-Source Package for Customized Processing of Sentinel-2 Data on HPCs and Beyond, EGUsphere [preprint], https://doi.org/10.5194/egusphere-2026-619, 2026.
 
 ### Software
+**Please include the exact version**
 
-Information on how to cite the *stac2cube* Python package (including the exact version) can be found in the `CITATION.cff` file of this repository and on Zenodo.
+Arisoy, B., Betz, F., Stauch, G., Klein, D., Dech, S., & Ullmann, T. (2025). stac2cube (Version 1.3.0). Zenodo. https://doi.org/10.5281/zenodo.18459201
 
 
-<br>
-Contact: https://www.geographie.uni-wuerzburg.de/en/earthobservation/staff/baturalp-arisoy/
+## Contact 
+https://www.geographie.uni-wuerzburg.de/en/earthobservation/staff/baturalp-arisoy/
