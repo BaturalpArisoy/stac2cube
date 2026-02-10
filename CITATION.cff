@@ -22,11 +22,10 @@ url: "https://github.com/BaturalpArisoy/stac2cube"
 
 version: "1.3.0"
 date-released: 2025-02-05
-
 doi: "10.5281/zenodo.18459201"
 
 preferred-citation:
-  type: software
+  type: article
   title: "stac2cube"
   authors:
     - family-names: Arisoy
@@ -41,7 +40,9 @@ preferred-citation:
       given-names: Stefan
     - family-names: Ullmann
       given-names: Tobias
+  year: 2025
   version: "1.3.0"
-  date-released: 2025-02-05
+  journal: "Zenodo"
   doi: "10.5281/zenodo.18459201"
   url: "https://doi.org/10.5281/zenodo.18459201"
+  notes: "software"
