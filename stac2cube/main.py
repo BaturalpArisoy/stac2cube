@@ -3,7 +3,7 @@ from .vector_refiner import proj_check, polygon_2_bbox, read_polygon_file
 from .stac_processing import scale_factor, cloud_mask
 from .get_spectral_indices import calculate_spectral_index
 from .export_cfg import export_stac
-from .get_topo import calculate_topo
+#from .get_topo import calculate_topo
 from .time_series_tools import generate_animation
 from .clip import clip_stac
 from .get_statistics import calculate_statistics
@@ -90,10 +90,10 @@ def get_stac_layers(
     #if animation is True:
     #    generate_animation(stac)
     
-    if mission == 'cop_dem_glo_30':        
-        dem = stac.isel(time=0).dem
-        dem = dem.expand_dims(dim={'band': ['dem']})
-        stac_topo_features = calculate_topo(dem, topographic_features)
+#    if mission == 'cop_dem_glo_30':        
+#        dem = stac.isel(time=0).dem
+#        dem = dem.expand_dims(dim={'band': ['dem']})
+#        stac_topo_features = calculate_topo(dem, topographic_features)
         
     # Dataset -> DataArray
     if mission != 'cop_dem_glo_30':  
