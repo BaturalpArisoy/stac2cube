@@ -2,7 +2,9 @@
 
 # stac2cube <br> STACs to Analysis-Ready Data Cubes
 
-<a href="https://doi.org/10.5281/zenodo.18458716"><img src="https://zenodo.org/badge/940592574.svg" alt="DOI"></a>
+[![Preprint DOI](https://img.shields.io/badge/DOI-10.5194%2Fegusphere--2026--619-blue)](https://doi.org/10.5194/egusphere-2026-619)
+[![DOI](https://zenodo.org/badge/940592574.svg)](https://doi.org/10.5281/zenodo.18458716)
+
 
 **stac2cube** converts SpatioTemporal Asset Catalogs (STAC) into Analysis-Ready Data (ARD) Cubes for efficient Earth Observation (EO) processing. <br><br>
 ARD cubes are designed by 3 major components for Sentinel-2: 
@@ -163,7 +165,7 @@ Why do _terraybte_ users collect data from _terrabyte_ STAC catalog instead of  
 \* Queries are iterated 10 times per each service and the average time per run is calculated (timeit module).
 
 ## How to cite:
-Arisoy, B., Betz, F., Stauch, G., Klein, D., Dech, S., & Ullmann, T. (2026). Scalable Earth Observation Data Cubes for Advanced Analytics of Dynamic Earth Surface Processes: An Open-Source Package for Customized Processing of Sentinel-2 Data on HPCs and Beyond [Unpublished manuscript]. University of Würzburg; German Aerospace Center (DLR).
+Arisoy, B., Betz, F., Stauch, G., Klein, D., Dech, S., and Ullmann, T.: Scalable Earth Observation Data Cubes for Advanced Analytics of Dynamic Earth Surface Processes: An Open-Source Package for Customized Processing of Sentinel-2 Data on HPCs and Beyond, EGUsphere [preprint], https://doi.org/10.5194/egusphere-2026-619, 2026.
 
 <br>
 Contact: https://www.geographie.uni-wuerzburg.de/en/earthobservation/staff/baturalp-arisoy/
