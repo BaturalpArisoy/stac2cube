@@ -4,6 +4,8 @@
 
 [![Preprint DOI](https://img.shields.io/badge/DOI-10.5194%2Fegusphere--2026--619-blue)](https://doi.org/10.5194/egusphere-2026-619)
 [![DOI](https://zenodo.org/badge/940592574.svg)](https://doi.org/10.5281/zenodo.18458716)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
+
 
 -   If you use **stac2cube** in your research, you are kindly asked to cite it. Thank you! <br> See: [Citation](#citation)
 -   Free software: Apache 2.0
@@ -103,7 +105,7 @@ Each step is documented by the numbers and the general explanation is given belo
     Aybar, C., Contreras, J., Donike, S., Portalés-Julià, E., Mateo-García, G., & Gómez-Chova, L. (2026). A radiometrically and spatially consistent super-resolution framework for Sentinel-2. Remote Sensing of Environment, 334, 115222. https://doi.org/10.1016/j.rse.2025.115222
     - Currently super resolve 10-meters RGBN bands to 2.5-meters (soon 20-meters bands will be also super-resolved to 2.5-meters).
 5. **Batch Processing** (under development!)
-    - (when completed) If the user knows what parameters to use for each function above, can set batch processing instead of using each step separetly :) 
+    - (when completed) If the user knows what parameters to use for each function above, can set batch processing instead of using each step separately :) 
 
 ## How to run on HPC
 A documentation file on how to use stac2cube features on terrabyte's HPC for compute-intensive processes and for faster processing time can be found in the [slurm folder](https://github.com/BaturalpArisoy/stac2cube/tree/main/slurm). Don't forget to look at *how_to_use.txt*.
