@@ -79,7 +79,7 @@ def get_stac_layers(
     #stac.rio.write_crs(crs, inplace=True)
     
     # Transform zeros to nan
-    stac = stac.where(stac != 0)
+    #stac = stac.where(stac != 0)
     
     # Index calculation
     # Add code when only indices are asked without band selection
