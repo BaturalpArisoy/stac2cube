@@ -4,7 +4,7 @@ from .stac_processing import scale_factor, cloud_mask
 from .get_spectral_indices import calculate_spectral_index
 from .export_cfg import export_stac
 #from .get_topo import calculate_topo
-from .time_series_tools import generate_animation
+#from .time_series_tools import generate_animation
 from .clip import clip_stac
 from .get_statistics import calculate_statistics
 from .get_update import get_stac_parameters, update_stac
