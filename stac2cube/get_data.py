@@ -130,9 +130,6 @@ def get_stac(mission: str, polygon, resolution: int, daterange: list, bands: lis
                 print("Warning: Some dates in the stac dataset did not have a matching orbit state.")
             stac = stac.assign_coords(orbit_state=("time", aligned_orbit_states))
 
-        date_list = [item.properties['datetime'] for item in items]
-        stac = stac.assign_coords(acquisition=("time", pd.to_datetime(date_list, format='mixed').to_numpy(dtype='datetime64[ns]')))
-
         return stac, None, tiles
 
 def _catalogue_search(catalog, collection, bbox, daterange, query, mission):
