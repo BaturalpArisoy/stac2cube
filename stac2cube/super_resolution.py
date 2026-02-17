@@ -120,8 +120,8 @@ def superresolve_single_time(
     bands_to_use,
     old_res=10.0,
     new_res=2.5,
-    nan_pixel_buffer=8,  
-    edge_crop_px=8,      
+    nan_pixel_buffer=8,
+    edge_crop_px=8,
 ):
     """
     Super-resolve a SINGLE time slice.
@@ -156,9 +156,11 @@ def superresolve_single_time(
     da_square = da_reordered.pad(pad_dict, constant_values=0)
 
     # ============================================================
-    # 1) BUILD LR NAN/CLOUD MASK 
+    # 1) BUILD LR NAN/CLOUD MASK
     # ============================================================
-    mask_lr = da_square.isnull().any(dim="band").compute().to_numpy()  # (y_lr, x_lr) bool
+    mask_lr = (
+        da_square.isnull().any(dim="band").compute().to_numpy()
+    )  # (y_lr, x_lr) bool
 
     # ============================================================
     # 2) INFERENCE INPUT
@@ -167,14 +169,20 @@ def superresolve_single_time(
     X = torch.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
 
     with suppress_tqdm():
-        superX = sen2sr.predict_large(model=model, X=X, overlap=32)  # (band, y_hr_full, x_hr_full)
+        superX = sen2sr.predict_large(
+            model=model, X=X, overlap=32
+        )  # (band, y_hr_full, x_hr_full)
 
     # ============================================================
-    # 3) UPSAMPLE LR MASK TO HR 
+    # 3) UPSAMPLE LR MASK TO HR
     # ============================================================
     scale = int(round(old_res / new_res))  # 10m -> 2.5m => 4
-    mask_lr_t = torch.from_numpy(mask_lr.astype(np.float32))[None, None, :, :].to(device)
-    mask_hr_t = F.interpolate(mask_lr_t, scale_factor=scale, mode="nearest")  # (1,1,y_hr_full,x_hr_full)
+    mask_lr_t = torch.from_numpy(mask_lr.astype(np.float32))[None, None, :, :].to(
+        device
+    )
+    mask_hr_t = F.interpolate(
+        mask_lr_t, scale_factor=scale, mode="nearest"
+    )  # (1,1,y_hr_full,x_hr_full)
     mask_hr = mask_hr_t[0, 0].bool()  # (y_hr_full, x_hr_full)
 
     # ============================================================
@@ -195,8 +203,8 @@ def superresolve_single_time(
     y0, y1 = pad_y_top_hr, pad_y_top_hr + orig_h_lr * scale
     x0, x1 = pad_x_left_hr, pad_x_left_hr + orig_w_lr * scale
 
-    superX = superX[:, y0:y1, x0:x1]         # (band, y_hr, x_hr)
-    mask_hr = mask_hr[y0:y1, x0:x1]          # (y_hr, x_hr)
+    superX = superX[:, y0:y1, x0:x1]  # (band, y_hr, x_hr)
+    mask_hr = mask_hr[y0:y1, x0:x1]  # (y_hr, x_hr)
     cropped_tf = full_tf * Affine.translation(x0, y0)
 
     # ============================================================
@@ -267,7 +275,9 @@ def superresolve_single_time(
     )
 
     da_super = ds_tmp[var_name].rio.set_spatial_dims("x", "y", inplace=False)
-    da_super = da_super.rio.write_crs(crs_wkt, inplace=False).rio.write_transform(cropped_tf, inplace=False)
+    da_super = da_super.rio.write_crs(crs_wkt, inplace=False).rio.write_transform(
+        cropped_tf, inplace=False
+    )
 
     da_super.attrs.update(orig_attrs)
     da_super.attrs["status"] = "super-resolved"
@@ -304,16 +314,22 @@ def super_resolve_cube(
     edge_crop_px = 8
 
     if isinstance(input_path, xr.DataArray):
-        raise ValueError("This version expects a NetCDF file path so it can read CF georef from metadata.")
+        raise ValueError(
+            "This version expects a NetCDF file path so it can read CF georef from metadata."
+        )
 
     ds_in = xr.open_dataset(input_path)
     dataarray = ds_in[var_name]
 
     crs_wkt, tf = _extract_cf_crs_and_geotransform(ds_in, var_name)
     if crs_wkt is None:
-        raise ValueError("Could not extract CRS WKT from CF grid mapping (spatial_ref).")
+        raise ValueError(
+            "Could not extract CRS WKT from CF grid mapping (spatial_ref)."
+        )
     if tf is None:
-        raise ValueError("Could not extract/build transform from CF metadata or x/y coords.")
+        raise ValueError(
+            "Could not extract/build transform from CF metadata or x/y coords."
+        )
 
     indices = dataarray.attrs.get("indices", None)
 
@@ -350,7 +366,9 @@ def super_resolve_cube(
             )
             super_list.append(da_sr_t)
 
-        da_super_all = xr.concat(super_list, dim="time", coords="minimal", compat="override")
+        da_super_all = xr.concat(
+            super_list, dim="time", coords="minimal", compat="override"
+        )
         da_super_all = _copy_time_coords(dataarray, da_super_all)
 
         tf0 = super_list[0].rio.transform()
@@ -425,6 +443,7 @@ def super_resolve_cube(
 
     try:
         from rasterio.crs import CRS
+
         epsg = CRS.from_wkt(crs_wkt).to_epsg()
         if epsg is not None:
             crs_epsg = f"EPSG:{epsg}"
@@ -435,15 +454,21 @@ def super_resolve_cube(
 
     if "spatial_ref" in ds_out.variables:
         tf_out = ds_out.rio.transform()
-        ds_out["spatial_ref"].attrs["GeoTransform"] = (
-            f"{tf_out.c} {tf_out.a} {tf_out.b} {tf_out.f} {tf_out.d} {tf_out.e}"
-        )
+        ds_out["spatial_ref"].attrs[
+            "GeoTransform"
+        ] = f"{tf_out.c} {tf_out.a} {tf_out.b} {tf_out.f} {tf_out.d} {tf_out.e}"
 
     tf_out = ds_out.rio.transform()
     transform9 = [
-        float(tf_out.a), float(tf_out.b), float(tf_out.c),
-        float(tf_out.d), float(tf_out.e), float(tf_out.f),
-        0.0, 0.0, 1.0,
+        float(tf_out.a),
+        float(tf_out.b),
+        float(tf_out.c),
+        float(tf_out.d),
+        float(tf_out.e),
+        float(tf_out.f),
+        0.0,
+        0.0,
+        1.0,
     ]
     ds_out.attrs["transform"] = transform9
     ds_out[var_name].attrs["transform"] = transform9

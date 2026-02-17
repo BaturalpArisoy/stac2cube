@@ -11,10 +11,20 @@ import cv2
 import os
 import warnings
 from rasterio.errors import NotGeoreferencedWarning
+
 warnings.filterwarnings("ignore", category=NotGeoreferencedWarning)
 
 
-def get_cloud_layers(polygon=None, daterange=None, output=None, threshold=None, clip_raster=None, masking=None, update=None, slurm_timer=None):
+def get_cloud_layers(
+    polygon=None,
+    daterange=None,
+    output=None,
+    threshold=None,
+    clip_raster=None,
+    masking=None,
+    update=None,
+    slurm_timer=None,
+):
 
     if masking:
         stac_parameters = get_stac_parameters(masking)
@@ -28,18 +38,37 @@ def get_cloud_layers(polygon=None, daterange=None, output=None, threshold=None, 
         if not daterange:
             raise ValueError("Error: Please select a daterange.")
         if not polygon:
-            raise ValueError("Error: Please select a polygon or bbox list with geographic coordinates.")
+            raise ValueError(
+                "Error: Please select a polygon or bbox list with geographic coordinates."
+            )
 
     # --- STAC Retrieval ---
     # Default maximum cloud cover and mission configuration.
     max_cc = 100
-    mission = 'sentinel_2_l1c'
-    bands = ['coastal', 'blue', 'red', 'rededge1', 'nir',
-             'nir08', 'nir09', 'cirrus', 'swir16', 'swir22']
+    mission = "sentinel_2_l1c"
+    bands = [
+        "coastal",
+        "blue",
+        "red",
+        "rededge1",
+        "nir",
+        "nir08",
+        "nir09",
+        "cirrus",
+        "swir16",
+        "swir22",
+    ]
 
     # Retrieve the lazy STAC DataArray.
-    stac = get_stac_layers(mission=mission, polygon=polygon, daterange=daterange,
-                           bands=bands, max_cc=max_cc, clip_raster=clip_raster, q=True)
+    stac = get_stac_layers(
+        mission=mission,
+        polygon=polygon,
+        daterange=daterange,
+        bands=bands,
+        max_cc=max_cc,
+        clip_raster=clip_raster,
+        q=True,
+    )
     crs = stac.crs
     transform = stac.transform
     bbox = stac.bbox
@@ -57,8 +86,12 @@ def get_cloud_layers(polygon=None, daterange=None, output=None, threshold=None, 
     average_over = 4
     dilation_size = 2
     default_threshold = 0.7
-    cloud_detector = S2PixelCloudDetector(threshold=default_threshold, average_over=average_over,
-                                          dilation_size=dilation_size, all_bands=False)
+    cloud_detector = S2PixelCloudDetector(
+        threshold=default_threshold,
+        average_over=average_over,
+        dilation_size=dilation_size,
+        all_bands=False,
+    )
 
     cloud_prob_results = []
     times = []  # To store the time coordinate for each processed slice
@@ -66,6 +99,7 @@ def get_cloud_layers(polygon=None, daterange=None, output=None, threshold=None, 
 
     if slurm_timer:
         import time
+
         slurm_timer = slurm_timer * 3600
         start_time = time.time()
 
@@ -75,7 +109,7 @@ def get_cloud_layers(polygon=None, daterange=None, output=None, threshold=None, 
         times.append(t)
 
         # Transpose to (y, x, band) for s2cloudless and add a batch dimension.
-        img_transposed = img.transpose('y', 'x', 'band')
+        img_transposed = img.transpose("y", "x", "band")
         img_np = img_transposed.to_numpy()[np.newaxis, ...]
 
         # Compute the cloud probability maps (3D with shape: (batch, y, x)).
@@ -93,13 +127,18 @@ def get_cloud_layers(polygon=None, daterange=None, output=None, threshold=None, 
             minutes, seconds = divmod(rem, 60)
             # Check if the elapsed time has reached or exceeded the threshold
             if elapsed >= slurm_timer:
-                print("Time threshold reached! Exiting loop and exporting the collected cloud maps...")
+                print(
+                    "Time threshold reached! Exiting loop and exporting the collected cloud maps..."
+                )
                 break
 
     # Assemble the cloud probability DataArray.
     cp_stack = np.stack(cloud_prob_results, axis=0)  # shape: (time, y, x)
-    cp_da = xr.DataArray(cp_stack, dims=["time", "y", "x"],
-                         coords={"time": times, "y": stac.y, "x": stac.x})
+    cp_da = xr.DataArray(
+        cp_stack,
+        dims=["time", "y", "x"],
+        coords={"time": times, "y": stac.y, "x": stac.x},
+    )
     cp_da = cp_da.expand_dims(dim={"band": ["cloud_prob"]})
 
     cp_da.name = "Cloud_Stack"
@@ -118,10 +157,10 @@ def get_cloud_layers(polygon=None, daterange=None, output=None, threshold=None, 
         cloud_prob_uint8 = (cp_da.sel(band="cloud_prob") * 100).astype(np.uint8)
         cloud_only_stack = cloud_prob_uint8.expand_dims(dim="band")
         cloud_only_stack = cloud_only_stack.assign_coords(band=["cloud_prob"])
-        
+
         if update:
             cloud_only_stack = update_prob_maps(stac_existing, cloud_only_stack)
-        
+
         cloud_only_stack = cloud_only_stack.transpose("time", "band", "y", "x")
 
     else:
@@ -135,22 +174,24 @@ def get_cloud_layers(polygon=None, daterange=None, output=None, threshold=None, 
 
         # If threshold(s) are provided, compute the cloud masks using mask_from_probability.
         # This function supports either a single threshold or a list of thresholds.
-        mask_da = mask_from_probability(cloud_only_stack.sel(band="cloud_prob"),
-                                        threshold=threshold,
-                                        average_over=average_over,
-                                        dilation_size=dilation_size)
-        
+        mask_da = mask_from_probability(
+            cloud_only_stack.sel(band="cloud_prob"),
+            threshold=threshold,
+            average_over=average_over,
+            dilation_size=dilation_size,
+        )
+
         # Concatenate the probability layer with the generated mask(s) along the band dimension.
         cloud_only_stack = xr.concat([cloud_only_stack, mask_da], dim="band")
         cloud_only_stack = cloud_only_stack.transpose("time", "band", "y", "x")
 
     # Add data array attributes
     if not update:
-        cloud_only_stack.attrs['bbox'] = bbox
-        #cloud_only_stack.attrs['mission'] = mission
-        #cloud_only_stack.attrs['spectral_bands'] = bands
-        #cloud_only_stack.attrs['indices'] = []
-    
+        cloud_only_stack.attrs["bbox"] = bbox
+        # cloud_only_stack.attrs['mission'] = mission
+        # cloud_only_stack.attrs['spectral_bands'] = bands
+        # cloud_only_stack.attrs['indices'] = []
+
     # --- Export and Optional Masking ---
     # Export the resulting stack.
     img = export_stac(cloud_only_stack, output, crs, transform)
@@ -165,34 +206,41 @@ def get_cloud_layers(polygon=None, daterange=None, output=None, threshold=None, 
 
     return img
 
-def mask_stac_clouds(stac, cloud, mask_layer, output): 
-    if isinstance(stac, (str, os.PathLike)): 
-        stac = xr.open_dataset(stac) 
-        stac = stac.Spectral_Temporal_Stack 
 
-    if isinstance(cloud, (str, os.PathLike)): 
-        cloud = xr.open_dataset(cloud) 
-        cloud = cloud.Cloud_Stack 
+def mask_stac_clouds(stac, cloud, mask_layer, output):
+    if isinstance(stac, (str, os.PathLike)):
+        stac = xr.open_dataset(stac)
+        stac = stac.Spectral_Temporal_Stack
 
-    if isinstance(stac, xr.Dataset): 
-        stac = stac.Spectral_Temporal_Stack 
+    if isinstance(cloud, (str, os.PathLike)):
+        cloud = xr.open_dataset(cloud)
+        cloud = cloud.Cloud_Stack
 
-    if isinstance(cloud, xr.Dataset): 
-        cloud = cloud.Cloud_Stack 
+    if isinstance(stac, xr.Dataset):
+        stac = stac.Spectral_Temporal_Stack
 
-    cloud_mask = cloud.sel(band=mask_layer) 
-    masked_stac = stac.where(cloud_mask == 0) 
+    if isinstance(cloud, xr.Dataset):
+        cloud = cloud.Cloud_Stack
 
-    # Calculate cloud percentage per time slice. 
-    null_count_per_time = masked_stac.isnull().sum(dim=['band', 'y', 'x']) 
-    total_elements = masked_stac.sizes['band'] * masked_stac.sizes['y'] * masked_stac.sizes['x'] 
-    cloud_percentage_int = ((null_count_per_time / total_elements) * 100).astype(int) 
-    masked_stac = masked_stac.assign_coords(cloud_percentage=('time', cloud_percentage_int.data)) 
+    cloud_mask = cloud.sel(band=mask_layer)
+    masked_stac = stac.where(cloud_mask == 0)
+
+    # Calculate cloud percentage per time slice.
+    null_count_per_time = masked_stac.isnull().sum(dim=["band", "y", "x"])
+    total_elements = (
+        masked_stac.sizes["band"] * masked_stac.sizes["y"] * masked_stac.sizes["x"]
+    )
+    cloud_percentage_int = ((null_count_per_time / total_elements) * 100).astype(int)
+    masked_stac = masked_stac.assign_coords(
+        cloud_percentage=("time", cloud_percentage_int.data)
+    )
 
     export_stac(masked_stac, output)
 
 
-def mask_from_probability(cloud_probability, threshold=0.7, average_over=4, dilation_size=2):
+def mask_from_probability(
+    cloud_probability, threshold=0.7, average_over=4, dilation_size=2
+):
 
     if not isinstance(threshold, list):
         thresholds = [threshold]
@@ -210,17 +258,20 @@ def mask_from_probability(cloud_probability, threshold=0.7, average_over=4, dila
     for t_val in thresholds:
         # Scale the threshold from 0-100 to 0-1.
         scaled_threshold = t_val / 100.0
-        cloud_detector = S2PixelCloudDetector(threshold=scaled_threshold,
-                                              average_over=average_over,
-                                              dilation_size=dilation_size)
+        cloud_detector = S2PixelCloudDetector(
+            threshold=scaled_threshold,
+            average_over=average_over,
+            dilation_size=dilation_size,
+        )
         mask_list = []
 
         for t in prob_da.time.values:
             prob_slice = prob_da.sel(time=t)
             prob_np = prob_slice.to_numpy()[np.newaxis, ...]
             cm = cloud_detector.get_mask_from_prob(prob_np, threshold=scaled_threshold)
-            mask_da = xr.DataArray(cm[0], dims=["y", "x"],
-                                   coords={"y": prob_slice.y, "x": prob_slice.x})
+            mask_da = xr.DataArray(
+                cm[0], dims=["y", "x"], coords={"y": prob_slice.y, "x": prob_slice.x}
+            )
             mask_list.append(mask_da)
 
         threshold_mask_da = xr.concat(mask_list, dim="time")
@@ -251,7 +302,7 @@ def cloud_filter(inp, max_cloud):
     else:  # assume xr.DataArray
         da = inp
 
-    #da = da.where(da["cloud_percentage"] <= int(max_cloud), drop=True)
-    #da = da.rio.write_crs(da.crs)
+    # da = da.where(da["cloud_percentage"] <= int(max_cloud), drop=True)
+    # da = da.rio.write_crs(da.crs)
 
     return da.where(da["cloud_percentage"] <= int(max_cloud), drop=True)

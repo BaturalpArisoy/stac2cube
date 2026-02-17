@@ -1,5 +1,6 @@
 from .vector_refiner import polygon_2_gdf
 
+
 def clip_stac(stac, polygon, crs=None, bbox_crs="EPSG:4326"):
     """
     polygon:

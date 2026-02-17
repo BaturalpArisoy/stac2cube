@@ -25,7 +25,9 @@ def export_stac(
     overwrite=True,
 ):
     if not isinstance(stac, (xr.DataArray, xr.Dataset)):
-        raise TypeError(f"export_stac expects xarray.DataArray or xarray.Dataset, got {type(stac)}")
+        raise TypeError(
+            f"export_stac expects xarray.DataArray or xarray.Dataset, got {type(stac)}"
+        )
 
     crs = crs or stac.crs
     transform = transform or stac.transform
@@ -33,7 +35,6 @@ def export_stac(
     stac.attrs["transform"] = transform
     stac = stac.rio.write_crs(crs, inplace=True)
     stac.attrs["crs"] = crs
-
 
     if _is_dask_backed(stac):
         with ProgressBar():
@@ -44,6 +45,7 @@ def export_stac(
             os.remove(output)
         except PermissionError:
             from datetime import datetime
+
             suffix = datetime.now().strftime("_%Y%m%d_%H%M%S")
             output = str(Path(output).with_stem(Path(output).stem + suffix))
 
@@ -58,7 +60,9 @@ def export_stac(
     return stac
 
 
-def export_to_cogs(stac: xr.DataArray, output_dir: str, prefix: str = "", dtype="float32"):
+def export_to_cogs(
+    stac: xr.DataArray, output_dir: str, prefix: str = "", dtype="float32"
+):
     outdir = Path(output_dir)
     outdir.mkdir(parents=True, exist_ok=True)
 
@@ -74,10 +78,17 @@ def export_to_cogs(stac: xr.DataArray, output_dir: str, prefix: str = "", dtype=
         for i in range(ds.sizes["time"]):
             single = ds.isel(time=i)
             t = single["time"].values
-            date_str = np.datetime_as_string(t, unit="D") if np.issubdtype(type(t), np.datetime64) or np.issubdtype(np.asarray(t).dtype, np.datetime64) else str(t)[:10]
+            date_str = (
+                np.datetime_as_string(t, unit="D")
+                if np.issubdtype(type(t), np.datetime64)
+                or np.issubdtype(np.asarray(t).dtype, np.datetime64)
+                else str(t)[:10]
+            )
             out_file = outdir / f"{prefix}{date_str}.tif"
             print(f"Writing {out_file.name}")
-            single.rio.to_raster(out_file, driver="COG", dtype=dtype, compress="deflate")
+            single.rio.to_raster(
+                out_file, driver="COG", dtype=dtype, compress="deflate"
+            )
     else:
         out_file = outdir / f"{prefix}cog.tif"
         print(f"Writing {out_file.name}")

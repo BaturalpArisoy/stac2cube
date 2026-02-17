@@ -6,7 +6,7 @@ def missions():
     columns = [
         "name",
         "allias",
-        #"stac_catalog",
+        # "stac_catalog",
         "default_resolution",
         "bands",
         "indices",
@@ -18,17 +18,30 @@ def missions():
         "aggregator",
         "stats",
         "update",
-        "animation"
+        "animation",
     ]
-    
+
     df = pd.DataFrame(columns=columns)
-    
+
     sentinel_2_l2a = {
         "name": "sentinel_2_l2a",
         "allias": "s2",
-        #"stac_catalog": "https://earth-search.aws.element84.com/v1/",
+        # "stac_catalog": "https://earth-search.aws.element84.com/v1/",
         "default_resolution": 10,
-        "bands": ["coastal", "blue", "green", "red", "rededge1", "rededge2", "rededge3", "nir", "nir08", "nir09", "swir16", "swir22"],
+        "bands": [
+            "coastal",
+            "blue",
+            "green",
+            "red",
+            "rededge1",
+            "rededge2",
+            "rededge3",
+            "nir",
+            "nir08",
+            "nir09",
+            "swir16",
+            "swir22",
+        ],
         "indices": ["ndvi", "ndwi", "savi"],
         "topographic_features": False,
         "max_cc": 100,
@@ -38,15 +51,29 @@ def missions():
         "aggregator": ["mean", "median"],
         "stats": ["mean", "median", "std", "min", "max"],
         "update": "path/to/stac.nc",
-        "animation": [True, False]
+        "animation": [True, False],
     }
 
     sentinel_2_l1c = {
         "name": "sentinel_2_l1c",
         "allias": "s2_l1c",
-        #"stac_catalog": "https://earth-search.aws.element84.com/v1/",
+        # "stac_catalog": "https://earth-search.aws.element84.com/v1/",
         "default_resolution": 10,
-        "bands": ["coastal", "blue", "green", "red", "rededge1", "rededge2", "rededge3", "nir", "nir08", "nir09", "cirrus", "swir16", "swir22"],
+        "bands": [
+            "coastal",
+            "blue",
+            "green",
+            "red",
+            "rededge1",
+            "rededge2",
+            "rededge3",
+            "nir",
+            "nir08",
+            "nir09",
+            "cirrus",
+            "swir16",
+            "swir22",
+        ],
         "indices": ["ndvi", "ndwi", "savi"],
         "topographic_features": False,
         "max_cc": 100,
@@ -56,13 +83,13 @@ def missions():
         "aggregator": ["mean", "median"],
         "stats": ["mean", "median", "std", "min", "max"],
         "update": "path/to/stac.nc",
-        "animation": [True, False]
+        "animation": [True, False],
     }
 
     sentinel_1_rtc = {
         "name": "sentinel_1_rtc",
         "allias": "s1",
-        #"stac_catalog": "https://planetarycomputer.microsoft.com/api/stac/v1",
+        # "stac_catalog": "https://planetarycomputer.microsoft.com/api/stac/v1",
         "default_resolution": 10,
         "bands": ["vh", "vv"],
         "indices": ["vh/vv", "vv/vh", "rvi"],
@@ -74,15 +101,24 @@ def missions():
         "aggregator": ["mean", "median"],
         "stats": ["mean", "median", "std", "min", "max"],
         "update": "path/to/stac.nc",
-        "animation": False
+        "animation": False,
     }
 
     landsat_c2_l2 = {
         "name": "landsat_c2_l2",
         "allias": "l_oli",
-        #"stac_catalog": "https://planetarycomputer.microsoft.com/api/stac/v1",
+        # "stac_catalog": "https://planetarycomputer.microsoft.com/api/stac/v1",
         "default_resolution": 30,
-        "bands": ["coastal", "blue", "green", "red", "nir", "swir1", "swir2", "thermal"],
+        "bands": [
+            "coastal",
+            "blue",
+            "green",
+            "red",
+            "nir",
+            "swir1",
+            "swir2",
+            "thermal",
+        ],
         "indices": ["ndvi", "ndwi", "savi"],
         "topographic_features": False,
         "max_cc": 100,
@@ -92,13 +128,13 @@ def missions():
         "aggregator": ["mean", "median"],
         "stats": ["mean", "median", "std", "min", "max"],
         "update": "path/to/stac.nc",
-        "animation": [True, False]
+        "animation": [True, False],
     }
 
     cop_dem_glo_30 = {
         "name": "cop_dem_glo_30",
         "allias": "cop_dem",
-        #"stac_catalog": "https://stac.terrabyte.lrz.de/public/api/",
+        # "stac_catalog": "https://stac.terrabyte.lrz.de/public/api/",
         "default_resolution": False,
         "bands": False,
         "indices": False,
@@ -110,15 +146,28 @@ def missions():
         "aggregator": False,
         "stats": False,
         "update": False,
-        "animation": False
+        "animation": False,
     }
-    
-    df = pd.concat([df, pd.DataFrame([sentinel_2_l2a, sentinel_2_l1c, sentinel_1_rtc, landsat_c2_l2, cop_dem_glo_30])], ignore_index=True)
-    df.style.set_properties(**{'text-align': 'left'})
-    pd.set_option('display.max_colwidth', None)
+
+    df = pd.concat(
+        [
+            df,
+            pd.DataFrame(
+                [
+                    sentinel_2_l2a,
+                    sentinel_2_l1c,
+                    sentinel_1_rtc,
+                    landsat_c2_l2,
+                    cop_dem_glo_30,
+                ]
+            ),
+        ],
+        ignore_index=True,
+    )
+    df.style.set_properties(**{"text-align": "left"})
+    pd.set_option("display.max_colwidth", None)
 
     return df
-
 
 
 def missions_terrabyte():
@@ -191,6 +240,7 @@ HELP_MD = r"""
 - `True` hides print outputs except progress bar.
 """
 
+
 def show_parameter_help(
     title: str = "Show parameter help",
     icon: str = "info-circle",
@@ -218,7 +268,9 @@ def show_parameter_help(
     def _on_toggle(change):
         if change.get("name") != "value":
             return
-        toggle.description = "Hide parameter help" if change["new"] else "Show parameter help"
+        toggle.description = (
+            "Hide parameter help" if change["new"] else "Show parameter help"
+        )
         _render(change["new"])
 
     toggle.observe(_on_toggle, names="value")
@@ -228,6 +280,7 @@ def show_parameter_help(
 
     display(toggle, out)
     return toggle, out
+
 
 COREG_HELP_MD = r"""
 ## Co-registration parameter help
@@ -291,7 +344,9 @@ def show_coregistration_parameter_help(
     """
     toggle = widgets.ToggleButton(
         value=open_by_default,
-        description=title if not open_by_default else "Hide co-registration parameter help",
+        description=(
+            title if not open_by_default else "Hide co-registration parameter help"
+        ),
         icon=icon,
         tooltip="Click to show/hide the co-registration parameter documentation",
     )

@@ -58,14 +58,18 @@ def _load_coreg_input(input_obj, stack_name="Spectral_Temporal_Stack"):
     if isinstance(input_obj, str):
         ds = xr.open_dataset(input_obj)
         if stack_name not in ds:
-            raise KeyError(f"Dataset has no variable '{stack_name}'. Found: {list(ds.data_vars)}")
+            raise KeyError(
+                f"Dataset has no variable '{stack_name}'. Found: {list(ds.data_vars)}"
+            )
         stack = ds[stack_name]
         input_path_str = input_obj
 
     elif isinstance(input_obj, xr.Dataset):
         ds = input_obj
         if stack_name not in ds:
-            raise KeyError(f"Dataset has no variable '{stack_name}'. Found: {list(ds.data_vars)}")
+            raise KeyError(
+                f"Dataset has no variable '{stack_name}'. Found: {list(ds.data_vars)}"
+            )
         stack = ds[stack_name]
         input_path_str = None
 
@@ -75,7 +79,9 @@ def _load_coreg_input(input_obj, stack_name="Spectral_Temporal_Stack"):
         input_path_str = None
 
     else:
-        raise TypeError("input_path must be one of: str (netcdf path), xarray.Dataset, xarray.DataArray")
+        raise TypeError(
+            "input_path must be one of: str (netcdf path), xarray.Dataset, xarray.DataArray"
+        )
 
     cloud_pct_da = None
     if "cloud_percentage" in stack.coords:
@@ -111,7 +117,11 @@ def _get_geotransform(stack, ds=None):
         pass
 
     try:
-        if ds is not None and "spatial_ref" in ds.variables and hasattr(ds.spatial_ref, "GeoTransform"):
+        if (
+            ds is not None
+            and "spatial_ref" in ds.variables
+            and hasattr(ds.spatial_ref, "GeoTransform")
+        ):
             return [float(x) for x in ds.spatial_ref.GeoTransform.split()]
     except Exception:
         pass
@@ -147,7 +157,11 @@ def _get_crs_wkt(stack, ds=None):
         pass
 
     try:
-        if ds is not None and "spatial_ref" in ds.variables and hasattr(ds.spatial_ref, "crs_wkt"):
+        if (
+            ds is not None
+            and "spatial_ref" in ds.variables
+            and hasattr(ds.spatial_ref, "crs_wkt")
+        ):
             return ds.spatial_ref.crs_wkt
     except Exception:
         pass
@@ -197,11 +211,14 @@ def _roi_to_geom_and_projected_bbox(roi, roi_crs="EPSG:4326", target_crs_wkt=Non
 
     elif isinstance(roi, str) and pathlib.Path(roi).suffix.lower() == ".gpkg":
         import geopandas as gpd
+
         gdf = gpd.read_file(roi)
         if gdf.empty:
             raise ValueError("GPKG ROI is empty.")
         if gdf.crs is None:
-            raise ValueError("GPKG has no CRS. Please assign one before using it as ROI.")
+            raise ValueError(
+                "GPKG has no CRS. Please assign one before using it as ROI."
+            )
         geom = gdf.geometry.unary_union
         src_crs = CRS.from_user_input(gdf.crs)
 
@@ -224,7 +241,9 @@ def _roi_to_geom_and_projected_bbox(roi, roi_crs="EPSG:4326", target_crs_wkt=Non
         xs.append(X)
         ys.append(Y)
 
-    return (float(min(xs)), float(min(ys)), float(max(xs)), float(max(ys))), str(target_crs)
+    return (float(min(xs)), float(min(ys)), float(max(xs)), float(max(ys))), str(
+        target_crs
+    )
 
 
 def _apply_time_and_cloud_filters(stack, max_cc=None, time_period=None):
@@ -239,6 +258,7 @@ def _apply_time_and_cloud_filters(stack, max_cc=None, time_period=None):
     if max_cc is not None:
         try:
             from stac2cube import filter_cloud
+
             out = filter_cloud(out, max_cc)
         except Exception:
             # fallback if filter_cloud not importable or fails
@@ -291,10 +311,14 @@ def coregister_cube(
         _first_scene_mode,
         do_export=True,
     ):
-        stac, masked_stac, cloud_pct_da, input_path_str = _load_coreg_input(_input_obj, stack_name=stack_name)
+        stac, masked_stac, cloud_pct_da, input_path_str = _load_coreg_input(
+            _input_obj, stack_name=stack_name
+        )
 
         # replace hard-coded test filters
-        filtered_data = _apply_time_and_cloud_filters(masked_stac, max_cc=max_cc, time_period=time_period)
+        filtered_data = _apply_time_and_cloud_filters(
+            masked_stac, max_cc=max_cc, time_period=time_period
+        )
 
         # geo
         crs_wkt = _get_crs_wkt(filtered_data, ds=stac)
@@ -303,7 +327,9 @@ def coregister_cube(
 
         times = filtered_data.time.values
         if times.size == 0:
-            raise ValueError("No scenes left after applying max_cc/time_period filters.")
+            raise ValueError(
+                "No scenes left after applying max_cc/time_period filters."
+            )
         band_names = filtered_data.band.values
         height = filtered_data.sizes["y"]
         width = filtered_data.sizes["x"]
@@ -316,7 +342,9 @@ def coregister_cube(
             im_ref = filtered_data.sel(time=times[0]).transpose("y", "x", "band")
             im_ref = im_ref.where(im_ref != 0, np.nan)
             y_coords, x_coords = _compute_coords(geotransform, height, width)
-            im_ref = im_ref.assign_coords({"y": ("y", y_coords), "x": ("x", x_coords), "time": times[0]})
+            im_ref = im_ref.assign_coords(
+                {"y": ("y", y_coords), "x": ("x", x_coords), "time": times[0]}
+            )
             corrected_images.append(im_ref)
             current_reference = im_ref
             start_idx = 1
@@ -331,7 +359,9 @@ def coregister_cube(
             master_ref = master_median.transpose("y", "x", "band").where(
                 master_median.transpose("y", "x", "band") != 0, np.nan
             )
-            master_geoArr = GeoArray(master_ref.values, geotransform=geotransform, projection=crs_wkt)
+            master_geoArr = GeoArray(
+                master_ref.values, geotransform=geotransform, projection=crs_wkt
+            )
             start_idx = 0
         else:
             raise ValueError("first_scene_mode must be 'first' or 'composite'")
@@ -340,7 +370,7 @@ def coregister_cube(
 
         for idx in tqdm(
             indices,
-            total=len(times),       # show full count (e.g., 1/23 in "first" mode)
+            total=len(times),  # show full count (e.g., 1/23 in "first" mode)
             initial=start_idx,
             desc="Co-registering scenes",
             unit="scene",
@@ -353,13 +383,21 @@ def coregister_cube(
             else:
                 if current_reference is None:
                     raise RuntimeError("No valid reference available for chained mode.")
-                ref_geoArr = GeoArray(current_reference.values, geotransform=geotransform, projection=crs_wkt)
+                ref_geoArr = GeoArray(
+                    current_reference.values,
+                    geotransform=geotransform,
+                    projection=crs_wkt,
+                )
 
-            tgt_geoArr = GeoArray(im_target.values, geotransform=geotransform, projection=crs_wkt)
+            tgt_geoArr = GeoArray(
+                im_target.values, geotransform=geotransform, projection=crs_wkt
+            )
 
             # sliding-grid candidates
             height_target, width_target, _ = im_target.shape
-            left, bottom, right, top = _get_bounds_from_gt(geotransform, height_target, width_target)
+            left, bottom, right, top = _get_bounds_from_gt(
+                geotransform, height_target, width_target
+            )
 
             margin = 1.0 / (grid_size + 1)
             frac_vals = np.linspace(margin, 1.0 - margin, grid_size)
@@ -369,7 +407,9 @@ def coregister_cube(
                 for ix, fx in enumerate(frac_vals):
                     x_wp = left + fx * (right - left)
                     y_wp = bottom + fy * (top - bottom)
-                    manual_wps.append((f"g{grid_size}x{grid_size}_r{iy}_c{ix}", (x_wp, y_wp)))
+                    manual_wps.append(
+                        (f"g{grid_size}x{grid_size}_r{iy}_c{ix}", (x_wp, y_wp))
+                    )
 
             candidates = [("auto", None)] + manual_wps
             successful_matches = []
@@ -378,15 +418,24 @@ def coregister_cube(
                 for label, wp in candidates:
                     try:
                         if wp is None:
-                            CR_try = COREG(ref_geoArr, tgt_geoArr, align_grids=True, q=True)
+                            CR_try = COREG(
+                                ref_geoArr, tgt_geoArr, align_grids=True, q=True
+                            )
                         else:
-                            CR_try = COREG(ref_geoArr, tgt_geoArr, align_grids=True, q=True, wp=wp)
+                            CR_try = COREG(
+                                ref_geoArr, tgt_geoArr, align_grids=True, q=True, wp=wp
+                            )
 
                         CR_try.calculate_spatial_shifts()
                         result_try = CR_try.correct_shifts()
                         reliability_try = getattr(CR_try, "shift_reliability", None)
                         successful_matches.append(
-                            {"label": label, "CR": CR_try, "result": result_try, "reliability": reliability_try}
+                            {
+                                "label": label,
+                                "CR": CR_try,
+                                "result": result_try,
+                                "reliability": reliability_try,
+                            }
                         )
 
                     except (RuntimeError, ValueError, AssertionError, AttributeError):
@@ -398,18 +447,26 @@ def coregister_cube(
 
             best_match = max(
                 successful_matches,
-                key=lambda m: -np.inf if m["reliability"] is None else float(m["reliability"]),
+                key=lambda m: (
+                    -np.inf if m["reliability"] is None else float(m["reliability"])
+                ),
             )
 
             CR = best_match["CR"]
             result = best_match["result"]
             reliability = best_match["reliability"]
 
-            if (min_reliability_keep is not None) and ((reliability is None) or (reliability < min_reliability_keep)):
+            if (min_reliability_keep is not None) and (
+                (reliability is None) or (reliability < min_reliability_keep)
+            ):
                 failed_times.append(t)
                 continue
 
-            out_geoArr = GeoArray(result["arr_shifted"], result["updated geotransform"], result["updated projection"])
+            out_geoArr = GeoArray(
+                result["arr_shifted"],
+                result["updated geotransform"],
+                result["updated projection"],
+            )
             arr_corr = out_geoArr[:].transpose(2, 0, 1)
             arr_corr = np.where(arr_corr == 0, np.nan, arr_corr)
 
@@ -420,11 +477,19 @@ def coregister_cube(
             da_corr = xr.DataArray(
                 arr_corr,
                 dims=("band", "y", "x"),
-                coords={"band": range(1, arr_corr.shape[0] + 1), "y": ("y", y2), "x": ("x", x2)},
+                coords={
+                    "band": range(1, arr_corr.shape[0] + 1),
+                    "y": ("y", y2),
+                    "x": ("x", x2),
+                },
             )
             da_corr = da_corr.rio.write_transform(Affine.from_gdal(*updated_gt))
             da_corr = da_corr.rio.write_crs(result["updated projection"])
-            da_corr = da_corr.assign_coords(band=("band", band_names)).transpose("y", "x", "band").assign_coords(time=t)
+            da_corr = (
+                da_corr.assign_coords(band=("band", band_names))
+                .transpose("y", "x", "band")
+                .assign_coords(time=t)
+            )
 
             corrected_images.append(da_corr)
 
@@ -436,7 +501,11 @@ def coregister_cube(
             cp_t = None
             if cloud_pct_da is not None:
                 try:
-                    cp_t = float(cloud_pct_da.sel(time=t)) if "time" in cloud_pct_da.dims else float(cloud_pct_da)
+                    cp_t = (
+                        float(cloud_pct_da.sel(time=t))
+                        if "time" in cloud_pct_da.dims
+                        else float(cloud_pct_da)
+                    )
                 except Exception:
                     cp_t = None
 
@@ -445,7 +514,11 @@ def coregister_cube(
                 (reliability is None) or (reliability < min_reliability_update_ref)
             ):
                 update_ref = False
-            if (max_cloud_update_ref is not None) and (cp_t is not None) and (cp_t > max_cloud_update_ref):
+            if (
+                (max_cloud_update_ref is not None)
+                and (cp_t is not None)
+                and (cp_t > max_cloud_update_ref)
+            ):
                 update_ref = False
 
             if update_ref:
@@ -454,7 +527,9 @@ def coregister_cube(
         if not corrected_images:
             raise RuntimeError("No scenes were kept. Output stack would be empty.")
 
-        corrected_stack = xr.concat(corrected_images, dim="time").transpose("time", "band", "y", "x")
+        corrected_stack = xr.concat(corrected_images, dim="time").transpose(
+            "time", "band", "y", "x"
+        )
         corrected_stack = corrected_stack.rio.write_crs(crs_wkt, inplace=True)
         corrected_stack.name = "Spectral_Temporal_Stack"
 
@@ -476,7 +551,10 @@ def coregister_cube(
             f"Original (after max_cc/time_period): {len(times)} scenes from "
             f"{np.datetime_as_string(times[0], 'D')} to {np.datetime_as_string(times[-1], 'D')}"
         )
-        print("Scenes excluded after co-registration (overlap / tie points / low reliability):", len(failed_times))
+        print(
+            "Scenes excluded after co-registration (overlap / tie points / low reliability):",
+            len(failed_times),
+        )
         print(f"Scenes remaining in the co-registered cube: {len(times_out)}")
 
         if failed_times:
@@ -485,7 +563,11 @@ def coregister_cube(
                 ds_ = np.datetime_as_string(ts, unit="D")
                 if cloud_pct_da is not None:
                     try:
-                        cp = float(cloud_pct_da.sel(time=ts)) if "time" in cloud_pct_da.dims else float(cloud_pct_da)
+                        cp = (
+                            float(cloud_pct_da.sel(time=ts))
+                            if "time" in cloud_pct_da.dims
+                            else float(cloud_pct_da)
+                        )
                         excluded_entries.append(f"{ds_} ({cp:.1f}%)")
                     except Exception:
                         excluded_entries.append(ds_)
@@ -514,7 +596,9 @@ def coregister_cube(
                 out_ds.to_netcdf(final_out_path)
                 print(f"\nCo-registered cube written to: {final_out_path}")
             else:
-                print("\nNo output_path provided and input was not a file path -> skipping NetCDF export.")
+                print(
+                    "\nNo output_path provided and input was not a file path -> skipping NetCDF export."
+                )
 
         return out_ds, final_out_path
 
@@ -536,8 +620,10 @@ def coregister_cube(
     out_ds_final, out_path_final = None, None
 
     for it in range(1, iteration + 1):
-        is_last = (it == iteration)
-        print(f"\n=== Iteration {it}/{iteration} (first_scene_mode='{current_mode}') ===")
+        is_last = it == iteration
+        print(
+            f"\n=== Iteration {it}/{iteration} (first_scene_mode='{current_mode}') ==="
+        )
 
         out_ds_it, out_path_it = _run_once(
             current_input,
@@ -560,8 +646,8 @@ def coregister_cube(
 # ROI-based co-registration (no sliding windows)
 # ----------------------------------------------------------------------
 def coregister_cube_roi(
-    input_path,   # str | xr.Dataset | xr.DataArray
-    roi,          # bbox [xmin,ymin,xmax,ymax] OR geojson geom dict OR .gpkg path
+    input_path,  # str | xr.Dataset | xr.DataArray
+    roi,  # bbox [xmin,ymin,xmax,ymax] OR geojson geom dict OR .gpkg path
     roi_crs="EPSG:4326",
     output_path=None,
     stack_name="Spectral_Temporal_Stack",
@@ -591,9 +677,13 @@ def coregister_cube_roi(
         _first_scene_mode,
         do_export=True,
     ):
-        stac, masked_stac, cloud_pct_da, input_path_str = _load_coreg_input(_input_obj, stack_name=stack_name)
+        stac, masked_stac, cloud_pct_da, input_path_str = _load_coreg_input(
+            _input_obj, stack_name=stack_name
+        )
 
-        filtered_data = _apply_time_and_cloud_filters(masked_stac, max_cc=max_cc, time_period=time_period)
+        filtered_data = _apply_time_and_cloud_filters(
+            masked_stac, max_cc=max_cc, time_period=time_period
+        )
 
         crs_wkt = _get_crs_wkt(filtered_data, ds=stac)
         filtered_data = filtered_data.rio.write_crs(crs_wkt, inplace=True)
@@ -601,18 +691,26 @@ def coregister_cube_roi(
 
         times = filtered_data.time.values
         if times.size == 0:
-            raise ValueError("No scenes left after applying max_cc/time_period filters.")
+            raise ValueError(
+                "No scenes left after applying max_cc/time_period filters."
+            )
         band_names = filtered_data.band.values
         height = filtered_data.sizes["y"]
         width = filtered_data.sizes["x"]
 
-        (rxmin, rymin, rxmax, rymax), _ = _roi_to_geom_and_projected_bbox(roi, roi_crs=roi_crs, target_crs_wkt=crs_wkt)
+        (rxmin, rymin, rxmax, rymax), _ = _roi_to_geom_and_projected_bbox(
+            roi, roi_crs=roi_crs, target_crs_wkt=crs_wkt
+        )
         wp = ((rxmin + rxmax) / 2.0, (rymin + rymax) / 2.0)
 
         px_w = float(geotransform[1])
         px_h = float(abs(geotransform[5]))
-        wsx = int(max(roi_ws_min_px, min(roi_ws_max_px, (rxmax - rxmin) / max(px_w, 1e-12))))
-        wsy = int(max(roi_ws_min_px, min(roi_ws_max_px, (rymax - rymin) / max(px_h, 1e-12))))
+        wsx = int(
+            max(roi_ws_min_px, min(roi_ws_max_px, (rxmax - rxmin) / max(px_w, 1e-12)))
+        )
+        wsy = int(
+            max(roi_ws_min_px, min(roi_ws_max_px, (rymax - rymin) / max(px_h, 1e-12)))
+        )
         ws = (wsx, wsy)
 
         corrected_images, failed_times = [], []
@@ -623,7 +721,9 @@ def coregister_cube_roi(
             im_ref = filtered_data.sel(time=times[0]).transpose("y", "x", "band")
             im_ref = im_ref.where(im_ref != 0, np.nan)
             y_coords, x_coords = _compute_coords(geotransform, height, width)
-            im_ref = im_ref.assign_coords({"y": ("y", y_coords), "x": ("x", x_coords), "time": times[0]})
+            im_ref = im_ref.assign_coords(
+                {"y": ("y", y_coords), "x": ("x", x_coords), "time": times[0]}
+            )
             corrected_images.append(im_ref)
             current_reference = im_ref
             start_idx = 1
@@ -638,7 +738,9 @@ def coregister_cube_roi(
             master_ref = master_median.transpose("y", "x", "band").where(
                 master_median.transpose("y", "x", "band") != 0, np.nan
             )
-            master_geoArr = GeoArray(master_ref.values, geotransform=geotransform, projection=crs_wkt)
+            master_geoArr = GeoArray(
+                master_ref.values, geotransform=geotransform, projection=crs_wkt
+            )
             start_idx = 0
         else:
             raise ValueError("first_scene_mode must be 'first' or 'composite'")
@@ -660,13 +762,21 @@ def coregister_cube_roi(
             else:
                 if current_reference is None:
                     raise RuntimeError("No valid reference available for chained mode.")
-                ref_geoArr = GeoArray(current_reference.values, geotransform=geotransform, projection=crs_wkt)
+                ref_geoArr = GeoArray(
+                    current_reference.values,
+                    geotransform=geotransform,
+                    projection=crs_wkt,
+                )
 
-            tgt_geoArr = GeoArray(im_target.values, geotransform=geotransform, projection=crs_wkt)
+            tgt_geoArr = GeoArray(
+                im_target.values, geotransform=geotransform, projection=crs_wkt
+            )
 
             with _suppress_arosics_warnings():
                 try:
-                    CR = COREG(ref_geoArr, tgt_geoArr, align_grids=True, q=True, wp=wp, ws=ws)
+                    CR = COREG(
+                        ref_geoArr, tgt_geoArr, align_grids=True, q=True, wp=wp, ws=ws
+                    )
                     CR.calculate_spatial_shifts()
                     result = CR.correct_shifts()
                     reliability = getattr(CR, "shift_reliability", None)
@@ -674,11 +784,17 @@ def coregister_cube_roi(
                     failed_times.append(t)
                     continue
 
-            if (min_reliability_keep is not None) and ((reliability is None) or (reliability < min_reliability_keep)):
+            if (min_reliability_keep is not None) and (
+                (reliability is None) or (reliability < min_reliability_keep)
+            ):
                 failed_times.append(t)
                 continue
 
-            out_geoArr = GeoArray(result["arr_shifted"], result["updated geotransform"], result["updated projection"])
+            out_geoArr = GeoArray(
+                result["arr_shifted"],
+                result["updated geotransform"],
+                result["updated projection"],
+            )
             arr_corr = out_geoArr[:].transpose(2, 0, 1)
             arr_corr = np.where(arr_corr == 0, np.nan, arr_corr)
 
@@ -689,11 +805,19 @@ def coregister_cube_roi(
             da_corr = xr.DataArray(
                 arr_corr,
                 dims=("band", "y", "x"),
-                coords={"band": range(1, arr_corr.shape[0] + 1), "y": ("y", y2), "x": ("x", x2)},
+                coords={
+                    "band": range(1, arr_corr.shape[0] + 1),
+                    "y": ("y", y2),
+                    "x": ("x", x2),
+                },
             )
             da_corr = da_corr.rio.write_transform(Affine.from_gdal(*updated_gt))
             da_corr = da_corr.rio.write_crs(result["updated projection"])
-            da_corr = da_corr.assign_coords(band=("band", band_names)).transpose("y", "x", "band").assign_coords(time=t)
+            da_corr = (
+                da_corr.assign_coords(band=("band", band_names))
+                .transpose("y", "x", "band")
+                .assign_coords(time=t)
+            )
 
             corrected_images.append(da_corr)
 
@@ -704,7 +828,11 @@ def coregister_cube_roi(
             cp_t = None
             if cloud_pct_da is not None:
                 try:
-                    cp_t = float(cloud_pct_da.sel(time=t)) if "time" in cloud_pct_da.dims else float(cloud_pct_da)
+                    cp_t = (
+                        float(cloud_pct_da.sel(time=t))
+                        if "time" in cloud_pct_da.dims
+                        else float(cloud_pct_da)
+                    )
                 except Exception:
                     cp_t = None
 
@@ -713,7 +841,11 @@ def coregister_cube_roi(
                 (reliability is None) or (reliability < min_reliability_update_ref)
             ):
                 update_ref = False
-            if (max_cloud_update_ref is not None) and (cp_t is not None) and (cp_t > max_cloud_update_ref):
+            if (
+                (max_cloud_update_ref is not None)
+                and (cp_t is not None)
+                and (cp_t > max_cloud_update_ref)
+            ):
                 update_ref = False
 
             if update_ref:
@@ -722,7 +854,9 @@ def coregister_cube_roi(
         if not corrected_images:
             raise RuntimeError("No scenes were kept. Output stack would be empty.")
 
-        corrected_stack = xr.concat(corrected_images, dim="time").transpose("time", "band", "y", "x")
+        corrected_stack = xr.concat(corrected_images, dim="time").transpose(
+            "time", "band", "y", "x"
+        )
         corrected_stack = corrected_stack.rio.write_crs(crs_wkt, inplace=True)
         corrected_stack.name = "Spectral_Temporal_Stack"
 
@@ -745,7 +879,10 @@ def coregister_cube_roi(
             f"Original (after max_cc/time_period): {len(times)} scenes from "
             f"{np.datetime_as_string(times[0], 'D')} to {np.datetime_as_string(times[-1], 'D')}"
         )
-        print("Scenes excluded after co-registration (overlap / tie points / low reliability):", len(failed_times))
+        print(
+            "Scenes excluded after co-registration (overlap / tie points / low reliability):",
+            len(failed_times),
+        )
         print(f"Scenes remaining in the co-registered cube: {len(times_out)}")
 
         if failed_times:
@@ -754,7 +891,11 @@ def coregister_cube_roi(
                 ds_ = np.datetime_as_string(ts, unit="D")
                 if cloud_pct_da is not None:
                     try:
-                        cp = float(cloud_pct_da.sel(time=ts)) if "time" in cloud_pct_da.dims else float(cloud_pct_da)
+                        cp = (
+                            float(cloud_pct_da.sel(time=ts))
+                            if "time" in cloud_pct_da.dims
+                            else float(cloud_pct_da)
+                        )
                         excluded_entries.append(f"{ds_} ({cp:.1f}%)")
                     except Exception:
                         excluded_entries.append(ds_)
@@ -782,7 +923,9 @@ def coregister_cube_roi(
                 out_ds.to_netcdf(final_out_path)
                 print(f"\nCo-registered cube written to: {final_out_path}")
             else:
-                print("\nNo output_path provided and input was not a file path -> skipping NetCDF export.")
+                print(
+                    "\nNo output_path provided and input was not a file path -> skipping NetCDF export."
+                )
 
         return out_ds, final_out_path
 
@@ -798,8 +941,10 @@ def coregister_cube_roi(
     out_ds_final, out_path_final = None, None
 
     for it in range(1, iteration + 1):
-        is_last = (it == iteration)
-        print(f"\n=== Iteration {it}/{iteration} (first_scene_mode='{current_mode}') ===")
+        is_last = it == iteration
+        print(
+            f"\n=== Iteration {it}/{iteration} (first_scene_mode='{current_mode}') ==="
+        )
 
         out_ds_it, out_path_it = _run_once(
             current_input,
@@ -822,9 +967,11 @@ import ipywidgets as widgets
 from IPython.display import display
 import plotly.graph_objects as go
 
+
 def _load_stac(path, stack_name="Spectral_Temporal_Stack"):
     with xr.open_dataset(path) as ds:
         return ds[stack_name].load()
+
 
 def _band_label(stac, name):
     b = stac.coords["band"].values
@@ -833,7 +980,10 @@ def _band_label(stac, name):
         m = np.where(bl == name.lower())[0]
         if m.size:
             return b[m[0]]
-    raise KeyError(f"band='{name}' not found. Available bands: {list(stac.coords['band'].values)}")
+    raise KeyError(
+        f"band='{name}' not found. Available bands: {list(stac.coords['band'].values)}"
+    )
+
 
 def _pick_rgb(stac):
     b = stac.coords["band"].values
@@ -856,6 +1006,7 @@ def _pick_rgb(stac):
     # fallback: first 3 bands
     return stac.isel(band=[0, 1, 2])
 
+
 def _stretch_to_uint8(rgb_yxb, p2=2, p98=98):
     arr = rgb_yxb.values.astype("float32")  # (y,x,3)
     lo = np.nanpercentile(arr, p2, axis=(0, 1))
@@ -864,9 +1015,12 @@ def _stretch_to_uint8(rgb_yxb, p2=2, p98=98):
     img = np.clip(img, 0, 1)
     return (img * 255).astype(np.uint8)
 
-def ndvi_click_explorer_plotly(before_path, after_path, stack_name="Spectral_Temporal_Stack", rgb_time="first"):
+
+def ndvi_click_explorer_plotly(
+    before_path, after_path, stack_name="Spectral_Temporal_Stack", rgb_time="first"
+):
     stac_b = _load_stac(before_path, stack_name)
-    stac_a = _load_stac(after_path,  stack_name)
+    stac_a = _load_stac(after_path, stack_name)
 
     ndvi_b = _band_label(stac_b, "ndvi")
     ndvi_a = _band_label(stac_a, "ndvi")
@@ -881,9 +1035,7 @@ def ndvi_click_explorer_plotly(before_path, after_path, stack_name="Spectral_Tem
     rgb_img = _stretch_to_uint8(rgb_base)
 
     # Plotly image widget (clickable)
-    fig_img = go.FigureWidget(
-        data=[go.Image(z=rgb_img)]
-    )
+    fig_img = go.FigureWidget(data=[go.Image(z=rgb_img)])
     fig_img.update_layout(
         title="Click a pixel / Use zoom tools --->",
         margin=dict(l=0, r=0, t=40, b=0),
@@ -893,13 +1045,26 @@ def ndvi_click_explorer_plotly(before_path, after_path, stack_name="Spectral_Tem
 
     # NDVI time-series widget
     fig_ts = go.FigureWidget()
-    fig_ts.add_scatter(name="before (non-registered)", x=[], y=[], mode="lines", line=dict(color="gold", width=3))
-    fig_ts.add_scatter(name="after (co-registered)",  x=[], y=[], mode="lines", line=dict(color="blue", width=3))
+    fig_ts.add_scatter(
+        name="before (non-registered)",
+        x=[],
+        y=[],
+        mode="lines",
+        line=dict(color="gold", width=3),
+    )
+    fig_ts.add_scatter(
+        name="after (co-registered)",
+        x=[],
+        y=[],
+        mode="lines",
+        line=dict(color="blue", width=3),
+    )
     fig_ts.update_layout(
         title=dict(
             text="NDVI Spectral Profile",
-            x=0.5, xanchor="center",
-            pad=dict(t=10, b=20),   # <-- extra space below title
+            x=0.5,
+            xanchor="center",
+            pad=dict(t=10, b=20),  # <-- extra space below title
         ),
         xaxis_title="time",
         yaxis_title="NDVI",
@@ -908,8 +1073,10 @@ def ndvi_click_explorer_plotly(before_path, after_path, stack_name="Spectral_Tem
         width=650,
         legend=dict(
             orientation="h",
-            xanchor="left", x=0,
-            yanchor="top",  y=1.08,  # <-- push legend higher
+            xanchor="left",
+            x=0,
+            yanchor="top",
+            y=1.08,  # <-- push legend higher
         ),
     )
 

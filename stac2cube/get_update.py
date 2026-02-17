@@ -2,7 +2,8 @@ import os
 import xarray as xr
 import pyproj
 import numpy as np
-#from .vector_refiner import proj_2_geo
+
+# from .vector_refiner import proj_2_geo
 
 
 def get_stac_parameters(stac_existing):
@@ -13,23 +14,33 @@ def get_stac_parameters(stac_existing):
             stac_existing = stac_existing.Spectral_Temporal_Stack
         elif "Cloud_Stack" in list(stac_existing.data_vars):
             stac_existing = stac_existing.Cloud_Stack
-    
+
     # Polygon
     bbox = stac_existing.bbox
     bbox = bbox.tolist()
     # Full geometry # update-clip raster
-    #if hasattr(stac_existing, "geometry"):
-     #   geometry = stac_existing.geometry
-    #else:
-     #   geometry = []
-    #Daterange
+    # if hasattr(stac_existing, "geometry"):
+    #   geometry = stac_existing.geometry
+    # else:
+    #   geometry = []
+    # Daterange
     daterange = [min(stac_existing.time.values), max(stac_existing.time.values)]
-    daterange = [np.datetime_as_string(dt, unit='D') for dt in daterange]
+    daterange = [np.datetime_as_string(dt, unit="D") for dt in daterange]
 
-    if stac_existing.name == 'Cloud_Stack':
-        mission = 'sentinel_2_l1c'
-        spectral_bands = ['coastal', 'blue', 'red', 'rededge1', 'nir',
-             'nir08', 'nir09', 'cirrus', 'swir16', 'swir22']
+    if stac_existing.name == "Cloud_Stack":
+        mission = "sentinel_2_l1c"
+        spectral_bands = [
+            "coastal",
+            "blue",
+            "red",
+            "rededge1",
+            "nir",
+            "nir08",
+            "nir09",
+            "cirrus",
+            "swir16",
+            "swir22",
+        ]
         indices = []
         resolution = 10
     else:
@@ -41,19 +52,19 @@ def get_stac_parameters(stac_existing):
         spectral_bands = stac_existing.spectral_bands
         # Indices
         indices = stac_existing.indices
-    
+
     stac_parameters = {
         "mission": mission,
         "resolution": resolution,
         "polygon": bbox,
-      #  "geometry": geometry, # update-clip raster
+        #  "geometry": geometry, # update-clip raster
         "spectral_bands": spectral_bands,
         "indices": indices,
-        "daterange": daterange
+        "daterange": daterange,
     }
 
     return stac_parameters
-    
+
 
 def update_stac(stac_existing, stac_updated):
 
@@ -62,8 +73,8 @@ def update_stac(stac_existing, stac_updated):
         stac_existing = stac_existing.Spectral_Temporal_Stack
     elif "Cloud_Stack" in list(stac_existing.data_vars):
         stac_existing = stac_existing.Cloud_Stack
-    #stac_existing = stac_existing.Spectral_Temporal_Stack
-    
+    # stac_existing = stac_existing.Spectral_Temporal_Stack
+
     stac_missing, missing_times = find_missing_times(stac_existing, stac_updated)
 
     # Compute the missing slices (only these will be computed now)
@@ -77,12 +88,14 @@ def update_stac(stac_existing, stac_updated):
     # Generate a detailed report about the update with formatted dates (date only, no time)
     print("Update Report:")
     print("-------------------------")
-    print(f"{num_added} new date{'s' if num_added != 1 else ''} have been integrated into the dataset.")
+    print(
+        f"{num_added} new date{'s' if num_added != 1 else ''} have been integrated into the dataset."
+    )
     print("The following dates were added:")
 
     # Format the dates to display only the date part using numpy's datetime_as_string
     for dt in missing_times:
-        formatted_date = np.datetime_as_string(dt, unit='D')
+        formatted_date = np.datetime_as_string(dt, unit="D")
         print(f" - {formatted_date}")
     print("-------------------------")
 

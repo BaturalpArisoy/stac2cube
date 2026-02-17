@@ -6,7 +6,24 @@
 
 Following instruction is given on 'get_stac_layers' and can be repeated for 'get_cloud_layers' and others that will be added in the future.
 
-1) Update Job Configuration
+1) Update Slurm Setup (only once)
+
+- Click '.get_stac_layers/slurm_setup.json'
+- Replace "#SBATCH --mail-user=<e-mail>" with your actual e-mail (remove < and > )
+- Change your cluster partition as desired (https://docs.terrabyte.lrz.de/services/terrabyte-hpc/introduction/)
+- If stac2cube installed in your local micromamba then:
+    # Local package
+    micromamba run -n stac2cube python slurm_run.py
+    # Shared DSS package
+    #micromamba run -p /dss/.../envs/stac2cube python slurm_run.py
+- If you want to use pre-installed env in a DSS:
+    # Local package
+    # micromamba run -n stac2cube python slurm_run.py
+    # Shared DSS package
+    micromamba run -p /dss/.../envs/stac2cube python slurm_run.py
+
+
+2) Update Job Configuration
 
 - Edit '.get_stac_layers/get_stac_layers.json' and save
 - Note that json file annotations are different than python annotations. It's easy to make typo.
@@ -14,12 +31,14 @@ Following instruction is given on 'get_stac_layers' and can be repeated for 'get
 - You can also find detailed explanations of parameters for the stac2cube features
 - If you are unsure of parameters, example notebooks are highly recommended -> 'stac2cube/interactive/1_get_stac_layers.ipynb'
 
-2) Submit SLURM Job
+3) Submit SLURM Job
 
 - If you are using MobaXTerm, middle click `.get_stac_layers/submit.sh`
 - If laptop pad, right click, copy file path to terminal
 - Simply press enter :)
+- This method is sometimes denied, then follow alternatives.
 
+ALTERNATIVES:
 - If not using MobaXTerm but on terminal or Windows PowerShell:
 - Either '$ bash submit.sh' or '$ bash path/to/submit.sh'
 - Or '$ sbatch slurm_setup.cmd'
@@ -29,7 +48,7 @@ Congratulations, your job is submitted to HPC!
 -----------------------------------------------
 yeeey!                        good job!                 amazing!
 
-3) Following the Progress
+4) Following the Progress
 
 - You can check the progress of xarray computing on './log/ .out'
 - You can check if an error or warning rises on './log/ .err'
@@ -37,7 +56,7 @@ yeeey!                        good job!                 amazing!
 - My recommendation is to check the log files on https://portal.terrabyte.lrz.de. Can simply F5 the page to track the progress.
 
 Note 1: If you did a fresh installation, the first time a Slurm job is created, you will receive a first time message from WhiteToolBox on both log files. 
-This is normal and only occurs the first time.
+This is normal and only occurs the first time. #UPDATE: WHITETOOLSBOX IS DEACTIVATED ATM.
 
 Note 2: If you don't see any newly generated .out and .err files, most likely it means that your SLURM job is waiting on the queue!
 The time passing on the queue depends on both the server status and the access privileges.
