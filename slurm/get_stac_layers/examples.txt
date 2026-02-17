@@ -96,12 +96,6 @@ Meaning the user can select much larger areas without worrying too much about pr
 - TWI is based on 'slope' and 'd_inf_flow_accumulation' therefore, all of them must be selected for TWI.
 - If None, then none of the features are calculated for 'cop_dem'.
 
-# Under development
-'animation' -> Boolean: True or False for exporting RGB time series animation, displaying every collected date time.
-- Exporting gif animation requires exporting every scene as PNG. This process is taking long time.
-Therefore, it's recommended to not activate this function is long daterange is selected.
-- If None, then no animation
-
 ---
 
 # EXAMPLES
@@ -123,8 +117,7 @@ Therefore, it's recommended to not activate this function is long daterange is s
     "output": "/dss/.../results/test.nc",
     "clip_raster": null,
     "aggregator": null,
-    "stats": ["mean", "median", "std", "min", "max"],
-    "animation": null
+    "stats": ["mean", "median", "std", "min", "max"]
   }
 }
 
@@ -142,8 +135,7 @@ Therefore, it's recommended to not activate this function is long daterange is s
     "cloud_masking": "False",
     "output": "/dss/.../results/test.nc",
     "clip_raster": "True",
-    "aggregator": "mean",
-    "animation": null
+    "aggregator": "mean"
   }
 }
 
@@ -163,8 +155,7 @@ Therefore, it's recommended to not activate this function is long daterange is s
     "indices": ["ndvi", "ndwi", "savi"],
     "output": "/dss/.../results/test.nc",
     "clip_raster": null,
-    "aggregator": "median",
-    "animation": null
+    "aggregator": "median"
   }
 }
 
@@ -198,4 +189,4 @@ Therefore, it's recommended to not activate this function is long daterange is s
 }
 
 
-# Update Sentine-2
+# Update sentinel-2
