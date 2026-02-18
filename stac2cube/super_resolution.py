@@ -22,6 +22,66 @@ def suppress_tqdm():
     with contextlib.redirect_stderr(io.StringIO()):
         yield
 
+# ==========================================================
+# SEN2SR model configs (labels in YOUR cube)
+# ==========================================================
+RGBN_REQUIRED = {"blue", "green", "red", "nir"}
+
+# SEN2SRLite expects this 10-band stack (inputs are assumed already on the same grid, i.e., your cube grid)
+FULL_REQUIRED = {
+    "blue", "green", "red", "nir",
+    "rededge1", "rededge2", "rededge3",
+    "nir08", "swir16", "swir22",
+}
+
+# SEN2SR-required *model input order* (IMPORTANT)
+RGBN_MODEL_ORDER = ["red", "green", "blue", "nir"]
+FULL_MODEL_ORDER = [
+    "red", "green", "blue", "nir",
+    "rededge1", "rededge2", "rededge3",
+    "nir08", "swir16", "swir22",
+]
+
+
+def _bands_in_cube_order(da: xr.DataArray, band_set: set[str]) -> list[str]:
+    """Return bands present in da, preserving da.band order."""
+    cube_order = [str(b) for b in da.coords["band"].values]
+    return [b for b in cube_order if b in band_set]
+
+
+def _validate_required_bands(available: set[str], required: set[str], model_type: str) -> None:
+    missing = sorted(required - available)
+    if missing:
+        req = ", ".join(sorted(required))
+        miss = ", ".join(missing)
+        have = ", ".join(sorted(available))
+        raise ValueError(
+            f"model_type='{model_type}' requires these bands in the input cube:\n"
+            f"  required: {req}\n"
+            f"  missing:  {miss}\n"
+            f"  present:  {have}\n\n"
+            "Please rebuild your initial data cube including the missing bands."
+        )
+
+
+def _resolve_model_path(model_dir: str, candidates: list[str]) -> str:
+    """
+    Try resolving model folders robustly:
+      1) <this_module_dir>/<model_dir>/<candidate>
+      2) <cwd>/<model_dir>/<candidate>
+    Falls back to the first candidate under cwd-style path.
+    """
+    bases = [
+        os.path.join(os.path.dirname(__file__), model_dir),
+        model_dir,
+    ]
+    for base in bases:
+        for name in candidates:
+            p = os.path.join(base, name)
+            if os.path.exists(p):
+                return p
+    return os.path.join(model_dir, candidates[0])
+
 
 def affine_from_xy_centers(x: np.ndarray, y: np.ndarray) -> Affine:
     x = np.asarray(x)
@@ -118,6 +178,7 @@ def superresolve_single_time(
     model,
     device,
     bands_to_use,
+    model_band_order,
     old_res=10.0,
     new_res=2.5,
     nan_pixel_buffer=8,
@@ -126,21 +187,24 @@ def superresolve_single_time(
     """
     Super-resolve a SINGLE time slice.
 
-    Correct order (as requested):
+    Order:
       1) SR full image
       2) Crop edges in HR (edge_crop_px)
       3) Apply NaN buffer in HR (nan_pixel_buffer)
     """
     da = da.sel(band=bands_to_use).rio.set_spatial_dims("x", "y", inplace=False)
 
+    # This is the "cube order" for the subset you selected (used to restore at the end)
     orig_band_order = da.band.values
+
     orig_attrs = dict(da.attrs)
     orig_attrs.pop("transform", None)
     orig_attrs.pop("grid_mapping", None)
 
     time_coord = da.coords.get("time", None)
 
-    new_order = ["red", "green", "blue", "nir"]
+    # --- reorder into SEN2SR-required input order ---
+    new_order = list(model_band_order)
     da_reordered = da.sel(band=new_order)
 
     # --- pad to square for SEN2SR ---
@@ -158,9 +222,7 @@ def superresolve_single_time(
     # ============================================================
     # 1) BUILD LR NAN/CLOUD MASK
     # ============================================================
-    mask_lr = (
-        da_square.isnull().any(dim="band").compute().to_numpy()
-    )  # (y_lr, x_lr) bool
+    mask_lr = da_square.isnull().any(dim="band").compute().to_numpy()
 
     # ============================================================
     # 2) INFERENCE INPUT
@@ -169,21 +231,15 @@ def superresolve_single_time(
     X = torch.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
 
     with suppress_tqdm():
-        superX = sen2sr.predict_large(
-            model=model, X=X, overlap=32
-        )  # (band, y_hr_full, x_hr_full)
+        superX = sen2sr.predict_large(model=model, X=X, overlap=32)
 
     # ============================================================
     # 3) UPSAMPLE LR MASK TO HR
     # ============================================================
     scale = int(round(old_res / new_res))  # 10m -> 2.5m => 4
-    mask_lr_t = torch.from_numpy(mask_lr.astype(np.float32))[None, None, :, :].to(
-        device
-    )
-    mask_hr_t = F.interpolate(
-        mask_lr_t, scale_factor=scale, mode="nearest"
-    )  # (1,1,y_hr_full,x_hr_full)
-    mask_hr = mask_hr_t[0, 0].bool()  # (y_hr_full, x_hr_full)
+    mask_lr_t = torch.from_numpy(mask_lr.astype(np.float32))[None, None, :, :].to(device)
+    mask_hr_t = F.interpolate(mask_lr_t, scale_factor=scale, mode="nearest")
+    mask_hr = mask_hr_t[0, 0].bool()
 
     # ============================================================
     # 4) BUILD FULL HR TRANSFORM
@@ -203,8 +259,8 @@ def superresolve_single_time(
     y0, y1 = pad_y_top_hr, pad_y_top_hr + orig_h_lr * scale
     x0, x1 = pad_x_left_hr, pad_x_left_hr + orig_w_lr * scale
 
-    superX = superX[:, y0:y1, x0:x1]  # (band, y_hr, x_hr)
-    mask_hr = mask_hr[y0:y1, x0:x1]  # (y_hr, x_hr)
+    superX = superX[:, y0:y1, x0:x1]
+    mask_hr = mask_hr[y0:y1, x0:x1]
     cropped_tf = full_tf * Affine.translation(x0, y0)
 
     # ============================================================
@@ -213,13 +269,9 @@ def superresolve_single_time(
     if edge_crop_px > 0:
         H = superX.shape[1]
         W = superX.shape[2]
-
-        # safety: avoid empty arrays
         if 2 * edge_crop_px < H and 2 * edge_crop_px < W:
             superX = superX[:, edge_crop_px:-edge_crop_px, edge_crop_px:-edge_crop_px]
             mask_hr = mask_hr[edge_crop_px:-edge_crop_px, edge_crop_px:-edge_crop_px]
-
-            # update transform due to cropping from top-left
             cropped_tf = cropped_tf * Affine.translation(edge_crop_px, edge_crop_px)
 
     # ============================================================
@@ -230,7 +282,6 @@ def superresolve_single_time(
         mask_hr_np = dilate_mask_2d(mask_hr_np, radius_px=int(nan_pixel_buffer))
         mask_hr = torch.from_numpy(mask_hr_np).to(device)
 
-    # apply buffered mask as NaN
     superX[:, mask_hr.bool()] = float("nan")
 
     # ============================================================
@@ -260,7 +311,7 @@ def superresolve_single_time(
         .rio.write_transform(cropped_tf, inplace=False)
     )
 
-    # restore original band order
+    # restore "cube order" for the selected subset
     ds_tmp = ds_tmp.sel(band=orig_band_order)
 
     # assign world x/y centers from cropped_tf
@@ -280,9 +331,7 @@ def superresolve_single_time(
     )
 
     da_super.attrs.update(orig_attrs)
-    da_super.attrs["status"] = "super-resolved"
-    da_super.attrs["nan_pixel_buffer"] = int(nan_pixel_buffer)
-    da_super.attrs["edge_crop_px"] = int(edge_crop_px)
+    #da_super.attrs["status"] = "super-resolved"
 
     return da_super
 
@@ -292,13 +341,80 @@ def super_resolve_cube(
     output_path: str | None = None,
     var_name="Spectral_Temporal_Stack",
     nan_pixel_buffer: int = 8,
+    model_type: str | None = None,  # NEW: None | "rgbn" | "full_spectral"
 ):
     """
     Super-resolve full cube.
 
-    - Crops 8 SR pixels from edges AFTER SR (inside superresolve_single_time)
-    - Then applies nan_pixel_buffer AFTER that crop
+    model_type:
+      - None (default): auto-detect using attrs["spectral_bands"]
+          * if spectral_bands are ONLY within [blue, green, red, nir] -> rgbn
+          * otherwise -> full_spectral
+      - "rgbn": use SEN2SRLite-RGBN
+      - "full_spectral": use SEN2SRLite (requires all 10 bands)
     """
+
+    # ---------------------------
+    # local helpers (kept inside for copy/paste simplicity)
+    # ---------------------------
+    RGBN_REQUIRED = {"blue", "green", "red", "nir"}
+    FULL_REQUIRED = {
+        "blue", "green", "red", "nir",
+        "rededge1", "rededge2", "rededge3",
+        "nir08", "swir16", "swir22",
+    }
+
+    RGBN_MODEL_ORDER = ["red", "green", "blue", "nir"]
+    FULL_MODEL_ORDER = [
+        "red", "green", "blue", "nir",
+        "rededge1", "rededge2", "rededge3",
+        "nir08", "swir16", "swir22",
+    ]
+
+    def _parse_list_attr(v):
+        if v is None:
+            return None
+        if isinstance(v, str):
+            try:
+                return ast.literal_eval(v)
+            except Exception:
+                return [x.strip() for x in v.split(",") if x.strip()]
+        if isinstance(v, (list, tuple, np.ndarray)):
+            return list(v)
+        return None
+
+    def _validate_required_bands(available: set[str], required: set[str], mt: str) -> None:
+        missing = sorted(required - available)
+        if missing:
+            raise ValueError(
+                f"model_type='{mt}' requires these bands in the input cube:\n\n"
+                f"  required: {', '.join(sorted(required))}\n"
+                f"  missing:  {', '.join(missing)}\n"
+                f"  present:  {', '.join(sorted(available))}\n\n"
+                "Please rebuild your initial data cube including the missing bands."
+            )
+
+    def _bands_in_cube_order(da: xr.DataArray, required_set: set[str]) -> list[str]:
+        cube_order = [str(b) for b in da.coords["band"].values]
+        return [b for b in cube_order if b in required_set]
+
+    def _resolve_model_path(candidates: list[str]) -> str:
+        # Try: relative to cwd
+        for p in candidates:
+            if os.path.exists(p):
+                return p
+        # Try: relative to this file (module dir)
+        base = os.path.join(os.path.dirname(__file__), "")
+        for p in candidates:
+            p2 = os.path.join(base, p)
+            if os.path.exists(p2):
+                return p2
+        # fallback to first candidate
+        return candidates[0]
+
+    # ---------------------------
+    # output path
+    # ---------------------------
     if output_path is None:
         if isinstance(input_path, xr.DataArray):
             raise ValueError("Provide output_path when input_path is a DataArray.")
@@ -307,8 +423,6 @@ def super_resolve_cube(
             ext = ".nc"
         output_path = f"{base}_sr{ext}"
 
-    bands_to_use = ["blue", "green", "red", "nir"]
-    model_path = "model/SEN2SRLite_RGBN"
     old_res = 10.0
     new_res = 2.5
     edge_crop_px = 8
@@ -323,15 +437,66 @@ def super_resolve_cube(
 
     crs_wkt, tf = _extract_cf_crs_and_geotransform(ds_in, var_name)
     if crs_wkt is None:
-        raise ValueError(
-            "Could not extract CRS WKT from CF grid mapping (spatial_ref)."
-        )
+        raise ValueError("Could not extract CRS WKT from CF grid mapping (spatial_ref).")
     if tf is None:
+        raise ValueError("Could not extract/build transform from CF metadata or x/y coords.")
+
+    # attributes
+    indices = _parse_list_attr(dataarray.attrs.get("indices", None))
+    spectral_bands_attr = _parse_list_attr(dataarray.attrs.get("spectral_bands", None))
+
+    # band coordinate set (what truly exists in the data)
+    band_coord_set = {str(b) for b in dataarray.coords["band"].values}
+
+    # spectral_set is what you want to use for detection/validation
+    if spectral_bands_attr and len(spectral_bands_attr) > 0:
+        spectral_set = {str(b) for b in spectral_bands_attr}
+    else:
+        # fallback: treat all "band" entries except indices as spectral
+        idx_set = set(indices) if indices else set()
+        spectral_set = band_coord_set - idx_set
+
+    # sanity: spectral bands listed must exist in band coordinate
+    missing_from_coord = sorted(spectral_set - band_coord_set)
+    if missing_from_coord:
         raise ValueError(
-            "Could not extract/build transform from CF metadata or x/y coords."
+            "Your data cube attrs['spectral_bands'] lists bands that are not present in the 'band' coordinate:\n"
+            f"  missing in coord: {', '.join(missing_from_coord)}\n"
+            "Please fix the cube metadata or rebuild the cube."
         )
 
-    indices = dataarray.attrs.get("indices", None)
+    # ---------------------------
+    # decide model type
+    # ---------------------------
+    if model_type is None:
+        if spectral_set.issubset(RGBN_REQUIRED):
+            model_type_used = "rgbn"
+        else:
+            model_type_used = "full_spectral"
+    else:
+        mt = str(model_type).strip().lower()
+        if mt not in ("rgbn", "full_spectral"):
+            raise ValueError("model_type must be one of: None, 'rgbn', 'full_spectral'")
+        model_type_used = mt
+
+    # ---------------------------
+    # select bands + model input order + model path
+    # ---------------------------
+    if model_type_used == "rgbn":
+        _validate_required_bands(spectral_set, RGBN_REQUIRED, model_type_used)
+        bands_to_use = _bands_in_cube_order(dataarray, RGBN_REQUIRED)  # cube order for restore
+        model_band_order = RGBN_MODEL_ORDER
+        model_path = _resolve_model_path([
+            "model/SEN2SRLite-RGBN",
+            "model/SEN2SRLite_RGBN",
+        ])
+    else:
+        _validate_required_bands(spectral_set, FULL_REQUIRED, model_type_used)
+        bands_to_use = _bands_in_cube_order(dataarray, FULL_REQUIRED)  # cube order for restore
+        model_band_order = FULL_MODEL_ORDER
+        model_path = _resolve_model_path([
+            "model/SEN2SRLite",
+        ])
 
     dataarray_sub = dataarray.sel(band=bands_to_use)
 
@@ -345,7 +510,7 @@ def super_resolve_cube(
         super_list = []
         for t in tqdm(
             dataarray_sub.time.values,
-            desc="Super-resolving time steps",
+            desc=f"Super-resolving time steps ({model_type_used})",
             unit="date",
             file=sys.stdout,
             dynamic_ncols=False,
@@ -359,6 +524,7 @@ def super_resolve_cube(
                 model=model,
                 device=device,
                 bands_to_use=bands_to_use,
+                model_band_order=model_band_order,  # <-- requires your updated single_time
                 old_res=old_res,
                 new_res=new_res,
                 nan_pixel_buffer=nan_pixel_buffer,
@@ -366,9 +532,7 @@ def super_resolve_cube(
             )
             super_list.append(da_sr_t)
 
-        da_super_all = xr.concat(
-            super_list, dim="time", coords="minimal", compat="override"
-        )
+        da_super_all = xr.concat(super_list, dim="time", coords="minimal", compat="override")
         da_super_all = _copy_time_coords(dataarray, da_super_all)
 
         tf0 = super_list[0].rio.transform()
@@ -386,6 +550,7 @@ def super_resolve_cube(
             model=model,
             device=device,
             bands_to_use=bands_to_use,
+            model_band_order=model_band_order,  # <-- requires your updated single_time
             old_res=old_res,
             new_res=new_res,
             nan_pixel_buffer=nan_pixel_buffer,
@@ -395,14 +560,6 @@ def super_resolve_cube(
     # ===========================
     # OPTIONAL: compute indices (only if provided in attrs)
     # ===========================
-    if isinstance(indices, str):
-        try:
-            indices = ast.literal_eval(indices)
-        except Exception:
-            indices = [x.strip() for x in indices.split(",") if x.strip()]
-    elif isinstance(indices, (tuple, list, np.ndarray)):
-        indices = list(indices)
-
     if indices and len(indices) > 0:
         stac_idx = calculate_spectral_index(da_super_all, mission="s2", indices=indices)
 
@@ -431,7 +588,7 @@ def super_resolve_cube(
     # FINALIZE + WRITE NETCDF
     # ===========================
     da_super_all.name = var_name
-    da_super_all.attrs["status"] = "super-resolved"
+    da_super_all.attrs["status"] = f"super_resolved_{model_type_used}"
 
     ds_out = da_super_all.to_dataset(name=var_name)
     ds_out = ds_out.rio.set_spatial_dims("x", "y", inplace=False)
@@ -443,7 +600,6 @@ def super_resolve_cube(
 
     try:
         from rasterio.crs import CRS
-
         epsg = CRS.from_wkt(crs_wkt).to_epsg()
         if epsg is not None:
             crs_epsg = f"EPSG:{epsg}"
@@ -454,9 +610,9 @@ def super_resolve_cube(
 
     if "spatial_ref" in ds_out.variables:
         tf_out = ds_out.rio.transform()
-        ds_out["spatial_ref"].attrs[
-            "GeoTransform"
-        ] = f"{tf_out.c} {tf_out.a} {tf_out.b} {tf_out.f} {tf_out.d} {tf_out.e}"
+        ds_out["spatial_ref"].attrs["GeoTransform"] = (
+            f"{tf_out.c} {tf_out.a} {tf_out.b} {tf_out.f} {tf_out.d} {tf_out.e}"
+        )
 
     tf_out = ds_out.rio.transform()
     transform9 = [
@@ -466,12 +622,10 @@ def super_resolve_cube(
         float(tf_out.d),
         float(tf_out.e),
         float(tf_out.f),
-        0.0,
-        0.0,
-        1.0,
+        0.0, 0.0, 1.0,
     ]
     ds_out.attrs["transform"] = transform9
     ds_out[var_name].attrs["transform"] = transform9
 
     ds_out.to_netcdf(output_path)
-    print("Data cube is super-resolved to 2.5-meters!")
+    print(f"Data cube is super-resolved to 2.5-meters! (model_type={model_type_used})")
