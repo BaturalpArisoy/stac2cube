@@ -115,23 +115,13 @@ Each step is documented by the numbers and the general explanation is given belo
 A documentation file on how to use stac2cube features on terrabyte's HPC for compute-intensive processes and for faster processing time can be found in the [slurm folder](https://github.com/BaturalpArisoy/stac2cube/tree/main/slurm). Don't forget to look at *how_to_use.txt*.
 
 ## What's upcoming?
-- [x] Sentinel-2 co-registration
+- [ ] Custom and automatic temporal composites (e.g. mean of each month in the time-series)
 - [ ] Merge Landsat TM and OLI missions for terrabyte catalogues.
 - [ ] Batch processing tools for all the steps (under development).
-- [x] Caching mechanism to automatically update the missing scenes: get_stac_layers, get_cloud_layers
-- [x] More advanced interactive tools for better experience
-- [x] Sentinel-1: Orbit-state selection: Ascending/Descending
-- [ ] Sentinel-1: Automatic preprocessing, e.g. SNAP tools. OR replace with NRB
-- [ ] Add new spectral indices: EVI, Built-up Index (More upon request!)
-- [ ] Add SLURM job array to submit multiple json files at once (good for enourmous areas; "divide and conquer")
+- [ ] Sentinel-1: Instrument Selection
+- [ ] Add SLURM job array to submit multiple json files at once
 - [ ] Silent parameter for get_stac_layers that will automatically switch to terrabyte STAC catalogs when run on HPC
-- [ ] Import bbox list with projected coords: proj to geographic transformation (Under development)
-- [x] Improvements for get_cloud_layers function: mask calculation function, mask l2a data directly
 - [ ] Cloud shadow detection and masking for Sentinel-2
-- [x] Native cloud masking for Landsat and Sentinel-2 scenes (Under development)
-- [x] Switch python package setup from setup.py to pyproject.toml: enables uv install besides pip 
-- [x] Quite mode
-- [ ] Verbose mode
 
 ## Access and Licensing Details for STAC Catalogs
 
