@@ -31,7 +31,7 @@ For Sentinel-2, the ARD cubes are built with three main components:
 
 -   **Co-registration** to reduce scene-to-scene X/Y misalignment (often around 1-2 pixels). Small sub-pixel shifts (below 10 m) can still remain.
 
--   **Super-resolution** of RGB and NIR bands to 2.5 m.
+-   **Super-resolution** of both 10-meters and 20-meters bands to 2.5 m.
 
 The result is a data cube that is cloud-masked with customizable thresholds, spatially aligned across time, and available at higher spatial resolution. Details about the underlying algorithms and how to cite the used third-party tools can be found in the [Examples](#examples) section.
 
@@ -107,7 +107,7 @@ Each step is documented by the numbers and the general explanation is given belo
     - Applies super-resolution algorithm on Sentinel-2 data cubes. 
     - **SEN2SR** package provides DNN based super-resolution algorithm<br>
     Aybar, C., Contreras, J., Donike, S., Portalés-Julià, E., Mateo-García, G., & Gómez-Chova, L. (2026). A radiometrically and spatially consistent super-resolution framework for Sentinel-2. Remote Sensing of Environment, 334, 115222. https://doi.org/10.1016/j.rse.2025.115222
-    - Currently super resolve 10-meters RGBN bands to 2.5-meters (soon 20-meters bands will be also super-resolved to 2.5-meters).
+    - Super resolves both 10-meters and 20-meters bands to 2.5-meters. ["blue", "green", "red", "nir", "nir08", "rededge1", "rededge2", "rededge3", "swir16", "swir22"]
 5. **Batch Processing** (under development!)
     - (when completed) If the user knows what parameters to use for each function above, can set batch processing instead of using each step separately :) 
 
