@@ -137,19 +137,14 @@ def get_stac_layers(
         stac.attrs["bbox"] = bbox
 
     # Calculate stats image (optional)
+    # Aggregator (optional): collapses time dimension
     if aggregator:
-        if not q:
-            print(f"stac before {aggregator}:")
-            print(stac)
-            print("\n-------------------------------------")
         if aggregator == "mean":
             stac = stac.mean(dim="time", skipna=True)
         elif aggregator == "median":
             stac = stac.median(dim="time", skipna=True)
         else:
-            raise ValueError(
-                "Invalid aggregator. Please select either 'mean' or 'median'."
-            )
+            raise ValueError("Invalid aggregator. Please select either 'mean' or 'median'.")
 
     # Clip netcdf as clip raster
     if clip_raster:
@@ -188,26 +183,46 @@ def get_stac_layers(
     if not output:
         stac.rio.write_crs(crs, inplace=True)
         stac.rio.write_transform(transform, inplace=True)
-        # if mission == "sentinel_2_l1c":
-        #   stac.attrs['crs'] = crs
-        #  stac.attrs['transform'] = transform
         stac.attrs["crs"] = crs
         stac.attrs["transform"] = transform
+
+        # Optional: add temporal composites/statistics (kept lazy; no computation triggered)
+        if stats and (mission != "cop_dem_glo_30") and (not aggregator):
+            base_attrs = dict(stac.attrs)
+            stac = calculate_statistics(stac, stats)
+            stac.attrs.update(base_attrs)
+            try:
+                stac.rio.write_crs(crs, inplace=True)
+                stac.rio.write_transform(transform, inplace=True)
+            except Exception:
+                pass
+
         if not q:
             print(stac, flush=True)
         return stac  # returns lazy
+
     else:
         if update:
             stac = update_stac(stac_existing=update, stac_updated=stac)
+
+        # Optional stats/composites (only when time dimension exists)
+        if stats and (mission != "cop_dem_glo_30") and (not aggregator):
+            stac = calculate_statistics(stac, stats)
+
+        # One consistent debug print for ALL cases (agg on/off, stats on/off)
         if not q:
-            print(stac)
-        if mission != "cop_dem_glo_30":
-            if not aggregator:
-                if not q:
-                    print(stac.time.values)
-                if stats:
-                    stac = calculate_statistics(stac, stats)
-        if not q:
-            print(stac.band.values)
+            print(f"\nExporting to: {output}")
+            print(f"  aggregator: {aggregator if aggregator else 'None'}")
+
+            if stats:
+                if (mission == "cop_dem_glo_30") or aggregator:
+                    print("  stats: ignored (requires time dimension)")
+                else:
+                    print(f"  stats: {stats}")
+            else:
+                print("  stats: None")
+
+            print(stac, flush=True)
+
         img = export_stac(stac, output, crs, transform)
         return img

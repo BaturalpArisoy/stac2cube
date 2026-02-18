@@ -17,8 +17,7 @@ def missions():
         "output",
         "aggregator",
         "stats",
-        "update",
-        "animation",
+        "update"
     ]
 
     df = pd.DataFrame(columns=columns)
@@ -60,9 +59,29 @@ def missions():
         "cloud_masking": [True, False],
         "output": "path/to/output.nc",
         "aggregator": ["mean", "median"],
-        "stats": ["mean", "median", "std", "min", "max"],
-        "update": "path/to/stac.nc",
-        "animation": [True, False],
+        "stats": [
+            "mean_timeseries",
+            "mean_monthly",
+            "mean_annual",
+            "mean_all",
+            "median_timeseries",
+            "median_monthly",
+            "median_annual",
+            "median_all",
+            "min_timeseries",
+            "min_monthly",
+            "min_annual",
+            "min_all",
+            "max_timeseries",
+            "max_monthly",
+            "max_annual",
+            "max_all",
+            "std_timeseries",
+            "std_monthly",
+            "std_annual",
+            "std_all",
+        ],
+        "update": "path/to/stac.nc"
     }
 
     sentinel_2_l1c = {
@@ -103,9 +122,29 @@ def missions():
         "cloud_masking": [True, False],
         "output": "path/to/output.nc",
         "aggregator": ["mean", "median"],
-        "stats": ["mean", "median", "std", "min", "max"],
+        "stats": [
+            "mean_timeseries",
+            "mean_monthly",
+            "mean_annual",
+            "mean_all",
+            "median_timeseries",
+            "median_monthly",
+            "median_annual",
+            "median_all",
+            "min_timeseries",
+            "min_monthly",
+            "min_annual",
+            "min_all",
+            "max_timeseries",
+            "max_monthly",
+            "max_annual",
+            "max_all",
+            "std_timeseries",
+            "std_monthly",
+            "std_annual",
+            "std_all",
+        ],
         "update": "path/to/stac.nc",
-        "animation": [True, False],
     }
 
     sentinel_1_rtc = {
@@ -121,9 +160,29 @@ def missions():
         "cloud_masking": False,
         "output": "path/to/output.nc",
         "aggregator": ["mean", "median"],
-        "stats": ["mean", "median", "std", "min", "max"],
+        "stats": [
+            "mean_timeseries",
+            "mean_monthly",
+            "mean_annual",
+            "mean_all",
+            "median_timeseries",
+            "median_monthly",
+            "median_annual",
+            "median_all",
+            "min_timeseries",
+            "min_monthly",
+            "min_annual",
+            "min_all",
+            "max_timeseries",
+            "max_monthly",
+            "max_annual",
+            "max_all",
+            "std_timeseries",
+            "std_monthly",
+            "std_annual",
+            "std_all",
+        ],
         "update": "path/to/stac.nc",
-        "animation": False,
     }
 
     landsat_c2_l2 = {
@@ -158,9 +217,29 @@ def missions():
         "cloud_masking": [True, False],
         "output": "path/to/output.nc",
         "aggregator": ["mean", "median"],
-        "stats": ["mean", "median", "std", "min", "max"],
+        "stats": [
+            "mean_timeseries",
+            "mean_monthly",
+            "mean_annual",
+            "mean_all",
+            "median_timeseries",
+            "median_monthly",
+            "median_annual",
+            "median_all",
+            "min_timeseries",
+            "min_monthly",
+            "min_annual",
+            "min_all",
+            "max_timeseries",
+            "max_monthly",
+            "max_annual",
+            "max_all",
+            "std_timeseries",
+            "std_monthly",
+            "std_annual",
+            "std_all",
+        ],
         "update": "path/to/stac.nc",
-        "animation": [True, False],
     }
 
     cop_dem_glo_30 = {
@@ -178,7 +257,6 @@ def missions():
         "aggregator": False,
         "stats": False,
         "update": False,
-        "animation": False,
     }
 
     df = pd.concat(
@@ -260,13 +338,18 @@ HELP_MD = r"""
 
 **stats**  
 - If `None` → no stats cubes.  
-- Only works when `output` is a file path (not `None`).  
+- Creates additional data variables in the output dataset with the specified statistics.  
 - See `missions()` → `stats`.
+- `mean_timeseries` calculates mean over the full time series; `mean_monthly` calculates mean for each month present in the time series; `mean_annual` calculates mean for each year present in the time series.
+- ONE FOR ALL: `mean_all` generates `mean_timeseries` + `mean_monthly` + `mean_annual` (same for other stats).
+- Disabled if `aggregator` is `NOT` `None`.
 
 **aggregator**  
+- Generates a single scene of either mean or median along the time dimension for each selected band and index.
 - If `None` → no aggregation.  
-- Aggregates along time dimension (e.g., `"mean"` or `"median"`, not together).  
+- `mean` or `median`, not together.  
 - See `missions()` → `aggregators`.
+- Disables `stats`.
 
 **q**  
 - `True` hides print outputs except progress bar.
