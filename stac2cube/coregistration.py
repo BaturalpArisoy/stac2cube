@@ -1016,7 +1016,7 @@ def _stretch_to_uint8(rgb_yxb, p2=2, p98=98):
     return (img * 255).astype(np.uint8)
 
 
-def ndvi_click_explorer_plotly(
+def spectral_profiler(
     before_path, after_path, stack_name="Spectral_Temporal_Stack", rgb_time="first"
 ):
     stac_b = _load_stac(before_path, stack_name)
