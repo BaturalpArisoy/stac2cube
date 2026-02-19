@@ -312,7 +312,14 @@ HELP_MD = r"""
 
 **daterange**  
 - If `None` → every available date.  
-- Otherwise: `["YYYY-MM-DD", "YYYY-MM-DD"]`.
+- (1) Standard (single window): `["YYYY-MM-DD", "YYYY-MM-DD"]`
+- (2) Seasonal (repeats across years): `["MM-DD", "MM-DD"]`  
+  - Example vegetation season: `["04-01", "10-31"]`   
+  - In seasonal mode, the window is applied to **all years** in the mission’s supported span.
+- (3) Seasonal with explicit year control:  
+  - `{"season": ["MM-DD", "MM-DD"], "years": "all"}`  
+  - `{"season": ["MM-DD", "MM-DD"], "years": [2019, 2020, 2021]}` -> specific years
+  - `{"season": ["MM-DD", "MM-DD"], "years": "2018-2024"}` -> year range
 
 **bands**  
 - If `None` → all mission bands (and SCL).  
@@ -321,6 +328,7 @@ HELP_MD = r"""
 **indices**  
 - If `None` → no indices.  
 - See `missions()` → `indices`.
+- Check out for index explanation @ `https://www.indexdatabase.de/`
 
 **clip_raster**  
 - If `True`, raster is clipped to polygon area; if `False`, covers polygon bounding box.  

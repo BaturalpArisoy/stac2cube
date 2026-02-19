@@ -8,6 +8,8 @@ from pystac_client import Client as pystacclient
 from odc.stac import stac_load
 import planetary_computer
 import os
+import re
+import datetime
 
 
 def get_stac(
@@ -75,9 +77,42 @@ def get_stac(
     if mission in ("cop_dem_glo_30", "sentinel_1_rtc"):
         query = None
 
-    items, crs, stac_mission, tiles = _catalogue_search(
-        catalog, collection, bbox, daterange, query, mission
-    )
+    season_spec = _parse_season_daterange(daterange)
+
+    if season_spec is None:
+        items, crs, stac_mission, tiles = _catalogue_search(
+            catalog, collection, bbox, daterange, query, mission
+        )
+    else:
+        start_md, end_md, years_spec = season_spec
+        years = _parse_years_spec(years_spec, mission)
+        windows = _expand_season_windows(start_md, end_md, years)
+
+        all_items = []
+        crs = None
+        stac_mission = None
+        tiles_set = set()
+
+        for win in windows:
+            win_items, win_crs, win_stac_mission, win_tiles = _catalogue_search(
+                catalog, collection, bbox, win, query, mission, allow_empty=True
+            )
+            if win_items:
+                all_items.extend(list(win_items))
+                if crs is None:
+                    crs = win_crs
+                    stac_mission = win_stac_mission
+                if win_tiles is not None:
+                    tiles_set.update(list(win_tiles))
+
+        if len(all_items) < 1:
+            raise ValueError(
+                "No scenes found by the given parameters in season mode. "
+                "Please check your polygon's geometry, season window or increase max cloud coverage."
+            )
+
+        items = all_items
+        tiles = np.array(sorted(tiles_set)) if tiles_set else None
 
     band_map = _get_band_map(mission)
     if band_map is not None:
@@ -176,7 +211,129 @@ def get_stac(
         return stac, None, tiles
 
 
-def _catalogue_search(catalog, collection, bbox, daterange, query, mission):
+# ==========================================================
+# DATE RANGE HELPERS
+# ==========================================================
+_MMDD_RE = re.compile(r"^\d{2}-\d{2}$")
+
+
+def _is_mmdd(s: str) -> bool:
+    """Return True if string is in MM-DD format and represents a valid calendar day."""
+    if not isinstance(s, str) or not _MMDD_RE.match(s.strip()):
+        return False
+    mm, dd = map(int, s.split("-"))
+    try:
+        # Use a leap year to allow 02-29 in case someone needs it
+        datetime.date(2000, mm, dd)
+    except ValueError:
+        return False
+    return True
+
+
+def _parse_season_daterange(daterange):
+    """Detect 'season mode' daterange.
+
+    Supported:
+      1) daterange = ["MM-DD", "MM-DD"]  -> season for years="all"
+      2) daterange = {"season": ["MM-DD", "MM-DD"], "years": "all" | [years] | "YYYY-YYYY" | "YYYY,YYYY"}
+    """
+    if isinstance(daterange, dict) and "season" in daterange:
+        season = daterange.get("season")
+        years = daterange.get("years", "all")
+        if not isinstance(season, (list, tuple)) or len(season) != 2:
+            raise ValueError(
+                "Season daterange must be like {'season': ['MM-DD', 'MM-DD'], 'years': ...}."
+            )
+        start_md, end_md = season
+        if not (_is_mmdd(str(start_md)) and _is_mmdd(str(end_md))):
+            raise ValueError(
+                "Season start/end must be in 'MM-DD' format (e.g., '04-01', '10-31')."
+            )
+        return str(start_md), str(end_md), years
+
+    if isinstance(daterange, (list, tuple)) and len(daterange) == 2:
+        a, b = daterange
+        if _is_mmdd(str(a)) and _is_mmdd(str(b)):
+            return str(a), str(b), "all"
+
+    return None
+
+
+def _mission_year_span(mission: str):
+    """Default year span for 'years="all"' in season mode.
+
+    Note: these are conservative defaults to avoid overly long loops.
+    Users can always override via daterange dict 'years'.
+    """
+    current_year = datetime.date.today().year
+    spans = {
+        "sentinel_2_l2a": (2015, current_year),
+        "sentinel_2_l1c": (2015, current_year),
+        "sentinel_1_rtc": (2014, current_year),
+        "landsat_c2_l2": (1982, current_year),
+    }
+    return spans.get(mission)
+
+
+def _parse_years_spec(years_spec, mission: str):
+    """Parse years spec for season mode."""
+    if years_spec is None or (isinstance(years_spec, str) and years_spec.strip().lower() == "all"):
+        span = _mission_year_span(mission)
+        if span is None:
+            raise ValueError(
+                f"Season mode with years='all' is not supported for mission '{mission}'. "
+                "Please specify years explicitly, e.g. {'season': ['04-01','10-31'], 'years': [2020, 2021]}."
+            )
+        y0, y1 = span
+        return list(range(int(y0), int(y1) + 1))
+
+    if isinstance(years_spec, int):
+        return [int(years_spec)]
+
+    if isinstance(years_spec, (list, tuple, set)):
+        years = sorted({int(y) for y in years_spec})
+        if not years:
+            raise ValueError("Years list is empty.")
+        return years
+
+    if isinstance(years_spec, str):
+        s = years_spec.strip()
+        m = re.match(r"^(\d{4})\s*-\s*(\d{4})$", s)
+        if m:
+            a, b = map(int, m.groups())
+            if b < a:
+                a, b = b, a
+            return list(range(a, b + 1))
+
+        if re.match(r"^\d{4}(?:\s*,\s*\d{4})+$", s):
+            return sorted({int(x.strip()) for x in s.split(",")})
+
+    raise ValueError(
+        "Invalid years specification. Use 'all', [2019,2020], '2019-2024', or '2019,2021,2023'."
+    )
+
+
+def _expand_season_windows(start_md: str, end_md: str, years):
+    """Expand a season (MM-DD .. MM-DD) into per-year concrete ISO windows.
+
+    If start_md is later than end_md (e.g. 11-01 .. 03-31), season crosses year boundary.
+    """
+    sm, sd = map(int, start_md.split("-"))
+    em, ed = map(int, end_md.split("-"))
+    crosses_year = (sm, sd) > (em, ed)
+
+    windows = []
+    for y in years:
+        start_date = f"{int(y)}-{start_md}"
+        end_year = int(y) + 1 if crosses_year else int(y)
+        end_date = f"{end_year}-{end_md}"
+        windows.append([start_date, end_date])
+
+    return windows
+
+
+
+def _catalogue_search(catalog, collection, bbox, daterange, query, mission, allow_empty: bool = False):
 
     results = catalog.search(
         bbox=bbox,
@@ -195,6 +352,8 @@ def _catalogue_search(catalog, collection, bbox, daterange, query, mission):
         os.environ["AWS_NO_SIGN_REQUEST"] = "YES"
 
     if len(items) < 1:
+        if allow_empty:
+            return [], None, None, None
         raise ValueError(
             "No scenes found by the given parameters. Please check your polygon's geometry, date range or increase max cloud coverage."
         )
