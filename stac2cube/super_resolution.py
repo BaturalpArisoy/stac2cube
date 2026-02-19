@@ -588,7 +588,7 @@ def super_resolve_cube(
     # FINALIZE + WRITE NETCDF
     # ===========================
     da_super_all.name = var_name
-    da_super_all.attrs["status"] = f"super_resolved_{model_type_used}"
+    #da_super_all.attrs["status"] = f"super_resolved_{model_type_used}"
 
     ds_out = da_super_all.to_dataset(name=var_name)
     ds_out = ds_out.rio.set_spatial_dims("x", "y", inplace=False)

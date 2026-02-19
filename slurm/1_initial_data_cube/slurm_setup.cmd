@@ -4,7 +4,7 @@
 #SBATCH --error=../log/stac_xarray_error.%j.err
 #SBATCH --mail-type=END
 #SBATCH --mail-user=<e-mail>
-#SBATCH --account=pr94no-c
+#SBATCH --account=<reach your contact person>
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=40
