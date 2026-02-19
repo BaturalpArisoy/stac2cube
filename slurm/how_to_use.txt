@@ -4,11 +4,11 @@
 
 ##########################################################
 
-Following instruction is given on 'get_stac_layers' and can be repeated for 'get_cloud_layers' and others that will be added in the future.
+Following instruction is given on '1_initial_data_cube' and can be repeated for '2_cloud_mask_data_cube' and others that will be added in the future.
 
 1) Update Slurm Setup (only once)
 
-- Click '.get_stac_layers/slurm_setup.json'
+- Click '.1_initial_data_cube/slurm_setup.json'
 - Replace "#SBATCH --mail-user=<e-mail>" with your actual e-mail (remove < and > )
 - Change your cluster partition as desired (https://docs.terrabyte.lrz.de/services/terrabyte-hpc/introduction/)
 - If stac2cube installed in your local micromamba then:
@@ -25,15 +25,15 @@ Following instruction is given on 'get_stac_layers' and can be repeated for 'get
 
 2) Update Job Configuration
 
-- Edit '.get_stac_layers/get_stac_layers.json' and save
+- Edit '.1_initial_data_cube/get_stac_layers.json' and save
 - Note that json file annotations are different than python annotations. It's easy to make typo.
-- Therefore, take a look at examples -> './get_stac_layers/examples.txt'
+- Therefore, take a look at examples -> './1_initial_data_cube/examples.txt'
 - You can also find detailed explanations of parameters for the stac2cube features
-- If you are unsure of parameters, example notebooks are highly recommended -> 'stac2cube/interactive/1_get_stac_layers.ipynb'
+- If you are unsure of parameters, example notebooks are highly recommended -> 'stac2cube/interactive/1_Initial_Data_Cube.ipynb'
 
 3) Submit SLURM Job
 
-- If you are using MobaXTerm, middle click `.get_stac_layers/submit.sh`
+- If you are using MobaXTerm, middle click `.1_initial_data_cube/submit.sh`
 - If laptop pad, right click, copy file path to terminal
 - Simply press enter :)
 - This method is sometimes denied, then follow alternatives.
