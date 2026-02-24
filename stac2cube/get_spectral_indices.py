@@ -146,10 +146,10 @@ def _resolve_mission_cfg(mission):
 
     df = missions_df_fn()
 
-    m = df.loc[(df["name"] == mission) | (df["allias"] == mission)]
+    m = df.loc[(df["name"] == mission) | (df["alias"] == mission)]
 
     if m.empty:
-        known = sorted(set(df["name"]).union(set(df["allias"])))
+        known = sorted(set(df["name"]).union(set(df["alias"])))
         raise KeyError(f"Unknown mission '{mission}'. Known missions/aliases: {known}")
 
     return m.iloc[0].to_dict()

@@ -5,7 +5,7 @@ def missions():
 
     columns = [
         "name",
-        "allias",
+        "alias",
         # "stac_catalog",
         "default_resolution",
         "bands",
@@ -24,7 +24,7 @@ def missions():
 
     sentinel_2_l2a = {
         "name": "sentinel_2_l2a",
-        "allias": "s2",
+        "alias": "s2",
         # "stac_catalog": "https://earth-search.aws.element84.com/v1/",
         "default_resolution": 10,
         "bands": [
@@ -86,7 +86,7 @@ def missions():
 
     sentinel_2_l1c = {
         "name": "sentinel_2_l1c",
-        "allias": "s2_l1c",
+        "alias": "s2_l1c",
         # "stac_catalog": "https://earth-search.aws.element84.com/v1/",
         "default_resolution": 10,
         "bands": [
@@ -149,7 +149,7 @@ def missions():
 
     sentinel_1_rtc = {
         "name": "sentinel_1_rtc",
-        "allias": "s1",
+        "alias": "s1",
         # "stac_catalog": "https://planetarycomputer.microsoft.com/api/stac/v1",
         "default_resolution": 10,
         "bands": ["vh", "vv"],
@@ -187,7 +187,7 @@ def missions():
 
     landsat_c2_l2 = {
         "name": "landsat_c2_l2",
-        "allias": "l_oli",
+        "alias": "l_oli",
         # "stac_catalog": "https://planetarycomputer.microsoft.com/api/stac/v1",
         "default_resolution": 30,
         "bands": [
@@ -244,7 +244,7 @@ def missions():
 
     cop_dem_glo_30 = {
         "name": "cop_dem_glo_30",
-        "allias": "cop_dem",
+        "alias": "cop_dem",
         # "stac_catalog": "https://stac.terrabyte.lrz.de/public/api/",
         "default_resolution": False,
         "bands": False,
