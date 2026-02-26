@@ -58,7 +58,8 @@ def get_stac_layers(
         indices = stac_parameters["indices"]
         if not isinstance(indices, list):
             indices = indices.tolist()
-        output = update
+        # NOTE: do NOT force output=update here anymore.
+        # This allows update mode to return an in-memory updated cube when output=None.
     else:
         if not mission:
             raise ValueError("Error: Please select a mission.")
@@ -173,12 +174,27 @@ def get_stac_layers(
     stac.attrs["crs"] = crs
     stac.attrs["transform"] = transform
 
-    #stac = stac.copy()
+    # stac = stac.copy()
     stac.attrs.pop("nodata", None)
     try:
         stac = stac.rio.write_nodata(None, inplace=False)
     except Exception:
         pass
+
+    # Update existing cube by integrating only missing dates (optional)
+    # Done BEFORE export branching so update can also return in-memory result
+    # when output=None.
+    if update:
+        stac = update_stac(stac_existing=update, stac_updated=stac)
+
+        # Re-attach CRS/transform metadata explicitly (safe after concat/update)
+        stac.attrs["crs"] = crs
+        stac.attrs["transform"] = transform
+        try:
+            stac = stac.rio.write_crs(crs, inplace=False)
+            stac = stac.rio.write_transform(transform, inplace=False)
+        except Exception:
+            pass
 
     if not output:
         stac.rio.write_crs(crs, inplace=True)
@@ -199,12 +215,9 @@ def get_stac_layers(
 
         if not q:
             print(stac, flush=True)
-        return stac  # returns lazy
+        return stac  # returns lazy (update mode may compute missing slices internally)
 
     else:
-        if update:
-            stac = update_stac(stac_existing=update, stac_updated=stac)
-
         # Optional stats/composites (only when time dimension exists)
         if stats and (mission != "cop_dem_glo_30") and (not aggregator):
             stac = calculate_statistics(stac, stats)

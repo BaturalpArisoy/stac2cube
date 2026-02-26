@@ -14,3 +14,4 @@ from .tables import *
 from .batch_processing import *
 from .coregistration import *
 from .super_resolution import *
+from .gui import *
