@@ -16,7 +16,6 @@
 - [Installation](#installation)
 - [Examples](#examples)
 - [How to run on HPC](#how-to-run-on-hpc)
-- [What's upcoming?](#whats-upcoming)
 - [Access and Licensing Details for STAC Catalogs](#access-and-licensing-details-for-stac-catalogs)
 - [Citation](#citation)
 
@@ -113,15 +112,6 @@ Each step is documented by the numbers and the general explanation is given belo
 
 ## How to run on HPC
 A documentation file on how to use stac2cube features on terrabyte's HPC for compute-intensive processes and for faster processing time can be found in the [slurm folder](https://github.com/BaturalpArisoy/stac2cube/tree/main/slurm). Don't forget to look at *how_to_use.txt*.
-
-## What's upcoming?
-- [x] Custom and automatic temporal composites (e.g. mean of each month in the time-series)
-- [ ] Merge Landsat TM and OLI missions for terrabyte catalogues.
-- [ ] Batch processing tools for all the steps (under development).
-- [ ] Sentinel-1: Instrument Selection
-- [ ] Add SLURM job array to submit multiple json files at once
-- [ ] Silent parameter for get_stac_layers that will automatically switch to terrabyte STAC catalogs when run on HPC
-- [ ] Cloud shadow detection and masking for Sentinel-2
 
 ## Access and Licensing Details for STAC Catalogs
 
