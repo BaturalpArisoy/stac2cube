@@ -16,11 +16,14 @@ except Exception:
 
 from stac2cube import (
     missions,
-    get_stac_layers,
     export_stac,
     export_to_cogs,
     interactive_time_view,
     save_timeseries_gif,
+    calculate_statistics,
+    clip_stac,
+    cloud_filter,
+    get_stac_layers,
 )
 
 
@@ -244,11 +247,18 @@ def _stacked_field(widget, label_text: str = None):
     return widgets.VBox([label_html, widget_box], layout=widgets.Layout(width="100%"))
 
 
-def datacube_generator_GUI(missions_func=missions):
+def datacube_builder(missions_func=missions):
     
     # -------------------------------------------------------------------------
     # Helpers
     # -------------------------------------------------------------------------
+    xr.set_options(
+        display_expand_data=False,
+        display_expand_coords=True,
+        display_expand_attrs=False,
+        display_expand_data_vars=True,
+    )
+    
     def _to_list_or_empty(v):
         return v if isinstance(v, list) else []
 
@@ -612,7 +622,7 @@ def datacube_generator_GUI(missions_func=missions):
     ))
 
     generate_btn = widgets.Button(
-        description="Generate data cube",
+        description="Build data cube",
         button_style="success",
         icon="play",
         layout=widgets.Layout(width="190px"),
@@ -1936,6 +1946,13 @@ def datacube_generator_GUI(missions_func=missions):
     css_patch = widgets.HTML(
         """
         <style>
+        .stac2cube-card {
+            border: 1px solid #e5e7eb;
+            border-radius: 12px;
+            padding: 12px;
+            background: #fafbfc;
+            box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+        }
         .stac2cube-help-btn,
         .stac2cube-help-btn button,
         .stac2cube-help-btn .widget-button {
@@ -1960,7 +1977,13 @@ def datacube_generator_GUI(missions_func=missions):
     )
 
     header = widgets.HTML(
-        "<div style='margin:0 0 4px 0; font-size:28px; font-weight:700;'>Data Cube Generator</div>"
+        "<div style='margin:0 0 4px 0; font-size:28px; font-weight:700;'>Data Cube Builder</div>"
+    )
+
+    subtitle = widgets.HTML(
+        "<div style='font-size:13px; color:#6b7280; margin:0 0 4px 0;'>"
+        "Select Basic Parameters -> optional: select advanced parameters -> build data cube -> inspect the result -> export current result."
+        "</div>"
     )
 
     # input rows with browse buttons on the left
@@ -2020,7 +2043,7 @@ def datacube_generator_GUI(missions_func=missions):
 
     basic_box = widgets.VBox(
         [
-            widgets.HTML("<b>Basic Parameters</b>"),
+            #widgets.HTML("<b>Basic Parameters</b>"),
             _stacked_field(mission_dd, "Mission"),
             _stacked_field(resolution_w, "Resolution"),
             _with_help_left(polygon_input_box, "polygon", label_text="Polygon"),
@@ -2034,9 +2057,13 @@ def datacube_generator_GUI(missions_func=missions):
         layout=widgets.Layout(width="100%", gap="6px"),
     )
 
+    basic_acc = widgets.Accordion(children=[basic_box], selected_index=None)
+    basic_acc.set_title(0, "Basic Parameters")
+    basic_acc.layout = widgets.Layout(width="100%")
+
     advanced_box = widgets.VBox(
         [
-            widgets.HTML("<b>Advanced Parameters</b>"),
+            #widgets.HTML("<b>Advanced Parameters</b>"),
             _with_help_left(clip_raster_w, "clip_raster", label_text="Clip raster"),
             _with_help_left(max_cc_w, "max_cc", label_text="Max CC"),
             _with_help_left(
@@ -2050,7 +2077,7 @@ def datacube_generator_GUI(missions_func=missions):
 
     export_box = widgets.VBox(
         [
-            widgets.HTML("<b>Export Options</b>"),
+            #widgets.HTML("<b>Export Options</b>"),
             _stacked_field(export_mode_w, "Export mode"),
             _with_help_left(output_input_box, "output", label_text="Output"),
         ],
@@ -2089,7 +2116,7 @@ def datacube_generator_GUI(missions_func=missions):
 
     # Collapsible sections
     advanced_acc = widgets.Accordion(children=[advanced_box], selected_index=None)
-    advanced_acc.set_title(0, "Advanced parameters")
+    advanced_acc.set_title(0, "Advanced Parameters")
     advanced_acc.layout = widgets.Layout(width="99%")
 
     export_acc = widgets.Accordion(children=[export_box], selected_index=None)
@@ -2112,18 +2139,45 @@ def datacube_generator_GUI(missions_func=missions):
         layout=widgets.Layout(gap="8px", flex_flow="row wrap"),
     )
 
+
+    # --- Cards (layout only) ---
+    spacer_after_export = widgets.HTML("<div style='height:6px;'></div>")
+    spacer_between_cards = widgets.HTML("<div style='height:12px;'></div>")
+
+    builder_panel = widgets.VBox(
+        [basic_acc, advanced_acc, export_acc, spacer_after_export, action_row],
+        layout=widgets.Layout(width="100%", gap="8px"),
+    )
+    builder_panel.add_class("stac2cube-card")
+
+    result_card = widgets.VBox([result_acc], layout=widgets.Layout(width="100%"))
+    result_card.add_class("stac2cube-card")
+
+    viz_card = widgets.VBox([viz_acc], layout=widgets.Layout(width="100%"))
+    viz_card.add_class("stac2cube-card")
+
+    status_card = widgets.VBox(
+        [widgets.HTML("<b>Status</b>"), status_out],
+        layout=widgets.Layout(width="100%", gap="6px"),
+    )
+    status_card.add_class("stac2cube-card")
+
     ui = widgets.VBox(
         [
             css_patch,
             header,
-            basic_box,
-            advanced_acc,
-            export_acc,
-            action_row,
-            result_acc,
-            widgets.HTML("<b>Status</b>"),
-            status_out,
-            viz_acc,
+            subtitle,
+
+            builder_panel,
+
+            spacer_between_cards,
+            result_card,
+
+            spacer_between_cards,
+            viz_card,          # ✅ Visualization moved above Status
+
+            spacer_between_cards,
+            status_card,
         ],
         layout=widgets.Layout(
             width="50%",
@@ -2179,6 +2233,2310 @@ def datacube_generator_GUI(missions_func=missions):
             "viz_make_gif_btn": viz_make_gif_btn,
         },
         "outputs": {
+            "result": result_out,
+            "status": status_out,
+            "visualization": viz_out,
+        },
+    }
+
+
+
+
+
+def datacube_editor():
+    """
+    Data Cube Editor GUI
+    --------------------
+    - Load NetCDF data cube
+    - Work on a current in-memory result (starts with Spectral_Temporal_Stack)
+    - Slice by time and band (chained)
+    - Filter by cloud coverage using existing cloud_percentage coord (chained)
+    - Clip raster (vector file or bbox list; applied via Edit button)
+    - Temporal composites (stats) via stac2cube.calculate_statistics (applied via Edit button)
+    - Visualize (interactive dropdown + GIF generation)
+    - Export current result (NetCDF / COGs)
+    - Reset to loaded cube
+    """
+
+    # ---------------------------------------------------------------------
+    # Help text (question-mark popups)
+    # ---------------------------------------------------------------------
+    HELP_HTML = {
+        "cloud_filter": """
+        <b>filter by cloud coverage</b><br>
+        Uses the existing <code>cloud_percentage</code> coordinate stored in the data cube.<br><br>
+        <b>Important:</b><br>
+        This is <u>not</u> a new cloud detection / masking step and <u>not</u> STAC metadata <code>max_cc</code> filtering.<br>
+        It only keeps time steps where <code>cloud_percentage &lt;= max_cloud</code>.<br><br>
+        Works if your cube was already cloud-masked before (e.g. SCL masking during generation or probabilistic cloud masking workflow).<br>
+        Best used before clipping and before temporal composites.<br>
+        Cloud percentages are not recalculated in the editor after clipping.
+        """,
+        "clip_raster": """
+        <b>clip raster</b><br>
+        <b>1) Path to polygon</b><br>
+        Polygon formats: <code>gpkg</code>, <code>geojson</code>, <code>kml</code>, <code>kmz</code>, <code>shp</code>.<br>
+        Polygons can be geographic (WGS84) or projected (e.g., UTM).<br>
+        <b>2) List of BBOX</b><br>
+        Can also be a WGS84 bbox list: <code>[xmin, ymin, xmax, ymax]</code> (not projected coords). Useful tool: <code>http://bboxfinder.com/</code><br>
+        <b>Note:</b> If you have multiple features, only the first feature is used.
+        """,
+        "stats": """
+        <b>stats</b><br>
+        If empty/None: no stats cubes.<br>
+        Creates additional data variables with requested statistics.<br><br>
+        Examples:
+        <ul style="margin:4px 0 0 18px; padding:0;">
+            <li><code>mean_timeseries</code> -> mean of all time steps</li>
+            <li><code>mean_monthly</code> -> mean of each month</li>
+            <li><code>mean_annual</code> -> mean of each year</li>
+        </ul>
+        Disabled when <code>aggregator</code> is not None.
+        """,
+        "fps": """
+        <b>fps</b><br>
+        Frames per second of the animation.<br>
+        Higher values = faster animation playback.<br>
+        Lower values = slower animation playback.
+        """,
+        "gif_label": """
+        <b>label</b><br>
+        If True, the date label is shown on the animation frames.
+        """,
+        "daterange_mode": """
+        <b>date range mode</b><br>
+        Choose how you want to define the requested update period.<br><br>
+        <b>1) Standard (single window)</b>: <code>["YYYY-MM-DD", "YYYY-MM-DD"]</code><br>
+        <b>2) Seasonal</b>: <code>["MM-DD", "MM-DD"]</code> (repeats across years)<br>
+        <b>3) Seasonal + year control</b>: <code>{"season": ["MM-DD", "MM-DD"], "years": [...]}</code><br><br>
+        The text box below is prefilled with an editable example for the selected mode.
+        """,
+        "update_cube": """
+        <b>update data cube</b><br>
+        Uses <code>get_stac_layers(update=...)</code> with the loaded NetCDF path to fetch only missing dates
+        and return an updated <code>Spectral_Temporal_Stack</code>.<br><br>
+        <b>Important:</b> This replaces the current working result with a refreshed time series.<br>
+        Use it first (or by itself), then continue with other editing features (slice, clip, stats, export).
+        """,
+    }
+
+    STATS_OPTIONS = [
+        "mean_timeseries",
+        "mean_monthly",
+        "mean_annual",
+        "median_timeseries",
+        "median_monthly",
+        "median_annual",
+        "min_timeseries",
+        "min_monthly",
+        "min_annual",
+        "max_timeseries",
+        "max_monthly",
+        "max_annual",
+        "std_timeseries",
+        "std_monthly",
+        "std_annual",
+    ]
+
+    # ---------------------------------------------------------------------
+    # Helpers
+    # ---------------------------------------------------------------------
+    def _normalize_ui_path(path_str):
+        if not path_str:
+            return ""
+        try:
+            return os.path.normpath(str(path_str))
+        except Exception:
+            return str(path_str)
+
+    def _human_readable_bytes(n):
+        if n is None:
+            return "unknown"
+        n = float(n)
+        units = ["B", "KB", "MB", "GB", "TB", "PB"]
+        i = 0
+        while n >= 1024 and i < len(units) - 1:
+            n /= 1024.0
+            i += 1
+        return f"{n:.2f} {units[i]}"
+
+    def _estimated_data_size_bytes(obj):
+        try:
+            if isinstance(obj, xr.DataArray):
+                return int(getattr(obj, "nbytes", 0))
+            if isinstance(obj, xr.Dataset):
+                total = 0
+                for _, da in obj.data_vars.items():
+                    total += int(getattr(da, "nbytes", 0))
+                return total
+            return None
+        except Exception:
+            return None
+
+    def _show_preview(out_widget, obj, title_prefix=None):
+        with out_widget:
+            clear_output()
+            est = _estimated_data_size_bytes(obj)
+            if title_prefix:
+                print(title_prefix)
+            print(f"Estimated data size: {_human_readable_bytes(est)}\n")
+            with xr.set_options(
+                display_expand_data=False,
+                display_expand_coords=True,
+                display_expand_attrs=False,
+                display_expand_data_vars=True,
+            ):
+                display(obj)
+
+    def _show_status(msg, clear_first=True):
+        with status_out:
+            if clear_first:
+                clear_output()
+            print(msg)
+
+    def _print_working_note():
+        obj = state.get("current")
+        obj_type = type(obj).__name__ if obj is not None else "None"
+        print(f"ℹ️ Updated current working result ({obj_type}).")
+        print("ℹ️ Original loaded cube is preserved for 'Reset to loaded cube'.")
+
+    def _pick_dataarray_for_visualization(obj):
+        """
+        Pick a DataArray from current result for visualization.
+        - If DataArray: use it
+        - If Dataset: prefer 'Spectral_Temporal_Stack', otherwise first data var
+        """
+        if isinstance(obj, xr.DataArray):
+            return obj
+
+        if isinstance(obj, xr.Dataset):
+            if "Spectral_Temporal_Stack" in obj.data_vars:
+                return obj["Spectral_Temporal_Stack"]
+            if len(obj.data_vars) > 0:
+                first_name = list(obj.data_vars)[0]
+                return obj[first_name]
+            raise ValueError("Dataset contains no data variables.")
+
+        raise TypeError(f"Unsupported object type for visualization: {type(obj)}")
+
+    def _pick_timeseries_for_stats(obj):
+        """
+        Return the DataArray used for temporal composites.
+        Accepts:
+        - DataArray (time-series cube)
+        - Dataset containing 'Spectral_Temporal_Stack'
+        """
+        if isinstance(obj, xr.DataArray):
+            return obj
+
+        if isinstance(obj, xr.Dataset):
+            if "Spectral_Temporal_Stack" in obj.data_vars:
+                return obj["Spectral_Temporal_Stack"]
+            raise ValueError(
+                "Current result is a Dataset but does not contain 'Spectral_Temporal_Stack'."
+            )
+
+        raise TypeError(f"Unsupported object type for stats: {type(obj)}")
+
+    def _existing_dir_or_parent(path_str):
+        s = (path_str or "").strip()
+        if not s:
+            return str(Path(".").resolve())
+
+        p = Path(s)
+        if p.is_dir():
+            try:
+                return str(p.resolve())
+            except Exception:
+                return str(p)
+        if p.exists():
+            try:
+                return str(p.parent.resolve())
+            except Exception:
+                return str(p.parent)
+
+        parent = p.parent if str(p.parent) not in ("", ".") else Path(".")
+        try:
+            return str(parent.resolve())
+        except Exception:
+            return str(parent)
+
+    def _loaded_stem_default():
+        p = state.get("loaded_path")
+        if not p:
+            return "cube"
+        try:
+            return Path(p).stem
+        except Exception:
+            return "cube"
+
+    def _auto_netcdf_export_suggestion():
+        stem = re.sub(r"[^A-Za-z0-9._-]+", "_", _loaded_stem_default()).strip("._-") or "cube"
+        return f"./results/{stem}_edited.nc"
+
+    def _auto_gif_output_suggestion():
+        stem = re.sub(r"[^A-Za-z0-9._-]+", "_", _loaded_stem_default()).strip("._-") or "cube"
+        mode = (gif_display_mode_w.value or "rgb").strip()
+        return f"./animations/{stem}_{mode}.gif"
+
+    def _safe_copy_xarray(obj):
+        try:
+            return obj.copy(deep=False)
+        except Exception:
+            return obj
+
+    def _normalize_transform_for_export_bool(transform):
+        """
+        export_stac() uses: transform = transform or stac.transform
+        If transform is a numpy array, that can crash due to ambiguous truth value.
+        Make it bool-safe without changing backend source code.
+        """
+        if transform is None:
+            return None
+        try:
+            if isinstance(transform, np.ndarray):
+                return tuple(np.asarray(transform).tolist())
+        except Exception:
+            pass
+        return transform
+
+    def _get_reference_crs_transform_from_loaded():
+        """
+        Use original loaded cube as CRS/transform reference (especially useful when
+        current result became a stats Dataset).
+        """
+        ref = state.get("loaded_original")
+        if ref is None:
+            return None, None
+
+        crs = None
+        transform = None
+
+        try:
+            crs = ref.attrs.get("crs")
+        except Exception:
+            crs = None
+        try:
+            transform = ref.attrs.get("transform")
+        except Exception:
+            transform = None
+
+        if crs is None:
+            try:
+                crs = getattr(ref, "crs", None)
+            except Exception:
+                crs = None
+
+        if transform is None:
+            try:
+                transform = getattr(ref, "transform", None)
+            except Exception:
+                transform = None
+
+        transform = _normalize_transform_for_export_bool(transform)
+        return crs, transform
+
+    def _set_export_mode_defaults():
+        mode = export_mode_w.value
+        current = (export_target_w.value or "").strip()
+
+        if mode == "lazy":
+            export_target_w.disabled = True
+            browse_export_btn.disabled = True
+            export_target_w.placeholder = "Disabled (Quick Result, no Export selected)"
+            export_target_w.value = ""
+            export_target_w.description = "Output:"
+            if filechooser_available:
+                export_fc_box.layout.display = "none"
+
+        elif mode == "netcdf":
+            export_target_w.disabled = False
+            browse_export_btn.disabled = False
+            export_target_w.description = "Export file:"
+            export_target_w.placeholder = "./results/cube_edited.nc"
+
+            if current in ["./results/cogs", "results/cogs", r"results\cogs"]:
+                export_target_w.value = ""
+
+            if not export_target_w.value:
+                export_target_w.value = _auto_netcdf_export_suggestion()
+
+            _sync_export_filechooser_from_mode_and_text()
+
+        elif mode == "cogs":
+            export_target_w.disabled = False
+            browse_export_btn.disabled = False
+            export_target_w.description = "Export dir:"
+            export_target_w.placeholder = "./results/cogs"
+
+            if not export_target_w.value:
+                export_target_w.value = "./results/cogs"
+
+            _sync_export_filechooser_from_mode_and_text()
+
+    def _set_editor_enabled(enabled):
+        # Actions
+        edit_btn.disabled = not enabled
+        export_current_btn.disabled = not enabled
+        reset_btn.disabled = not enabled
+
+        # Slice widgets
+        _update_slice_widget_enabled_state(enabled)
+
+        # Cloud filter
+        enable_cloud_filter_w.disabled = not enabled
+        cloud_max_w.disabled = not enabled
+
+        # Clip widgets
+        enable_clip_w.disabled = not enabled
+        clip_geom_w.disabled = not enabled
+        browse_clip_btn.disabled = (not enabled) or (not filechooser_available)
+
+        # Stats widgets
+        stats_select_w.disabled = not enabled
+        stats_all_btn.disabled = not enabled
+        stats_clear_btn.disabled = not enabled
+
+        # Update widgets
+        enable_update_w.disabled = not enabled
+        update_daterange_mode_w.disabled = not enabled
+        update_daterange_w.disabled = not enabled
+
+        # Visualization
+        viz_dropdown_btn.disabled = not enabled
+        gif_display_mode_w.disabled = not enabled
+        gif_fps_w.disabled = not enabled
+        gif_label_w.disabled = not enabled
+        gif_out_path_w.disabled = not enabled
+        viz_make_gif_btn.disabled = not enabled
+        browse_gif_btn.disabled = (not enabled) or (not filechooser_available)
+
+        # Export widgets
+        export_mode_w.disabled = not enabled
+        if not enabled:
+            export_target_w.disabled = True
+            browse_export_btn.disabled = True
+            export_current_btn.disabled = True
+            with viz_out:
+                clear_output()
+                print("ℹ️ Load a cube first to activate visualization tools.")
+            _set_export_mode_defaults()
+        else:
+            _set_export_mode_defaults()
+
+    def _update_slice_widget_enabled_state(editor_enabled):
+        obj = state.get("current")
+        has_obj = editor_enabled and (obj is not None)
+
+        has_time = False
+        try:
+            has_time = has_obj and ("time" in obj.dims)
+        except Exception:
+            has_time = False
+
+        slice_time_w.disabled = not has_time
+        slice_time_all_btn.disabled = not has_time
+        slice_time_clear_btn.disabled = not has_time
+
+        has_band = False
+        try:
+            has_band = has_obj and ("band" in obj.dims)
+        except Exception:
+            has_band = False
+
+        slice_band_w.disabled = not has_band
+        slice_band_all_btn.disabled = not has_band
+        slice_band_clear_btn.disabled = not has_band
+
+    def _populate_slice_widgets_from_current(select_all=True):
+        obj = state.get("current")
+        if obj is None:
+            slice_time_w.options = []
+            slice_time_w.value = ()
+            slice_band_w.options = []
+            slice_band_w.value = ()
+            _update_slice_widget_enabled_state(False)
+            return
+
+        # Time options
+        if "time" in obj.dims:
+            try:
+                tvals = obj["time"].values
+                time_labels = []
+                for t in tvals:
+                    s = str(t)
+                    if "T" in s:
+                        s = s.split("T")[0]
+                    time_labels.append(s)
+                slice_time_w.options = time_labels
+                if select_all:
+                    slice_time_w.value = tuple(time_labels)
+                else:
+                    slice_time_w.value = tuple(time_labels[: min(1, len(time_labels))])
+            except Exception:
+                slice_time_w.options = []
+                slice_time_w.value = ()
+        else:
+            slice_time_w.options = []
+            slice_time_w.value = ()
+
+        # Band options
+        if "band" in obj.dims:
+            try:
+                bvals = [str(b) for b in obj["band"].values.tolist()]
+                slice_band_w.options = bvals
+                if select_all:
+                    slice_band_w.value = tuple(bvals)
+                else:
+                    slice_band_w.value = tuple(bvals[: min(1, len(bvals))])
+            except Exception:
+                slice_band_w.options = []
+                slice_band_w.value = ()
+        else:
+            slice_band_w.options = []
+            slice_band_w.value = ()
+
+        _update_slice_widget_enabled_state(True)
+
+    def _update_gif_output_suggestion(force=False):
+        new_suggestion = _auto_gif_output_suggestion()
+        current = (gif_out_path_w.value or "").strip()
+        prev_auto = state.get("last_auto_gif_suggestion")
+        gif_out_path_w.placeholder = new_suggestion
+
+        should_replace = force or (current == "") or (prev_auto is not None and current == prev_auto)
+        if should_replace:
+            gif_out_path_w.value = new_suggestion
+
+        state["last_auto_gif_suggestion"] = new_suggestion
+
+    def _export_current_result():
+        if state["current"] is None:
+            raise ValueError("No current result available. Load a cube first.")
+
+        mode = export_mode_w.value
+        target = None if export_target_w.disabled else ((export_target_w.value or "").strip() or None)
+
+        if mode == "lazy":
+            raise ValueError("Please change Export mode to NetCDF or COGs before exporting.")
+        if not target:
+            raise ValueError("Please provide an export file/folder path.")
+
+        obj = state["current"]
+        if not isinstance(obj, (xr.DataArray, xr.Dataset)):
+            raise TypeError(f"Unsupported result type for export: {type(obj)}")
+
+        if mode == "netcdf":
+            if not target.lower().endswith(".nc"):
+                target = target + ".nc"
+                export_target_w.value = target
+
+            Path(target).parent.mkdir(parents=True, exist_ok=True)
+
+            if isinstance(obj, xr.DataArray):
+                export_stac(
+                    stac=obj,
+                    output=target,
+                    var_name=(obj.name or "Spectral_Temporal_Stack"),
+                )
+                return {"mode": "netcdf", "target": target}
+
+            # Dataset export (e.g. after calculate_statistics)
+            crs_ref, transform_ref = _get_reference_crs_transform_from_loaded()
+            export_stac(
+                stac=obj,
+                output=target,
+                crs=crs_ref,
+                transform=transform_ref,
+            )
+            return {"mode": "netcdf", "target": target}
+
+        elif mode == "cogs":
+            Path(target).mkdir(parents=True, exist_ok=True)
+            export_to_cogs(stac=obj, output_dir=target, prefix="", dtype="float32")
+            return {"mode": "cogs", "target": target}
+
+        else:
+            raise ValueError(f"Unsupported export mode: {mode}")
+
+    # ---------------------------------------------------------------------
+    # Question mark help UI helpers
+    # ---------------------------------------------------------------------
+    def _help_icon_button():
+        b = widgets.Button(
+            description="?",
+            tooltip="Show help",
+            layout=widgets.Layout(width="22px", height="22px", padding="0px", min_width="22px"),
+        )
+        b.style.button_color = "#dbeafe"
+        b.add_class("stac2cube-help-btn")
+        return b
+
+    def _stacked_field_with_help(widget, label_text, help_key):
+        try:
+            widget.description = ""
+        except Exception:
+            pass
+        try:
+            widget.style.description_width = "0px"
+        except Exception:
+            pass
+
+        label_html = widgets.HTML(
+            f"<div style='font-weight:500; line-height:1.2; margin:0; padding:0;'>{label_text}:</div>"
+        )
+        q_btn = _help_icon_button()
+
+        help_box = widgets.HTML(
+            value=HELP_HTML.get(help_key, ""),
+            layout=widgets.Layout(
+                display="none",
+                border="1px solid #dbeafe",
+                padding="8px",
+                border_radius="8px",
+                margin="2px 0 2px 0",
+                width="100%",
+            ),
+        )
+
+        def _toggle_help(_):
+            help_box.layout.display = "" if help_box.layout.display == "none" else "none"
+
+        q_btn.on_click(_toggle_help)
+
+        header_row = widgets.HBox(
+            [label_html, q_btn],
+            layout=widgets.Layout(align_items="center", gap="6px"),
+        )
+
+        return widgets.VBox(
+            [header_row, help_box, widget],
+            layout=widgets.Layout(width="100%", gap="4px"),
+        )
+
+    # ---------------------------------------------------------------------
+    # File chooser helpers (optional)
+    # ---------------------------------------------------------------------
+    filechooser_available = FileChooser is not None
+
+    load_fc = None
+    export_fc = None
+    gif_fc = None
+    clip_fc = None
+
+    load_fc_box = widgets.VBox([], layout=widgets.Layout(display="none", width="100%"))
+    export_fc_box = widgets.VBox([], layout=widgets.Layout(display="none", width="100%"))
+    gif_fc_box = widgets.VBox([], layout=widgets.Layout(display="none", width="100%"))
+    clip_fc_box = widgets.VBox([], layout=widgets.Layout(display="none", width="100%"))
+
+    def _toggle_box_display(box):
+        box.layout.display = "" if box.layout.display == "none" else "none"
+
+    def _sync_load_filechooser_from_text():
+        if not filechooser_available or load_fc is None:
+            return
+        current = (load_path_w.value or "").strip()
+        start_dir = _existing_dir_or_parent(current)
+        suggested_name = Path(current).name if current else ""
+        try:
+            load_fc.reset(path=start_dir, filename=suggested_name)
+        except Exception:
+            try:
+                load_fc.default_path = start_dir
+                load_fc.default_filename = suggested_name
+            except Exception:
+                pass
+
+    def _sync_export_filechooser_from_mode_and_text():
+        if not filechooser_available or export_fc is None:
+            return
+
+        mode = export_mode_w.value
+        current = (export_target_w.value or "").strip()
+
+        if mode == "lazy":
+            export_fc_box.layout.display = "none"
+            return
+
+        if mode == "netcdf":
+            suggestion = current or _auto_netcdf_export_suggestion()
+            start_dir = _existing_dir_or_parent(suggestion)
+            suggested_name = Path(suggestion).name or "cube_edited.nc"
+            if not suggested_name.lower().endswith(".nc"):
+                suggested_name = f"{Path(suggested_name).stem}.nc"
+
+            try:
+                export_fc.reset(path=start_dir, filename=suggested_name)
+            except Exception:
+                try:
+                    export_fc.default_path = start_dir
+                    export_fc.default_filename = suggested_name
+                except Exception:
+                    pass
+
+            export_fc.title = "Select NetCDF export file"
+            export_fc.show_only_dirs = False
+            export_fc.filter_pattern = ["*.nc"]
+
+        elif mode == "cogs":
+            start_dir = _existing_dir_or_parent(current or "./results/cogs")
+            try:
+                export_fc.reset(path=start_dir, filename="")
+            except Exception:
+                try:
+                    export_fc.default_path = start_dir
+                    export_fc.default_filename = ""
+                except Exception:
+                    pass
+
+            export_fc.title = "Select output directory for COGs"
+            export_fc.show_only_dirs = True
+            try:
+                export_fc.filter_pattern = None
+            except Exception:
+                pass
+
+    def _sync_gif_filechooser_from_text():
+        if not filechooser_available or gif_fc is None:
+            return
+        current = (gif_out_path_w.value or "").strip() or _auto_gif_output_suggestion()
+        start_dir = _existing_dir_or_parent(current)
+        try:
+            gif_fc.reset(path=start_dir, filename="")
+        except Exception:
+            try:
+                gif_fc.default_path = start_dir
+                gif_fc.default_filename = ""
+            except Exception:
+                pass
+        gif_fc.title = "Select animation output folder"
+        gif_fc.show_only_dirs = True
+        try:
+            gif_fc.filter_pattern = None
+        except Exception:
+            pass
+
+    def _sync_clip_filechooser_from_text():
+        if not filechooser_available or clip_fc is None:
+            return
+        current = (clip_geom_w.value or "").strip()
+
+        if current.startswith("[") and current.endswith("]"):
+            current = ""
+
+        start_dir = _existing_dir_or_parent(current)
+        suggested_name = Path(current).name if current else ""
+        try:
+            clip_fc.reset(path=start_dir, filename=suggested_name)
+        except Exception:
+            try:
+                clip_fc.default_path = start_dir
+                clip_fc.default_filename = suggested_name
+            except Exception:
+                pass
+
+    if filechooser_available:
+        try:
+            load_fc = FileChooser(
+                path=str(Path(".").resolve()),
+                filename="",
+                title="Select NetCDF cube",
+                show_only_dirs=False,
+                select_default=False,
+            )
+            load_fc.filter_pattern = ["*.nc"]
+            load_fc.use_dir_icons = True
+            load_fc_box = widgets.VBox([load_fc], layout=widgets.Layout(display="none", width="100%"))
+
+            export_fc = FileChooser(
+                path=str(Path(".").resolve()),
+                filename="",
+                title="Select export output",
+                show_only_dirs=False,
+                select_default=False,
+            )
+            export_fc.use_dir_icons = True
+            export_fc_box = widgets.VBox([export_fc], layout=widgets.Layout(display="none", width="100%"))
+
+            gif_fc = FileChooser(
+                path=str(Path(".").resolve()),
+                filename="",
+                title="Select animation output folder",
+                show_only_dirs=True,
+                select_default=False,
+            )
+            gif_fc.use_dir_icons = True
+            gif_fc_box = widgets.VBox([gif_fc], layout=widgets.Layout(display="none", width="100%"))
+
+            clip_fc = FileChooser(
+                path=str(Path(".").resolve()),
+                filename="",
+                title="Select clipping polygon file",
+                show_only_dirs=False,
+                select_default=False,
+            )
+            clip_fc.use_dir_icons = True
+            try:
+                clip_fc.filter_pattern = ["*.gpkg", "*.geojson", "*.kml", "*.kmz", "*.shp"]
+            except Exception:
+                pass
+            clip_fc_box = widgets.VBox([clip_fc], layout=widgets.Layout(display="none", width="100%"))
+
+        except Exception:
+            filechooser_available = False
+            load_fc = export_fc = gif_fc = clip_fc = None
+            load_fc_box = widgets.VBox([], layout=widgets.Layout(display="none", width="100%"))
+            export_fc_box = widgets.VBox([], layout=widgets.Layout(display="none", width="100%"))
+            gif_fc_box = widgets.VBox([], layout=widgets.Layout(display="none", width="100%"))
+            clip_fc_box = widgets.VBox([], layout=widgets.Layout(display="none", width="100%"))
+
+    # ---------------------------------------------------------------------
+    # Widgets
+    # ---------------------------------------------------------------------
+    # Loading
+    load_path_w = widgets.Text(
+        value="./results/test.nc",
+        description="NetCDF:",
+        placeholder="./results/test.nc",
+        layout=widgets.Layout(width="100%"),
+        style={"description_width": "90px"},
+    )
+
+    browse_load_btn = widgets.Button(
+        description="",
+        icon="folder-open",
+        tooltip="Browse NetCDF file",
+        layout=widgets.Layout(width="34px", min_width="34px", height="32px", padding="0px"),
+    )
+    browse_load_btn.style.button_color = "#f3f4f6"
+
+    load_cube_btn = widgets.Button(
+        description="Load cube",
+        icon="folder-open",
+        button_style="info",
+        layout=widgets.Layout(width="130px"),
+    )
+
+    reset_btn = widgets.Button(
+        description="Reset to loaded cube",
+        icon="undo",
+        layout=widgets.Layout(width="180px"),
+        disabled=True,
+    )
+
+    # Slice feature
+    slice_time_w = widgets.SelectMultiple(
+        options=[],
+        value=(),
+        description="Dates:",
+        rows=8,
+        layout=widgets.Layout(width="99%", height="200px"),
+        style={"description_width": "90px"},
+        disabled=True,
+    )
+
+    slice_band_w = widgets.SelectMultiple(
+        options=[],
+        value=(),
+        description="Bands:",
+        rows=8,
+        layout=widgets.Layout(width="99%", height="200px"),
+        style={"description_width": "90px"},
+        disabled=True,
+    )
+
+    slice_time_all_btn = widgets.Button(description="All dates", layout=widgets.Layout(width="100px"), disabled=True)
+    slice_time_clear_btn = widgets.Button(description="Clear dates", layout=widgets.Layout(width="110px"), disabled=True)
+    slice_band_all_btn = widgets.Button(description="All bands", layout=widgets.Layout(width="100px"), disabled=True)
+    slice_band_clear_btn = widgets.Button(description="Clear bands", layout=widgets.Layout(width="110px"), disabled=True)
+
+    # Cloud filter feature (applied via Edit button)
+    enable_cloud_filter_w = widgets.Checkbox(
+        value=False,
+        description="Enable filter",
+        indent=False,
+        layout=widgets.Layout(width="140px"),
+        disabled=True,
+    )
+
+    cloud_max_w = widgets.IntText(
+        value=100,
+        description="",
+        layout=widgets.Layout(width="20%"),
+        disabled=True,
+    )
+
+    # Clip feature (applied via Edit button)
+    enable_clip_w = widgets.Checkbox(
+        value=False,
+        description="Enable clip",
+        indent=False,
+        layout=widgets.Layout(width="140px"),
+        disabled=True,
+    )
+
+    clip_geom_w = widgets.Text(
+        value="",
+        description="",
+        placeholder="./polygons/test.gpkg  or  [xmin, ymin, xmax, ymax]",
+        layout=widgets.Layout(width="80%"),
+        disabled=True,
+    )
+
+    browse_clip_btn = widgets.Button(
+        description="",
+        icon="folder-open",
+        tooltip="Browse clipping polygon file",
+        layout=widgets.Layout(width="34px", min_width="34px", height="32px", padding="0px"),
+        disabled=True,
+    )
+    browse_clip_btn.style.button_color = "#f3f4f6"
+
+    # Temporal composites (stats) -- applied via Edit button
+    stats_select_w = widgets.SelectMultiple(
+        options=STATS_OPTIONS,
+        value=(),
+        rows=8,
+        layout=widgets.Layout(width="50%", height="210px"),
+        disabled=True,
+    )
+    stats_all_btn = widgets.Button(description="All stats", layout=widgets.Layout(width="95px"), disabled=True)
+    stats_clear_btn = widgets.Button(description="Clear", layout=widgets.Layout(width="70px"), disabled=True)
+
+    # Update Data Cube (fetch missing dates from loaded cube path)
+    enable_update_w = widgets.Checkbox(
+        value=False,
+        description="Enable update data cube",
+        indent=False,
+        disabled=True,
+    )
+
+    update_daterange_mode_w = widgets.Dropdown(
+        options=[
+            ("Standard (single window)", "standard"),
+            ("Seasonal (repeat across years)", "seasonal"),
+            ("Seasonal + year control", "seasonal_years"),
+        ],
+        value="standard",
+        description="",
+        layout=widgets.Layout(width="99%"),
+        disabled=True,
+    )
+
+    update_daterange_w = widgets.Text(
+        value='["2024-04-01", "2024-04-10"]',
+        description="",
+        placeholder='["2024-04-01", "2024-04-10"]',
+        layout=widgets.Layout(width="99%"),
+        disabled=True,
+    )
+
+    # Export options
+    export_mode_w = widgets.Dropdown(
+        options=[
+            ("Quick Result, no Export (Lazy Array)", "lazy"),
+            ("NetCDF", "netcdf"),
+            ("Cloud Optimized Geotiffs (select folder)", "cogs"),
+        ],
+        value="lazy",
+        description="Mode:",
+        layout=widgets.Layout(width="99%"),
+        style={"description_width": "90px"},
+        disabled=True,
+    )
+
+    export_target_w = widgets.Text(
+        value="",
+        description="Output:",
+        placeholder="Disabled (Quick Result, no Export selected)",
+        layout=widgets.Layout(width="100%"),
+        style={"description_width": "90px"},
+        disabled=True,
+    )
+
+    browse_export_btn = widgets.Button(
+        description="",
+        icon="folder-open",
+        tooltip="Browse export output",
+        layout=widgets.Layout(width="34px", min_width="34px", height="32px", padding="0px"),
+        disabled=True,
+    )
+    browse_export_btn.style.button_color = "#f3f4f6"
+
+    # Visualization
+    viz_dropdown_btn = widgets.Button(
+        description="Launch interactive viewer",
+        icon="image",
+        button_style="info",
+        layout=widgets.Layout(width="260px"),
+        disabled=True,
+    )
+
+    gif_display_mode_w = widgets.Dropdown(
+        options=[
+            ("rgb", "rgb"),
+            ("false_color", "false_color"),
+            ("ndvi", "ndvi"),
+            ("ndwi", "ndwi"),
+        ],
+        value="rgb",
+        description="Mode:",
+        layout=widgets.Layout(width="99%"),
+        style={"description_width": "90px"},
+        disabled=True,
+    )
+
+    gif_fps_w = widgets.IntText(
+        value=3,
+        description="FPS:",
+        layout=widgets.Layout(width="99%"),
+        style={"description_width": "90px"},
+        disabled=True,
+    )
+
+    gif_label_w = widgets.Dropdown(
+        options=[("True", True), ("False", False)],
+        value=True,
+        description="Label:",
+        layout=widgets.Layout(width="99%"),
+        style={"description_width": "90px"},
+        disabled=True,
+    )
+
+    gif_out_path_w = widgets.Text(
+        value="./animations/cube_rgb.gif",
+        description="GIF:",
+        placeholder="./animations/cube_rgb.gif",
+        layout=widgets.Layout(width="100%"),
+        style={"description_width": "90px"},
+        disabled=True,
+    )
+
+    browse_gif_btn = widgets.Button(
+        description="",
+        icon="folder-open",
+        tooltip="Select GIF output folder",
+        layout=widgets.Layout(width="34px", min_width="34px", height="32px", padding="0px"),
+        disabled=True,
+    )
+    browse_gif_btn.style.button_color = "#f3f4f6"
+
+    viz_make_gif_btn = widgets.Button(
+        description="Generate animation GIF",
+        icon="film",
+        button_style="warning",
+        layout=widgets.Layout(width="210px"),
+        disabled=True,
+    )
+
+    # Actions
+    edit_btn = widgets.Button(
+        description="Edit data cube",
+        icon="play",
+        button_style="success",
+        layout=widgets.Layout(width="160px"),
+        disabled=True,
+    )
+
+    export_current_btn = widgets.Button(
+        description="Export current result",
+        icon="save",
+        button_style="danger",
+        layout=widgets.Layout(width="190px"),
+        disabled=True,
+    )
+
+    # Outputs
+    loaded_summary_out = widgets.Output(
+        layout=widgets.Layout(
+            border="1px solid #e5e7eb",
+            padding="10px",
+            border_radius="8px",
+            width="99%",
+        )
+    )
+
+    result_out = widgets.Output(
+        layout=widgets.Layout(
+            border="1px solid #e5e7eb",
+            padding="10px",
+            border_radius="8px",
+            width="99%",
+        )
+    )
+
+    status_out = widgets.Output(
+        layout=widgets.Layout(
+            border="1px solid #dbeafe",
+            padding="10px",
+            border_radius="8px",
+            width="100%",
+            min_height="80px",
+        )
+    )
+
+    viz_out = widgets.Output(
+        layout=widgets.Layout(
+            border="1px solid #e5e7eb",
+            padding="10px",
+            border_radius="8px",
+            width="99%",
+            min_height="90px",
+        )
+    )
+
+    # ---------------------------------------------------------------------
+    # State
+    # ---------------------------------------------------------------------
+    state = {
+        "loaded_path": None,
+        "loaded_original": None,  # untouched Spectral_Temporal_Stack DataArray
+        "current": None,          # working result (DataArray or Dataset after stats)
+        "last_export_info": None,
+        "last_auto_gif_suggestion": None,
+    }
+
+    # ---------------------------------------------------------------------
+    # File chooser callbacks
+    # ---------------------------------------------------------------------
+    if filechooser_available and load_fc is not None:
+        def _on_load_fc_selected(chooser):
+            selected = getattr(chooser, "selected", None)
+            if selected:
+                load_path_w.value = _normalize_ui_path(selected)
+                load_fc_box.layout.display = "none"
+
+        def _on_export_fc_selected(chooser):
+            mode = export_mode_w.value
+            if mode == "netcdf":
+                selected = getattr(chooser, "selected", None)
+                if selected:
+                    s = str(selected)
+                    if not s.lower().endswith(".nc"):
+                        s += ".nc"
+                    export_target_w.value = _normalize_ui_path(s)
+                    export_fc_box.layout.display = "none"
+            elif mode == "cogs":
+                selected_path = getattr(chooser, "selected_path", None) or getattr(chooser, "selected", None)
+                if selected_path:
+                    export_target_w.value = _normalize_ui_path(selected_path)
+                    export_fc_box.layout.display = "none"
+
+        def _on_gif_fc_selected(chooser):
+            selected_dir = getattr(chooser, "selected_path", None) or getattr(chooser, "selected", None)
+            if selected_dir:
+                auto_name = Path(_auto_gif_output_suggestion()).name
+                gif_out_path_w.value = _normalize_ui_path(str(Path(selected_dir) / auto_name))
+                gif_fc_box.layout.display = "none"
+
+        def _on_clip_fc_selected(chooser):
+            selected = getattr(chooser, "selected", None)
+            if selected:
+                clip_geom_w.value = _normalize_ui_path(selected)
+                clip_fc_box.layout.display = "none"
+
+        try:
+            load_fc.register_callback(_on_load_fc_selected)
+            export_fc.register_callback(_on_export_fc_selected)
+            gif_fc.register_callback(_on_gif_fc_selected)
+            if clip_fc is not None:
+                clip_fc.register_callback(_on_clip_fc_selected)
+        except Exception:
+            filechooser_available = False
+
+    def _on_browse_load_clicked(_):
+        if not filechooser_available or load_fc is None:
+            _show_status("ℹ️ Optional dependency 'ipyfilechooser' is not available. Install it to use Browse buttons.")
+            return
+        _sync_load_filechooser_from_text()
+        _toggle_box_display(load_fc_box)
+
+    def _on_browse_export_clicked(_):
+        if export_mode_w.value == "lazy":
+            _show_status("ℹ️ Output selection is disabled in 'Quick Result, no Export (Lazy Array)' mode.")
+            return
+        if not filechooser_available or export_fc is None:
+            _show_status("ℹ️ Optional dependency 'ipyfilechooser' is not available. Install it to use Browse buttons.")
+            return
+        _sync_export_filechooser_from_mode_and_text()
+        _toggle_box_display(export_fc_box)
+
+    def _on_browse_gif_clicked(_):
+        if state["current"] is None:
+            _show_status("ℹ️ Load a cube first to enable visualization tools.")
+            return
+        if not filechooser_available or gif_fc is None:
+            _show_status("ℹ️ Optional dependency 'ipyfilechooser' is not available. Install it to use Browse buttons.")
+            return
+        _sync_gif_filechooser_from_text()
+        _toggle_box_display(gif_fc_box)
+
+    def _on_browse_clip_clicked(_):
+        if state["current"] is None:
+            _show_status("ℹ️ Load a cube first to enable editing features.")
+            return
+        if not filechooser_available or clip_fc is None:
+            _show_status("ℹ️ Optional dependency 'ipyfilechooser' is not available. Install it to use Browse buttons.")
+            return
+        _sync_clip_filechooser_from_text()
+        _toggle_box_display(clip_fc_box)
+
+    # ---------------------------------------------------------------------
+    # Feature helpers
+    # ---------------------------------------------------------------------
+    def _daterange_mode_example(mode_value: str):
+        if mode_value == "standard":
+            return '["2024-04-01", "2024-04-10"]'
+        elif mode_value == "seasonal":
+            return '["04-01", "10-31"]'
+        elif mode_value == "seasonal_years":
+            return '{"season": ["04-01", "10-31"], "years": [2019, 2020, 2021]}'
+        return '["2024-04-01", "2024-04-10"]'
+
+    def _update_update_daterange_example(force=False):
+        new_example = _daterange_mode_example(update_daterange_mode_w.value)
+        current = (update_daterange_w.value or "").strip()
+        prev_auto = state.get("last_auto_update_daterange_example")
+
+        update_daterange_w.placeholder = new_example
+        should_replace = force or (current == "") or (prev_auto is not None and current == prev_auto)
+        if should_replace:
+            update_daterange_w.value = new_example
+
+        state["last_auto_update_daterange_example"] = new_example
+
+    def _is_str_list_len2(obj):
+        return (
+            isinstance(obj, (list, tuple))
+            and len(obj) == 2
+            and all(isinstance(x, str) for x in obj)
+        )
+
+    def _validate_date_string(s: str, pattern: str, label: str):
+        if not re.match(pattern, s):
+            raise ValueError(f"Invalid {label}: '{s}'")
+
+    def _parse_daterange_input(mode: str, text: str):
+        s = (text or "").strip()
+        if s == "":
+            return None
+
+        try:
+            obj = ast.literal_eval(s)
+        except Exception as e:
+            raise ValueError(
+                f"Daterange could not be parsed. Please use Python-style list/dict syntax. ({e})"
+            )
+
+        if mode == "standard":
+            if not _is_str_list_len2(obj):
+                raise ValueError('Standard mode expects: ["YYYY-MM-DD", "YYYY-MM-DD"]')
+            for d in obj:
+                _validate_date_string(d, r"^\d{4}-\d{2}-\d{2}$", "date (YYYY-MM-DD)")
+            return list(obj)
+
+        if mode == "seasonal":
+            if not _is_str_list_len2(obj):
+                raise ValueError('Seasonal mode expects: ["MM-DD", "MM-DD"]')
+            for d in obj:
+                _validate_date_string(d, r"^\d{2}-\d{2}$", "season date (MM-DD)")
+            return list(obj)
+
+        if mode == "seasonal_years":
+            if not isinstance(obj, dict):
+                raise ValueError(
+                    'Seasonal + year control expects a dict, e.g. {"season": ["04-01", "10-31"], "years": [2019, 2020]}'
+                )
+            if "season" not in obj or "years" not in obj:
+                raise ValueError('Seasonal + year control requires keys: "season" and "years"')
+
+            season = obj["season"]
+            years = obj["years"]
+
+            if not _is_str_list_len2(season):
+                raise ValueError('"season" must be ["MM-DD", "MM-DD"]')
+            for d in season:
+                _validate_date_string(d, r"^\d{2}-\d{2}$", "season date (MM-DD)")
+
+            valid_years = False
+            if years == "all":
+                valid_years = True
+            elif isinstance(years, str) and re.match(r"^\d{4}-\d{4}$", years):
+                valid_years = True
+            elif isinstance(years, (list, tuple)) and all(isinstance(y, int) for y in years):
+                valid_years = True
+
+            if not valid_years:
+                raise ValueError(
+                    '"years" must be one of: "all", "YYYY-YYYY", or a list like [2019, 2020, 2021]'
+                )
+
+            return {"season": list(season), "years": years}
+
+        raise ValueError(f"Unknown Date Range Mode: {mode}")
+    
+    
+    def _parse_clip_geometry_input(raw_text):
+        """
+        Returns either:
+        - bbox list [xmin, ymin, xmax, ymax] (floats)
+        - path string
+        - None (if empty)
+        """
+        s = (raw_text or "").strip()
+        if not s:
+            return None
+
+        if s.startswith("[") and s.endswith("]"):
+            try:
+                obj = ast.literal_eval(s)
+            except Exception as e:
+                raise ValueError(f"Invalid bbox list syntax: {s}") from e
+
+            if not (isinstance(obj, (list, tuple)) and len(obj) == 4):
+                raise ValueError("BBox must be a list/tuple with 4 values: [xmin, ymin, xmax, ymax]")
+
+            try:
+                vals = [float(v) for v in obj]
+            except Exception as e:
+                raise ValueError("BBox values must be numeric.") from e
+
+            return vals
+
+        return s
+
+    def _apply_slice_feature(obj):
+        """
+        Apply time/band slicing to current working result.
+        Empty selection means 'keep all' for that dimension.
+        Works for DataArray and Dataset if dims exist.
+        """
+        if obj is None:
+            raise ValueError("No current result available.")
+
+        out = obj
+        changed = False
+        changes = []
+
+        if "time" in out.dims:
+            selected_dates = list(slice_time_w.value)
+            all_dates = list(slice_time_w.options)
+            if len(selected_dates) > 0 and len(selected_dates) < len(all_dates):
+                out = out.sel(time=selected_dates)
+                changed = True
+                changes.append(f"time={len(selected_dates)} scene(s)")
+            elif len(selected_dates) == 0:
+                changes.append("time=all (empty selection interpreted as no filter)")
+
+        if "band" in out.dims:
+            selected_bands = list(slice_band_w.value)
+            all_bands = list(slice_band_w.options)
+            if len(selected_bands) > 0 and len(selected_bands) < len(all_bands):
+                out = out.sel(band=selected_bands)
+                changed = True
+                changes.append(f"band={len(selected_bands)} band(s)")
+            elif len(selected_bands) == 0:
+                changes.append("band=all (empty selection interpreted as no filter)")
+
+        return out, changed, changes
+
+    def _apply_cloud_filter_feature(obj):
+        """
+        Apply cloud coverage filtering using stac2cube.cloud_filter() and existing cloud_percentage coord.
+        If current result is Dataset (e.g. after stats), filter Spectral_Temporal_Stack and drop stale stats.
+        """
+        if not enable_cloud_filter_w.value:
+            return obj, False, []
+
+        max_cloud = int(cloud_max_w.value)
+        if max_cloud < 0 or max_cloud > 100:
+            raise ValueError("Max cloud % must be between 0 and 100.")
+
+        # Dataset case -> filter time series and drop stats
+        if isinstance(obj, xr.Dataset):
+            if "Spectral_Temporal_Stack" not in obj.data_vars:
+                raise ValueError(
+                    "Current Dataset does not contain 'Spectral_Temporal_Stack' for cloud filtering."
+                )
+            da = obj["Spectral_Temporal_Stack"]
+            if "time" not in da.dims:
+                raise ValueError("Cloud filtering requires a 'time' dimension.")
+            if "cloud_percentage" not in da.coords:
+                raise ValueError(
+                    "Current cube has no 'cloud_percentage' coordinate. "
+                    "This feature works only if the cube was already cloud-masked "
+                    "(e.g. SCL during generation or probabilistic cloud masking workflow)."
+                )
+
+            before_n = int(da.sizes.get("time", 0))
+            attrs_ref = dict(getattr(da, "attrs", {}) or {})
+            filtered = cloud_filter(da, max_cloud=max_cloud)
+            try:
+                filtered.attrs.update(attrs_ref)
+            except Exception:
+                pass
+            after_n = int(filtered.sizes.get("time", 0))
+
+            msgs = [
+                "cloud_filter applied ",
+                f"max_cloud={max_cloud}%",
+                f"Scenes kept: {after_n} / {before_n}",
+                f"Removed scenes: {max(0, before_n - after_n)}",
+                "Previous stats were removed because cloud filtering changes selected time steps.",
+            ]
+            if after_n == 0:
+                msgs.append("Warning: no scenes remain after filtering.")
+            return filtered, True, msgs
+
+        # DataArray case (normal)
+        if isinstance(obj, xr.DataArray):
+            da = obj
+            if "time" not in da.dims:
+                raise ValueError("Cloud filtering requires a 'time' dimension.")
+            if "cloud_percentage" not in da.coords:
+                raise ValueError(
+                    "Current cube has no 'cloud_percentage' coordinate. "
+                    "This feature works only if the cube was already cloud-masked "
+                    "(e.g. SCL during generation or probabilistic cloud masking workflow)."
+                )
+
+            before_n = int(da.sizes.get("time", 0))
+            attrs_ref = dict(getattr(da, "attrs", {}) or {})
+            filtered = cloud_filter(da, max_cloud=max_cloud)
+            try:
+                filtered.attrs.update(attrs_ref)
+            except Exception:
+                pass
+            after_n = int(filtered.sizes.get("time", 0))
+
+            msgs = [
+                "cloud_filter applied ",
+                f"max_cloud={max_cloud}%",
+                f"Scenes kept: {after_n} / {before_n}",
+                f"Removed scenes: {max(0, before_n - after_n)}",
+            ]
+            if after_n == 0:
+                msgs.append("Warning: no scenes remain after filtering.")
+            return filtered, True, msgs
+
+        raise TypeError(f"Unsupported object type for cloud filtering: {type(obj)}")
+
+    
+    def _apply_update_feature(obj):
+        """
+        Update the loaded cube by requesting a new daterange via get_stac_layers(update=...).
+        This feature uses the loaded NetCDF path and replaces the current working result with
+        a refreshed Spectral_Temporal_Stack.
+        """
+        if not enable_update_w.value:
+            return obj, False, []
+
+        loaded_path = state.get("loaded_path")
+        if not loaded_path:
+            raise ValueError("No loaded cube path available for update.")
+
+        daterange = _parse_daterange_input(update_daterange_mode_w.value, update_daterange_w.value)
+        if not daterange:
+            raise ValueError("Please provide a daterange for Update Data Cube.")
+
+        # Auto-detect whether original loaded cube had cloud masking (cloud_percentage coord)
+        loaded_ref = state.get("loaded_original")
+        cloud_masking_flag = False
+        try:
+            cloud_masking_flag = bool(
+                loaded_ref is not None and ("cloud_percentage" in loaded_ref.coords)
+            )
+        except Exception:
+            cloud_masking_flag = False
+
+        updated = get_stac_layers(
+            update=loaded_path,
+            daterange=daterange,
+            max_cc=100,
+            clip_raster=False,
+            cloud_masking=cloud_masking_flag,
+            stats=None,
+            aggregator=None,
+            output=None,   # <-- return in memory, no overwrite
+            q=True,        # silent for GUI
+        )
+
+        if isinstance(updated, xr.Dataset):
+            if "Spectral_Temporal_Stack" not in updated.data_vars:
+                raise ValueError("Update returned a Dataset without 'Spectral_Temporal_Stack'.")
+            updated = updated["Spectral_Temporal_Stack"]
+
+        if not isinstance(updated, xr.DataArray):
+            raise TypeError(f"Update returned unsupported object type: {type(updated)}")
+
+        msgs = [
+            "update_data_cube applied (get_stac_layers(update=...))",
+            f"daterange={daterange}",
+            f"cloud_masking auto-detected from loaded cube: {cloud_masking_flag}",
+            "Current working result was replaced with the updated Spectral_Temporal_Stack.",
+            "Tip: disable Update now if you want to continue with slicing/clipping/stats on the updated cube.",
+        ]
+        return updated, True, msgs
+    
+    
+    
+    
+    def _apply_clip_feature(obj):
+        """
+        Apply clipping using stac2cube.clip_stac().
+
+        Behavior:
+        - If clip checkbox is disabled -> no change
+        - If enabled but no clip input -> raises clear error
+        - If current is DataArray -> clip directly
+        - If current is Dataset with Spectral_Temporal_Stack -> clip time series and
+          drop old stats (they become invalid after spatial clip)
+        """
+        if not enable_clip_w.value:
+            return obj, False, []
+
+        geom = _parse_clip_geometry_input(clip_geom_w.value)
+        if geom is None:
+            raise ValueError("Clip is enabled, but no polygon/bbox was provided.")
+
+        if isinstance(obj, xr.Dataset):
+            if "Spectral_Temporal_Stack" not in obj.data_vars:
+                raise ValueError(
+                    "Current Dataset does not contain 'Spectral_Temporal_Stack' for clipping."
+                )
+            da = obj["Spectral_Temporal_Stack"]
+            clipped = clip_stac(da, polygon=geom)
+
+            msgs = ["clip_raster applied"]
+            if isinstance(geom, (list, tuple)):
+                msgs.append("Clip input type: bbox list")
+            else:
+                msgs.append(f"Clip input type: vector file ({Path(str(geom)).name})")
+            msgs.append("Previous stats were removed because clipping changes the raster extent.")
+            return clipped, True, msgs
+
+        if isinstance(obj, xr.DataArray):
+            clipped = clip_stac(obj, polygon=geom)
+            msgs = ["clip_raster applied"]
+            if isinstance(geom, (list, tuple)):
+                msgs.append("Clip input type: bbox list")
+            else:
+                msgs.append(f"Clip input type: vector file ({Path(str(geom)).name})")
+            return clipped, True, msgs
+
+        raise TypeError(f"Unsupported object type for clipping: {type(obj)}")
+
+    def _apply_stats_feature(obj):
+        """
+        Apply temporal composites using stac2cube.calculate_statistics().
+        Returns (new_obj, changed, messages).
+        """
+        selected = list(stats_select_w.value)
+        if not selected:
+            return obj, False, []
+
+        da = _pick_timeseries_for_stats(obj)
+        if "time" not in da.dims:
+            raise ValueError(
+                "Temporal composites require a 'time' dimension. "
+                "Use 'Reset to loaded cube' if you are currently on a non-temporal result."
+            )
+
+        ds_stats = calculate_statistics(da, selected)
+        msgs = [
+            f"stats={len(selected)} selection(s)",
+            "Temporal composites generated (time series + stats).",
+            "This should usually be the LAST step before exporting.",
+        ]
+        return ds_stats, True, msgs
+
+    # ---------------------------------------------------------------------
+    # Core callbacks
+    # ---------------------------------------------------------------------
+    def _on_load_cube_clicked(_):
+        path = (load_path_w.value or "").strip()
+        if not path:
+            _show_status("❌ Please provide a NetCDF file path.")
+            return
+        if not path.lower().endswith(".nc"):
+            _show_status("❌ Please select a NetCDF file (.nc).")
+            return
+        if not Path(path).exists():
+            _show_status(f"❌ File not found: {path}")
+            return
+
+        try:
+            with status_out:
+                clear_output()
+                print("Loading data cube from NetCDF...")
+
+                with xr.open_dataset(path) as ds:
+                    ds_loaded = ds.load()
+
+                if "Spectral_Temporal_Stack" not in ds_loaded.data_vars:
+                    raise ValueError("NetCDF does not contain 'Spectral_Temporal_Stack'.")
+
+                loaded = ds_loaded["Spectral_Temporal_Stack"]
+
+                state["loaded_path"] = path
+                state["loaded_original"] = loaded
+                state["current"] = _safe_copy_xarray(loaded)
+
+                _show_preview(loaded_summary_out, state["loaded_original"])
+                _show_preview(result_out, state["current"])
+
+                _populate_slice_widgets_from_current(select_all=True)
+                _set_editor_enabled(True)
+                _update_gif_output_suggestion(force=True)
+                _update_update_daterange_example(force=True)
+
+                if export_mode_w.value == "netcdf" and not export_target_w.value:
+                    export_target_w.value = _auto_netcdf_export_suggestion()
+
+                print(f"✅ Loaded cube: {path}")
+                print("✅ Working object initialized from: Spectral_Temporal_Stack (DataArray)")
+                _print_working_note()
+
+            try:
+                loaded_summary_acc.selected_index = 0
+            except Exception:
+                pass
+            try:
+                result_acc.selected_index = 0
+            except Exception:
+                pass
+
+        except Exception as e:
+            _show_status(f"❌ {type(e).__name__}: {e}")
+
+    def _on_reset_clicked(_):
+        if state["loaded_original"] is None:
+            _show_status("ℹ️ No loaded cube to reset to yet.")
+            return
+
+        state["current"] = _safe_copy_xarray(state["loaded_original"])
+        _populate_slice_widgets_from_current(select_all=True)
+        _show_preview(result_out, state["current"])
+
+        with status_out:
+            clear_output()
+            print("✅ Working result reset to original loaded cube.")
+            _print_working_note()
+
+        try:
+            result_acc.selected_index = 0
+        except Exception:
+            pass
+
+    def _reset_feature_checkboxes_after_edit():
+        # Uncheck feature toggles to prevent accidental re-application
+        enable_cloud_filter_w.value = False
+        enable_clip_w.value = False
+        enable_update_w.value = False
+
+    def _on_edit_clicked(_):
+        if state["current"] is None:
+            _show_status("❌ Load a cube first.")
+            return
+
+        try:
+            with status_out:
+                clear_output()
+                print("Applying editing features to current working result...")
+
+                current_obj = state["current"]
+                changed_any = False
+                messages = []
+
+                if enable_update_w.value:
+                    #print("ℹ️ Update Data Cube is enabled.")
+                    #print("ℹ️ In this run, other feature selections are ignored and the working result will be replaced from the loaded cube path.")
+                    current_obj, changed_update, update_msgs = _apply_update_feature(current_obj)
+                    changed_any = changed_any or changed_update
+                    messages.extend(update_msgs)
+                else:
+                    # 1) Slice
+                    current_obj, changed_slice, slice_msgs = _apply_slice_feature(current_obj)
+                    changed_any = changed_any or changed_slice
+                    messages.extend(slice_msgs)
+
+                    # 2) Filter by Cloud Coverage
+                    current_obj, changed_cloud, cloud_msgs = _apply_cloud_filter_feature(current_obj)
+                    changed_any = changed_any or changed_cloud
+                    messages.extend(cloud_msgs)
+
+                    # 3) Clip Raster
+                    current_obj, changed_clip, clip_msgs = _apply_clip_feature(current_obj)
+                    changed_any = changed_any or changed_clip
+                    messages.extend(clip_msgs)
+
+                    # 4) Temporal composites (stats)
+                    current_obj, changed_stats, stats_msgs = _apply_stats_feature(current_obj)
+                    changed_any = changed_any or changed_stats
+                    messages.extend(stats_msgs)
+
+                state["current"] = current_obj
+
+                # Refresh UI from updated current cube
+                _populate_slice_widgets_from_current(select_all=True)
+                _show_preview(result_out, state["current"])
+
+                if changed_any:
+                    print("✅ Edit finished.")
+                    if messages:
+                        print("Applied:")
+                        for m in messages:
+                            print(f"- {m}")
+                else:
+                    print("✅ Edit finished (no changes applied).")
+                    print(
+                        "Tip: select a subset of dates/bands, enable cloud filter, enable clip with a geometry, "
+                        "and/or choose statistics before clicking 'Edit data cube'."
+                    )
+                
+                _reset_feature_checkboxes_after_edit()
+
+                _print_working_note()
+
+                # Optional auto-export if export mode+target already selected
+                mode = export_mode_w.value
+                target = None if export_target_w.disabled else ((export_target_w.value or "").strip() or None)
+                if mode != "lazy" and target:
+                    print("")
+                    print("Export mode is set and output path is provided.")
+                    print("Exporting current result...")
+                    info = _export_current_result()
+                    state["last_export_info"] = info
+                    if info.get("mode") != "netcdf":
+                        print(f"✅ Export finished: {info['target']}")
+                    else:
+                        print("✅ Export finished.")
+
+            try:
+                result_acc.selected_index = 0
+            except Exception:
+                pass
+
+        except Exception as e:
+            _show_status(f"❌ {type(e).__name__}: {e}")
+
+    def _on_export_current_clicked(_):
+        if state["current"] is None:
+            _show_status("❌ No current result available. Load and/or edit a cube first.")
+            return
+
+        try:
+            with status_out:
+                clear_output()
+                print("Exporting current result...")
+                info = _export_current_result()
+                state["last_export_info"] = info
+
+                # export_stac() already prints "Export is done: ..."
+                if info.get("mode") != "netcdf":
+                    print(f"✅ Export finished: {info['target']}")
+
+                _print_working_note()
+
+        except Exception as e:
+            _show_status(f"❌ {type(e).__name__}: {e}")
+
+    def _on_viz_dropdown_clicked(_):
+        if state["current"] is None:
+            with viz_out:
+                clear_output()
+                print("ℹ️ Load a cube first.")
+            return
+
+        try:
+            da = _pick_dataarray_for_visualization(state["current"])
+            with viz_out:
+                clear_output()
+                if isinstance(state["current"], xr.Dataset) and da.name != "Spectral_Temporal_Stack":
+                    print(f"ℹ️ Visualizing dataset variable: {da.name}")
+                print("Launching interactive viewer...")
+                out = interactive_time_view(stac=da, widget_type="dropdown")
+                if out is not None:
+                    display(out)
+        except Exception as e:
+            with viz_out:
+                clear_output()
+                print(f"❌ Visualization error: {type(e).__name__}: {e}")
+
+    def _on_make_gif_clicked(_):
+        if state["current"] is None:
+            with viz_out:
+                clear_output()
+                print("ℹ️ Load a cube first.")
+            return
+
+        try:
+            da = _pick_dataarray_for_visualization(state["current"])
+
+            if "time" not in da.dims:
+                raise ValueError(
+                    f"Animation generation requires a 'time' dimension. Found dims: {da.dims}. "
+                    "If you are viewing a stats-only variable, use 'Reset to loaded cube' "
+                    "or visualize 'Spectral_Temporal_Stack'."
+                )
+
+            out_path = (gif_out_path_w.value or "").strip()
+            if not out_path:
+                raise ValueError("Please provide a GIF output path.")
+            if not out_path.lower().endswith(".gif"):
+                out_path += ".gif"
+                gif_out_path_w.value = out_path
+
+            fps_val = int(gif_fps_w.value)
+            if fps_val <= 0:
+                raise ValueError("FPS must be > 0.")
+
+            Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+
+            with viz_out:
+                clear_output()
+                print("Generating animation GIF...")
+                save_timeseries_gif(
+                    da=da,
+                    out_path=out_path,
+                    display_mode=gif_display_mode_w.value,
+                    fps=fps_val,
+                    label=gif_label_w.value,
+                )
+                print(f"✅ Animation saved: {out_path}")
+
+        except Exception as e:
+            with viz_out:
+                clear_output()
+                print(f"❌ Animation error: {type(e).__name__}: {e}")
+
+    # ---------------------------------------------------------------------
+    # Small selection helper callbacks
+    # ---------------------------------------------------------------------
+    def _select_all_dates(_):
+        slice_time_w.value = tuple(slice_time_w.options)
+
+    def _clear_dates(_):
+        slice_time_w.value = ()
+
+    def _select_all_bands(_):
+        slice_band_w.value = tuple(slice_band_w.options)
+
+    def _clear_bands(_):
+        slice_band_w.value = ()
+
+    def _select_all_stats(_):
+        stats_select_w.value = tuple(stats_select_w.options)
+
+    def _clear_stats(_):
+        stats_select_w.value = ()
+
+    # ---------------------------------------------------------------------
+    # Observe / wire
+    # ---------------------------------------------------------------------
+    browse_load_btn.on_click(_on_browse_load_clicked)
+    browse_export_btn.on_click(_on_browse_export_clicked)
+    browse_gif_btn.on_click(_on_browse_gif_clicked)
+    browse_clip_btn.on_click(_on_browse_clip_clicked)
+
+    load_cube_btn.on_click(_on_load_cube_clicked)
+    reset_btn.on_click(_on_reset_clicked)
+    edit_btn.on_click(_on_edit_clicked)
+    export_current_btn.on_click(_on_export_current_clicked)
+
+    slice_time_all_btn.on_click(_select_all_dates)
+    slice_time_clear_btn.on_click(_clear_dates)
+    slice_band_all_btn.on_click(_select_all_bands)
+    slice_band_clear_btn.on_click(_clear_bands)
+
+    stats_all_btn.on_click(_select_all_stats)
+    stats_clear_btn.on_click(_clear_stats)
+
+    viz_dropdown_btn.on_click(_on_viz_dropdown_clicked)
+    viz_make_gif_btn.on_click(_on_make_gif_clicked)
+
+    export_mode_w.observe(lambda change: _set_export_mode_defaults(), names="value")
+    gif_display_mode_w.observe(lambda change: _update_gif_output_suggestion(), names="value")
+    update_daterange_mode_w.observe(lambda change: _update_update_daterange_example(), names="value")
+
+    # ---------------------------------------------------------------------
+    # Layout helpers
+    # ---------------------------------------------------------------------
+    def _stacked_field(widget, label_text):
+        try:
+            widget.description = ""
+        except Exception:
+            pass
+        try:
+            widget.style.description_width = "0px"
+        except Exception:
+            pass
+
+        label = widgets.HTML(
+            f"<div style='font-weight:500; line-height:1.2; margin:0; padding:0;'>{label_text}:</div>"
+        )
+        return widgets.VBox([label, widget], layout=widgets.Layout(width="100%", gap="4px"))
+
+    # ---------------------------------------------------------------------
+    # Build layout
+    # ---------------------------------------------------------------------
+    header = widgets.HTML(
+        "<div style='margin:0 0 4px 0; font-size:28px; font-weight:700;'>Data Cube Editor</div>"
+    )
+
+    subtitle = widgets.HTML(
+        "<div style='font-size:13px; color:#6b7280; margin:0 0 4px 0;'>"
+        "Load a data cube -> select editing feature(s) -> edit data cube -> inspect the result -> export current result."
+        "</div>"
+    )
+
+    # Loading section
+    load_input_row = widgets.HBox(
+        [browse_load_btn, load_path_w],
+        layout=widgets.Layout(width="100%", gap="6px", align_items="center"),
+    )
+    load_input_box = widgets.VBox(
+        [load_input_row, load_fc_box],
+        layout=widgets.Layout(width="100%", gap="4px"),
+    )
+
+    loading_box = widgets.VBox(
+        [
+            widgets.HTML("<b>Loading</b>"),
+            widgets.HTML("<div style='font-size:12px; color:#666;'>NetCDF only (Geotiffs are not supported as editor input).</div>"),
+            _stacked_field(load_input_box, "Data cube path"),
+            widgets.HBox([load_cube_btn, reset_btn], layout=widgets.Layout(gap="8px", flex_flow="row wrap")),
+        ],
+        layout=widgets.Layout(width="100%", gap="6px"),
+    )
+
+    loaded_summary_box = widgets.VBox([loaded_summary_out], layout=widgets.Layout(width="100%"))
+    loaded_summary_acc = widgets.Accordion(children=[loaded_summary_box], selected_index=None)
+    loaded_summary_acc.set_title(0, "Loaded data cube")
+    loaded_summary_acc.layout = widgets.Layout(width="100%")
+
+    # Slice feature
+    slice_time_box = widgets.VBox(
+        [
+            _stacked_field(slice_time_w, "Dates"),
+            widgets.HBox([slice_time_all_btn, slice_time_clear_btn], layout=widgets.Layout(gap="6px")),
+        ],
+        layout=widgets.Layout(width="50%", gap="6px"),
+    )
+
+    slice_band_box = widgets.VBox(
+        [
+            _stacked_field(slice_band_w, "Bands"),
+            widgets.HBox([slice_band_all_btn, slice_band_clear_btn], layout=widgets.Layout(gap="6px")),
+        ],
+        layout=widgets.Layout(width="50%", gap="6px"),
+    )
+
+    slice_feature_box = widgets.VBox(
+        [
+            #widgets.HTML("<b>Slice Data Cube</b>"),
+            widgets.HTML(
+                "<div style='font-size:12px; color:#666;'>"
+                "Select a subset of dates and/or bands.</b>. "
+                "</div>"
+            ),
+            slice_time_box,
+            slice_band_box,
+        ],
+        layout=widgets.Layout(width="100%", gap="8px"),
+    )
+
+    slice_acc = widgets.Accordion(children=[slice_feature_box], selected_index=None)
+    slice_acc.set_title(0, "Slice Data Cube")
+    slice_acc.layout = widgets.Layout(width="99%")
+
+    # Cloud filter feature (NEW)
+    cloud_filter_controls = widgets.VBox(
+        [
+            enable_cloud_filter_w,
+            _stacked_field_with_help(cloud_max_w, "Max cloud %", "cloud_filter"),
+        ],
+        layout=widgets.Layout(width="100%", gap="6px"),
+    )
+
+    cloud_filter_feature_box = widgets.VBox(
+        [
+            #widgets.HTML("<b>Filter by Cloud Coverage</b>"),
+            widgets.HTML(
+                "<div style='font-size:12px; color:#666;'>"
+                "This is only possible if the data cube is already cloud-masked. "
+                "(either with SCL during data cube generation or masked by a cloud data cube)"
+                "</div>"
+            ),
+            cloud_filter_controls,
+        ],
+        layout=widgets.Layout(width="100%", gap="8px"),
+    )
+
+    cloud_filter_acc = widgets.Accordion(children=[cloud_filter_feature_box], selected_index=None)
+    cloud_filter_acc.set_title(0, "Filter by Cloud Coverage")
+    cloud_filter_acc.layout = widgets.Layout(width="99%")
+
+    # Clip feature
+    clip_input_row = widgets.HBox(
+        [browse_clip_btn, clip_geom_w],
+        layout=widgets.Layout(width="100%", gap="6px", align_items="center"),
+    )
+
+    clip_input_box = widgets.VBox(
+        [clip_input_row, clip_fc_box],
+        layout=widgets.Layout(width="100%", gap="4px"),
+    )
+
+    clip_controls_box = widgets.VBox(
+        [
+            enable_clip_w,
+            _stacked_field_with_help(clip_input_box, "Polygon / BBOX", "clip_raster"),
+        ],
+        layout=widgets.Layout(width="100%", gap="6px"),
+    )
+
+    clip_feature_box = widgets.VBox(
+        [
+            #widgets.HTML("<b>Clip Raster</b>"),
+            widgets.HTML(
+                "<div style='font-size:12px; color:#666;'>"
+                "Clip data cube (clip raster) by providing a vector file path or a WGS84 bbox list."
+                "</div>"
+            ),
+            clip_controls_box,
+        ],
+        layout=widgets.Layout(width="100%", gap="8px"),
+    )
+
+    clip_acc = widgets.Accordion(children=[clip_feature_box], selected_index=None)
+    clip_acc.set_title(0, "Clip Raster")
+    clip_acc.layout = widgets.Layout(width="99%")
+
+    # Temporal Composites (stats) feature
+    stats_inner_widget = widgets.VBox(
+        [
+            stats_select_w,
+            widgets.HBox([stats_all_btn, stats_clear_btn], layout=widgets.Layout(gap="6px")),
+        ],
+        layout=widgets.Layout(width="100%", gap="6px"),
+    )
+
+    stats_feature_box = widgets.VBox(
+        [
+            #widgets.HTML("<b>Temporal Composites</b>"),
+            widgets.HTML(
+                "<div style='font-size:12px; color:#666;'>"
+                "Select statistics to build temporal composites. <br>"
+                "<b>This should be the last step before exporting, because it creates extra composite layers besides the original data cube.</b>"
+                "</div>"
+            ),
+            _stacked_field_with_help(stats_inner_widget, "Stats", "stats"),
+        ],
+        layout=widgets.Layout(width="100%", gap="8px"),
+    )
+
+    stats_acc = widgets.Accordion(children=[stats_feature_box], selected_index=None)
+    stats_acc.set_title(0, "Temporal Composites")
+    stats_acc.layout = widgets.Layout(width="99%")
+
+
+
+    # Update Data Cube feature
+    update_feature_box = widgets.VBox(
+        [
+            #widgets.HTML("<b>Update Data Cube</b>"),
+            widgets.HTML(
+                "<div style='font-size:12px; color:#666;'>"
+                "Fetch missing dates for the loaded date cube in the given date range. "
+                "Instead of re-building the entire data cube, it only computes the new scenes.<br>"
+                "<b>This feature is recommended to be used alone without in sequence with other features.</b>"
+                "</div>"
+            ),
+            widgets.VBox(
+                [
+                    enable_update_w,
+                    _stacked_field_with_help(update_daterange_mode_w, "Date Range Mode", "daterange_mode"),
+                    _stacked_field(update_daterange_w, "Daterange"),
+                ],
+                layout=widgets.Layout(width="100%", gap="6px"),
+            ),
+        ],
+        layout=widgets.Layout(width="100%", gap="8px"),
+    )
+
+    update_acc = widgets.Accordion(children=[update_feature_box], selected_index=None)
+    update_acc.set_title(0, "Update Data Cube")
+    update_acc.layout = widgets.Layout(width="99%")
+
+
+
+
+    # Export Options
+    export_input_row = widgets.HBox(
+        [browse_export_btn, export_target_w],
+        layout=widgets.Layout(width="100%", gap="6px", align_items="center"),
+    )
+    export_input_box = widgets.VBox(
+        [export_input_row, export_fc_box],
+        layout=widgets.Layout(width="100%", gap="4px"),
+    )
+
+    export_box = widgets.VBox(
+        [
+            #widgets.HTML("<b>Export Options</b>"),
+            widgets.HTML("<div style='font-size:12px; color:#666;'>Exports the current result in the desired format.</div>"),
+            _stacked_field(export_mode_w, "Export mode"),
+            _stacked_field(export_input_box, "Output"),
+        ],
+        layout=widgets.Layout(width="100%", gap="6px"),
+    )
+
+    export_acc = widgets.Accordion(children=[export_box], selected_index=None)
+    export_acc.set_title(0, "Export Options")
+    export_acc.layout = widgets.Layout(width="99%")
+
+    # Features group
+    features_box = widgets.VBox(
+        [
+            widgets.HTML("<b>Features</b>"),
+            widgets.HTML("<div style='font-size:12px; color:#666;'>Multiple features can be selected before editing the data cube.</div>"),
+            #widgets.HTML("<div style='font-size:12px; color:#666;'>- Do not forget to uncheck boxes after editing a data cube to prevent.</div>"),
+            slice_acc,
+            cloud_filter_acc,
+            clip_acc,
+            stats_acc,
+            update_acc,
+            export_acc,
+        ],
+        layout=widgets.Layout(width="100%", gap="8px"),
+    )
+
+    # Actions
+    action_row = widgets.HBox(
+        [edit_btn, export_current_btn],
+        layout=widgets.Layout(gap="8px", flex_flow="row wrap"),
+    )
+
+    # Result accordion
+    result_box = widgets.VBox([result_out], layout=widgets.Layout(width="100%"))
+    result_acc = widgets.Accordion(children=[result_box], selected_index=None)
+    result_acc.set_title(0, "Result")
+    result_acc.layout = widgets.Layout(width="100%")
+
+    # Visualization accordion (at the end)
+    gif_input_row = widgets.HBox(
+        [browse_gif_btn, gif_out_path_w],
+        layout=widgets.Layout(width="100%", gap="6px", align_items="center"),
+    )
+    gif_input_box = widgets.VBox(
+        [gif_input_row, gif_fc_box],
+        layout=widgets.Layout(width="100%", gap="4px"),
+    )
+
+    visualization_box = widgets.VBox(
+        [
+            #widgets.HTML("<b>Visualization</b>"),
+            #widgets.HTML("<div style='font-size:12px; color:#666;'>Available after loading a cube. For GIFs, a time dimension is required.</div>"),
+            widgets.VBox(
+                [
+                    widgets.HTML("<b>1) Interactive View</b>"),
+                    #widgets.HTML("<div style='font-size:12px; color:#666;'>Dropdown mode.</div>"),
+                    viz_dropdown_btn,
+                ],
+                layout=widgets.Layout(width="100%", gap="6px"),
+            ),
+            viz_out,
+            widgets.VBox(
+                [
+                    widgets.HTML("<b>2) Animation (export only)</b>"),
+                    _stacked_field(gif_display_mode_w, "Display mode"),
+                    _stacked_field_with_help(gif_fps_w, "FPS", "fps"),
+                    _stacked_field_with_help(gif_label_w, "Label", "gif_label"),
+                    _stacked_field(gif_input_box, "Output GIF"),
+                    viz_make_gif_btn,
+                ],
+                layout=widgets.Layout(width="100%", gap="6px"),
+            ),
+            
+        ],
+        layout=widgets.Layout(width="100%", gap="8px"),
+    )
+
+    viz_acc = widgets.Accordion(children=[visualization_box], selected_index=None)
+    viz_acc.set_title(0, "Visualization")
+    viz_acc.layout = widgets.Layout(width="100%")
+
+    # Spacers
+    spacer_after_loaded = widgets.HTML("<div style='height:10px;'></div>")
+    spacer_after_buttons = widgets.HTML("<div style='height:8px;'></div>")
+
+    # --- NEW: wrap sections into cards (layout only) ---
+    loading_card = widgets.VBox([loading_box], layout=widgets.Layout(width="100%"))
+    loading_card.add_class("stac2cube-card")
+
+    loaded_summary_card = widgets.VBox([loaded_summary_acc], layout=widgets.Layout(width="100%"))
+    loaded_summary_card.add_class("stac2cube-card")
+
+    features_card = widgets.VBox(
+        [features_box, widgets.HTML("<div style='height:6px;'></div>"), action_row],
+        layout=widgets.Layout(width="100%", gap="8px"),
+    )
+    features_card.add_class("stac2cube-card")
+
+    result_card = widgets.VBox([result_acc], layout=widgets.Layout(width="100%"))
+    result_card.add_class("stac2cube-card")
+
+    viz_card = widgets.VBox([viz_acc], layout=widgets.Layout(width="100%"))
+    viz_card.add_class("stac2cube-card")
+
+    status_card = widgets.VBox(
+        [widgets.HTML("<b>Status</b>"), status_out],
+        layout=widgets.Layout(width="100%", gap="6px"),
+    )
+    status_card.add_class("stac2cube-card")
+
+
+    # Main UI
+    # Spacers (keep them simple)
+    spacer_small = widgets.HTML("<div style='height:6px;'></div>")
+    spacer_med = widgets.HTML("<div style='height:12px;'></div>")
+
+    ui = widgets.VBox(
+        [
+            header,
+            subtitle,
+
+            loading_card,
+            spacer_small,
+            loaded_summary_card,
+
+            spacer_med,
+            features_card,
+
+            spacer_med,
+            result_card,
+
+            spacer_med,
+            viz_card,
+
+            spacer_med,
+            status_card,
+        ],
+        layout=widgets.Layout(
+            width="50%",
+            max_width="980px",
+            margin="0 auto",
+            gap="0px",
+        ),
+    )
+
+    ui.add_class("stac2cube-root")
+
+    # ---------------------------------------------------------------------
+    # Initialize + styling  (inject CSS BEFORE display)
+    # ---------------------------------------------------------------------
+    display(
+        widgets.HTML(
+            """
+            <style>
+            .stac2cube-help-btn button {
+                border-radius: 999px !important;
+                font-weight: 700 !important;
+                line-height: 1 !important;
+                border: 1px solid #93c5fd !important;
+            }
+
+            /* Root: kill tiny horizontal overflow */
+            .stac2cube-root {
+                overflow-x: hidden !important;
+            }
+
+            /* Cards */
+            .stac2cube-card {
+                border: 1px solid #e5e7eb;
+                border-radius: 12px;
+                padding: 12px;
+                background: #fafbfc;
+                box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+                box-sizing: border-box;
+                overflow-x: hidden;
+                min-width: 0;
+            }
+
+            /* Prevent accordion panels and nested widget boxes from overflowing */
+            .stac2cube-card .p-Accordion-child,
+            .stac2cube-card .p-Accordion-child > .p-Widget,
+            .stac2cube-card .widget-vbox,
+            .stac2cube-card .widget-hbox {
+                min-width: 0 !important;
+                max-width: 100% !important;
+                box-sizing: border-box !important;
+            }
+
+            /* Constrain text inputs, dropdowns, and select widgets inside cards */
+            .stac2cube-card .widget-text input,
+            .stac2cube-card .widget-dropdown select,
+            .stac2cube-card .widget-select-multiple select {
+                min-width: 0 !important;
+                max-width: 100% !important;
+                box-sizing: border-box !important;
+                overflow-x: hidden !important;
+            }
+
+            /* Outputs: avoid xarray repr forcing horizontal scrollbars */
+            .stac2cube-root .widget-output {
+                overflow-x: hidden !important;
+            }
+            .stac2cube-root .widget-output pre {
+                white-space: pre-wrap !important;
+                overflow-wrap: anywhere !important;
+            }
+            </style>
+            """
+        )
+    )
+
+    outer = widgets.HBox([ui], layout=widgets.Layout(width="100%", justify_content="center"))
+
+    _set_editor_enabled(False)
+    _show_status("ℹ️ Load a NetCDF cube to start editing.")
+    _update_gif_output_suggestion(force=True)
+    _update_update_daterange_example(force=True)
+
+    display(outer)
+
+    return {
+        "ui": ui,
+        "outer": outer,
+        "state": state,
+        "widgets": {
+            "load_path": load_path_w,
+            "load_cube_btn": load_cube_btn,
+            "reset_btn": reset_btn,
+            "slice_time": slice_time_w,
+            "slice_band": slice_band_w,
+            "enable_cloud_filter": enable_cloud_filter_w,
+            "cloud_max": cloud_max_w,
+            "enable_clip": enable_clip_w,
+            "clip_geom": clip_geom_w,
+            "stats_select": stats_select_w,
+            "edit_btn": edit_btn,
+            "enable_update": enable_update_w,
+            "update_daterange_mode": update_daterange_mode_w,
+            "update_daterange": update_daterange_w,
+            "export_mode": export_mode_w,
+            "export_target": export_target_w,
+            "export_current_btn": export_current_btn,
+            "viz_dropdown_btn": viz_dropdown_btn,
+            "gif_display_mode": gif_display_mode_w,
+            "gif_fps": gif_fps_w,
+            "gif_label": gif_label_w,
+            "gif_out_path": gif_out_path_w,
+            "viz_make_gif_btn": viz_make_gif_btn,
+        },
+        "outputs": {
+            "loaded_summary": loaded_summary_out,
             "result": result_out,
             "status": status_out,
             "visualization": viz_out,
