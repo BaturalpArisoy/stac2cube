@@ -2193,6 +2193,10 @@ def datacube_builder(missions_func=missions):
     _set_visualization_enabled(False)
     _update_gif_output_suggestion(force=True)
 
+    with status_out:
+        clear_output()
+        print("ℹ️ Select at least Basic Parameters to build the data cube, with optional Advanced Parameters.")
+
     outer = widgets.HBox(
         [ui], layout=widgets.Layout(width="100%", justify_content="center")
     )
@@ -2397,7 +2401,7 @@ def datacube_editor():
     def _print_working_note():
         obj = state.get("current")
         obj_type = type(obj).__name__ if obj is not None else "None"
-        print(f"ℹ️ Updated current working result ({obj_type}).")
+        #print(f"ℹ️ Updated current working result ({obj_type}).")
         print("ℹ️ Original loaded cube is preserved for 'Reset to loaded cube'.")
 
     def _pick_dataarray_for_visualization(obj):
@@ -3773,12 +3777,21 @@ def datacube_editor():
                 with xr.open_dataset(path) as ds:
                     ds_loaded = ds.load()
 
-                if "Spectral_Temporal_Stack" not in ds_loaded.data_vars:
-                    raise ValueError("NetCDF does not contain 'Spectral_Temporal_Stack'.")
+                # Accept either cube name
+                if "Spectral_Temporal_Stack" in ds_loaded.data_vars:
+                    var_name = "Spectral_Temporal_Stack"
+                elif "Cloud_Stack" in ds_loaded.data_vars:
+                    var_name = "Cloud_Stack"
+                else:
+                    raise ValueError(
+                        "NetCDF does not contain 'Spectral_Temporal_Stack' or 'Cloud_Stack'. "
+                        f"Found data_vars: {list(ds_loaded.data_vars)}"
+                    )
 
-                loaded = ds_loaded["Spectral_Temporal_Stack"]
+                loaded = ds_loaded[var_name]
 
                 state["loaded_path"] = path
+                state["loaded_var"] = var_name
                 state["loaded_original"] = loaded
                 state["current"] = _safe_copy_xarray(loaded)
 
@@ -3794,7 +3807,7 @@ def datacube_editor():
                     export_target_w.value = _auto_netcdf_export_suggestion()
 
                 print(f"✅ Loaded cube: {path}")
-                print("✅ Working object initialized from: Spectral_Temporal_Stack (DataArray)")
+                #print("✅ Working object initialized from: Spectral_Temporal_Stack (DataArray)")
                 _print_working_note()
 
             try:

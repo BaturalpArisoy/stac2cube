@@ -18,13 +18,19 @@ warnings.filterwarnings("ignore", category=NotGeoreferencedWarning)
 def get_cloud_layers(
     polygon=None,
     daterange=None,
-    output=None,
+    output_clouds=None,    
+    output_masked=None,     
+    output=None,           
     threshold=None,
     clip_raster=None,
     masking=None,
     update=None,
     slurm_timer=None,
 ):
+
+    
+    if output_clouds is None and output is not None:
+        output_clouds = output
 
     if masking:
         stac_parameters = get_stac_parameters(masking)
@@ -33,7 +39,7 @@ def get_cloud_layers(
     if update:
         stac_parameters = get_stac_parameters(update)
         polygon = stac_parameters["polygon"]
-        output = update
+        output_clouds = update
     else:
         if not daterange:
             raise ValueError("Error: Please select a daterange.")
@@ -117,7 +123,8 @@ def get_cloud_layers(
         cp = cp_3d[0]
         cloud_prob_results.append(cp)
 
-        print(f"Processed time slice: {i}/{total} (time: {t})", flush=True)
+        t_str = np.datetime_as_string(t, unit="D")  # -> "YYYY-MM-DD"
+        print(f"Processed time slice: {i}/{total} (time: {t_str})", flush=True)
         del img, img_transposed, img_np
 
         if slurm_timer:
@@ -192,22 +199,35 @@ def get_cloud_layers(
         # cloud_only_stack.attrs['spectral_bands'] = bands
         # cloud_only_stack.attrs['indices'] = []
 
-    # --- Export and Optional Masking ---
-    # Export the resulting stack.
-    img = export_stac(cloud_only_stack, output, crs, transform)
+        # --- Export (optional) and Optional Masking ---
 
-    if masking:
-        dirname, filename = os.path.split(masking)
-        name, ext = os.path.splitext(filename)
-        output_filename = f"{name}_masked{str(threshold)}{ext}"
-        output_mask = os.path.join(dirname, output_filename)
-        mask_layer = f"cloud_mask_{str(threshold)}"
-        img = mask_stac_clouds(masking, cloud_only_stack, mask_layer, output_mask)
+        # --- Export clouds (optional) ---
+        if output_clouds is not None:
+            export_stac(cloud_only_stack, output_clouds, crs, transform)
 
-    return img
+        # --- Masking (mandatory export) ---
+        if masking:
+            if threshold is None:
+                raise ValueError("Error: 'threshold' must be set when 'masking' is used.")
+            if isinstance(threshold, list):
+                raise ValueError("Error: 'masking' supports only a single threshold (not a list).")
+
+            thr = int(threshold)
+            mask_layer = f"cloud_mask_{thr}"
+
+            # Auto-generate masked output path if not provided
+            if output_masked is None:
+                dirname, filename = os.path.split(masking)
+                name, ext = os.path.splitext(filename)
+                output_masked = os.path.join(dirname, f"{name}_masked_{thr}{ext}")
+
+            return mask_stac_clouds(masking, cloud_only_stack, mask_layer, output_masked)
+
+        # If not masking: keep existing behavior (either exported clouds or return in-memory)
+        return cloud_only_stack
 
 
-def mask_stac_clouds(stac, cloud, mask_layer, output):
+def mask_stac_clouds(stac, cloud, mask_layer, output=None):
     if isinstance(stac, (str, os.PathLike)):
         stac = xr.open_dataset(stac)
         stac = stac.Spectral_Temporal_Stack
@@ -235,7 +255,12 @@ def mask_stac_clouds(stac, cloud, mask_layer, output):
         cloud_percentage=("time", cloud_percentage_int.data)
     )
 
-    export_stac(masked_stac, output)
+    #export_stac(masked_stac, output)
+    if output is not None:
+        export_stac(masked_stac, output)
+        return output  # return path (old code returned None anyway)
+    else:
+        return masked_stac  # return in-memory masked cube
 
 
 def mask_from_probability(
