@@ -17,6 +17,7 @@
 - [Examples](#examples)
 - [How to run on HPC](#how-to-run-on-hpc)
 - [Access and Licensing Details for STAC Catalogs](#access-and-licensing-details-for-stac-catalogs)
+- [Method References](#method-references)
 - [Citation](#citation)
 
 
@@ -82,31 +83,30 @@ If git is not available for you, download and unzip the file: https://github.com
 ---
 
 ## Examples
-Well documented, interactive notebooks on how to use stac2cube features, how to process data cubes and how to store them can be found in the [interactive folder](https://github.com/BaturalpArisoy/stac2cube/tree/main/interactive).
+### Interactive User Interface on Jupyter Notebook:
+For a quick and beginner-friendly workflow, use the 3 interactive GUI tools available in the [User Interface Tools](https://github.com/BaturalpArisoy/stac2cube/tree/main/interactive/User_Interface_Tools.ipynb). 
+
+<img src="assets/data_cube_editor_GUI.png" alt="gui_editor" width="300">
+
+### Step-by-step Interactive Notebooks
+For a more detailed walkthrough of stac2cube features, including background, processing steps, and storage, see the well-documented notebooks in the [interactive folder](https://github.com/BaturalpArisoy/stac2cube/tree/main/interactive).
 
 Each step is documented by the numbers and the general explanation is given below:
 
 1. **Initial Data Cube**
     - Collects images from STAC catalogs for the selected mission based on users parameters.
     - Generates multi-dimensional data cubes, suitable for time-series.
-    - The data cubes can be updated anytime without generating them from the scratch.
+    - The data cubes can be **updated** anytime without generating them from the scratch.
     - Available missions: **Sentinel-2 L2A, Sentinel-2 L1C, Sentinel-1 RTC, Landsat C2 L2, COP DEM Glo-30 (single time)**
 2. **Cloud Mask Data Cube**
-    - Collects images from Sentinel-2 L1C to automatically apply **s2cloudless** cloud probability algorithm on previously generated initial data cube.
-    - The result contains cloud probability maps and user defined binary cloud mask layers.
+    - The result contains cloud probability maps and user defined binary cloud mask layers of time-series.
     - When selected, clouds from the initial data cube are automatically masked out.
     - Can be updated anytime.
 3. **Co-register Data Cube**
-    - Applies coregistration algorithm on Sentinel-2 data cubes.
-    - **AROSICS** package provides the coregistration algorithm<br>
-    Daniel Scheffler. (2017, July 3). AROSICS: An Automated and Robust Open-Source Image Co-Registration Software for Multi-Sensor Satellite Data (Version 0.12.1). Zenodo. https://doi.org/10.5281/zenodo.3742909
     - Fix the global X/Y shift between consecutive Sentinel-2 items.
     - IMPORTANT: Please read notes in the notebook for better quality results.
 4. **Super-resolve Data Cube**
-    - Applies super-resolution algorithm on Sentinel-2 data cubes. 
-    - **SEN2SR** package provides DNN based super-resolution algorithm<br>
-    Aybar, C., Contreras, J., Donike, S., Portalés-Julià, E., Mateo-García, G., & Gómez-Chova, L. (2026). A radiometrically and spatially consistent super-resolution framework for Sentinel-2. Remote Sensing of Environment, 334, 115222. https://doi.org/10.1016/j.rse.2025.115222
-    - Super resolves both 10-meters and 20-meters bands to 2.5-meters. ["blue", "green", "red", "nir", "nir08", "rededge1", "rededge2", "rededge3", "swir16", "swir22"]
+    - Super resolves both 10-meters and 20-meters bands to 2.5-meters. ["blue", "green", "red", "nir", "nir08", "rededge1", "rededge2", "rededge3", "swir16", "swir22"] for the entire Sentinel-2 data cube time-series.
 5. **Batch Processing** (under development!)
     - (when completed) If the user knows what parameters to use for each function above, can set batch processing instead of using each step separately :) 
 
@@ -155,16 +155,28 @@ Why do _terraybte_ users collect data from _terrabyte_ STAC catalog instead of  
 
 \* Queries are iterated 10 times per each service and the average time per run is calculated (timeit module).
 
+## Method References
+
+1. **Cloud Mask Data Cube** applies **[s2cloudless](https://github.com/sentinel-hub/sentinel2-cloud-detector)** by Sentinel Hub - CC-BY-SA-4.0 license.
+2. **Co-register Data Cube** applies **[AROSICS](https://github.com/GFZ/arosics)** by Daniel Scheffler - Apache-2.0 license.
+    
+    Daniel Scheffler. (2017, July 3). AROSICS: An Automated and Robust Open-Source Image Co-Registration Software for Multi-Sensor Satellite Data (Version 0.12.1). Zenodo. https://doi.org/10.5281/zenodo.3742909
+    
+3. **Super-resolve Data Cube** applies **[SEN2SR](https://github.com/ESAOpenSR/SEN2SR)** by Aybar et al. - CC0-1.0 license.
+
+    Aybar, C., Contreras, J., Donike, S., Portalés-Julià, E., Mateo-García, G., & Gómez-Chova, L. (2026). A radiometrically and spatially consistent super-resolution framework for Sentinel-2. Remote Sensing of Environment, 334, 115222. https://doi.org/10.1016/j.rse.2025.115222
+    
+
 ## Citation
 
 ### Method paper
 
-Arisoy, B., Betz, F., Stauch, G., Klein, D., Dech, S., and Ullmann, T.: Scalable Earth Observation Data Cubes for Advanced Analytics of Dynamic Earth Surface Processes: An Open-Source Package for Customized Processing of Sentinel-2 Data on HPCs and Beyond, EGUsphere [preprint], https://doi.org/10.5194/egusphere-2026-619, 2026.
+    Arisoy, B., Betz, F., Stauch, G., Klein, D., Dech, S., and Ullmann, T.: Scalable Earth Observation Data Cubes for Advanced Analytics of Dynamic Earth Surface Processes: An Open-Source Package for Customized Processing of Sentinel-2 Data on HPCs and Beyond, EGUsphere [preprint], https://doi.org/10.5194/egusphere-2026-619, 2026.
 
 ### Software
 **Please include the exact version**
 
-Arisoy, B., Betz, F., Stauch, G., Klein, D., Dech, S., & Ullmann, T. (2025). stac2cube (Version 1.3.0). Zenodo. https://doi.org/10.5281/zenodo.18459201
+    Arisoy, B., Betz, F., Stauch, G., Klein, D., Dech, S., & Ullmann, T. (2025). stac2cube (Version 1.3.0). Zenodo. https://doi.org/10.5281/zenodo.18459201
 
 
 ## Contact 
