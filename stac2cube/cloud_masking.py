@@ -39,7 +39,7 @@ def get_cloud_layers(
     if update:
         stac_parameters = get_stac_parameters(update)
         polygon = stac_parameters["polygon"]
-        output_clouds = update
+        #output_clouds = update
     else:
         if not daterange:
             raise ValueError("Error: Please select a daterange.")
@@ -80,8 +80,8 @@ def get_cloud_layers(
     bbox = stac.bbox
 
     if update:
-        stac_existing = xr.open_dataset(update)
-        stac_existing = stac_existing.Cloud_Stack
+        with xr.open_dataset(update) as ds:
+            stac_existing = ds["Cloud_Stack"].load()
         stac, missing_times = find_missing_times(stac_existing, stac)
         if not missing_times:
             raise ValueError("The probability map is up to date. Nothing to update!")
@@ -151,80 +151,67 @@ def get_cloud_layers(
     cp_da.name = "Cloud_Stack"
 
     def update_prob_maps(stac_existing, cloud_only_stack):
-        stac_existing = stac_existing.sel(band="cloud_prob")
-        stac_existing = stac_existing.expand_dims(dim={"band": 1})
-        cloud_only_stack = xr.concat([stac_existing, cloud_only_stack], dim="time")
-        cloud_only_stack = cloud_only_stack.sortby("time")
-        return cloud_only_stack
+        # keep band dimension with correct label
+        stac_existing = stac_existing.sel(band=["cloud_prob"])
+        cloud_only_stack = cloud_only_stack.sel(band=["cloud_prob"])
+
+        out = xr.concat([stac_existing, cloud_only_stack], dim="time")
+        out = out.sortby("time")
+        return out
 
     # --- Determine Output Based on 'threshold' Parameter ---
     # If no threshold(s) are provided, return only the probability layer.
-    if threshold is None:
-        # Scale cloud probability (assumed to be [0,1]) to 0-100 and convert to uint8.
-        cloud_prob_uint8 = (cp_da.sel(band="cloud_prob") * 100).astype(np.uint8)
-        cloud_only_stack = cloud_prob_uint8.expand_dims(dim="band")
-        cloud_only_stack = cloud_only_stack.assign_coords(band=["cloud_prob"])
 
-        if update:
-            cloud_only_stack = update_prob_maps(stac_existing, cloud_only_stack)
+    # Always build probability layer first (uint8 0-100)
+    cloud_prob_uint8 = (cp_da.sel(band="cloud_prob") * 100).astype(np.uint8)
 
-        cloud_only_stack = cloud_only_stack.transpose("time", "band", "y", "x")
+    # Create a proper 4D stack: (time, band, y, x) with band label "cloud_prob"
+    cloud_only_stack = cloud_prob_uint8.expand_dims(band=["cloud_prob"]).transpose("time", "band", "y", "x")
+    cloud_only_stack.name = "Cloud_Stack"
 
-    else:
-        # Also convert cloud probability to uint8.
-        cloud_prob_uint8 = (cp_da.sel(band="cloud_prob") * 100).astype(np.uint8)
-        cloud_prob_uint8 = cloud_prob_uint8.expand_dims(dim="band")
-        cloud_only_stack = cloud_prob_uint8.assign_coords(band=["cloud_prob"])
+    # If update: merge new probability dates into existing stack
+    if update:
+        cloud_only_stack = update_prob_maps(stac_existing, cloud_only_stack)
 
-        if update:
-            cloud_only_stack = update_prob_maps(stac_existing, cloud_only_stack)
-
-        # If threshold(s) are provided, compute the cloud masks using mask_from_probability.
-        # This function supports either a single threshold or a list of thresholds.
+    # If threshold(s) are provided (NON-update only): compute masks and concat
+    if threshold is not None:
         mask_da = mask_from_probability(
             cloud_only_stack.sel(band="cloud_prob"),
             threshold=threshold,
             average_over=average_over,
             dilation_size=dilation_size,
         )
+        cloud_only_stack = xr.concat([cloud_only_stack, mask_da], dim="band").transpose("time", "band", "y", "x")
 
-        # Concatenate the probability layer with the generated mask(s) along the band dimension.
-        cloud_only_stack = xr.concat([cloud_only_stack, mask_da], dim="band")
-        cloud_only_stack = cloud_only_stack.transpose("time", "band", "y", "x")
+    # ---- attrs: set ALWAYS (update or not) ----
+    cloud_only_stack.attrs["bbox"] = bbox
+    cloud_only_stack.attrs["crs"] = crs
+    cloud_only_stack.attrs["transform"] = transform
 
-    # Add data array attributes
-    if not update:
-        cloud_only_stack.attrs["bbox"] = bbox
-        # cloud_only_stack.attrs['mission'] = mission
-        # cloud_only_stack.attrs['spectral_bands'] = bands
-        # cloud_only_stack.attrs['indices'] = []
+    # ---- export: do NOT hide behind `if not update` ----
+    if output_clouds is not None:
+        export_stac(cloud_only_stack, output_clouds, crs, transform)
+    
 
-        # --- Export (optional) and Optional Masking ---
+    # ---- Masking (kept as before; typically not combined with update) ----
+    if masking:
+        if threshold is None:
+            raise ValueError("Error: 'threshold' must be set when 'masking' is used.")
+        if isinstance(threshold, list):
+            raise ValueError("Error: 'masking' supports only a single threshold (not a list).")
 
-        # --- Export clouds (optional) ---
-        if output_clouds is not None:
-            export_stac(cloud_only_stack, output_clouds, crs, transform)
+        thr = int(threshold)
+        mask_layer = f"cloud_mask_{thr}"
 
-        # --- Masking (mandatory export) ---
-        if masking:
-            if threshold is None:
-                raise ValueError("Error: 'threshold' must be set when 'masking' is used.")
-            if isinstance(threshold, list):
-                raise ValueError("Error: 'masking' supports only a single threshold (not a list).")
+        if output_masked is None:
+            dirname, filename = os.path.split(masking)
+            name, ext = os.path.splitext(filename)
+            output_masked = os.path.join(dirname, f"{name}_masked_{thr}{ext}")
 
-            thr = int(threshold)
-            mask_layer = f"cloud_mask_{thr}"
+        return mask_stac_clouds(masking, cloud_only_stack, mask_layer, output_masked)
 
-            # Auto-generate masked output path if not provided
-            if output_masked is None:
-                dirname, filename = os.path.split(masking)
-                name, ext = os.path.splitext(filename)
-                output_masked = os.path.join(dirname, f"{name}_masked_{thr}{ext}")
-
-            return mask_stac_clouds(masking, cloud_only_stack, mask_layer, output_masked)
-
-        # If not masking: keep existing behavior (either exported clouds or return in-memory)
-        return cloud_only_stack
+    # Always return in-memory stack
+    return cloud_only_stack
 
 
 def mask_stac_clouds(stac, cloud, mask_layer, output=None):

@@ -6,6 +6,7 @@ from pathlib import Path
 
 import xarray as xr
 import pandas as pd
+import numpy as np
 import ipywidgets as widgets
 from IPython.display import display, clear_output, Javascript
 
@@ -24,6 +25,12 @@ from stac2cube import (
     clip_stac,
     cloud_filter,
     get_stac_layers,
+    get_cloud_layers,
+    coregister_cube,
+    get_stac_parameters,
+    mask_from_probability,
+    mask_stac_clouds,
+    super_resolve_cube
 )
 
 
@@ -3628,9 +3635,9 @@ def datacube_editor():
     
     def _apply_update_feature(obj):
         """
-        Update the loaded cube by requesting a new daterange via get_stac_layers(update=...).
-        This feature uses the loaded NetCDF path and replaces the current working result with
-        a refreshed Spectral_Temporal_Stack.
+        Update the loaded cube by requesting a new daterange via:
+        - get_stac_layers(update=...) for Spectral_Temporal_Stack cubes
+        - get_cloud_layers(update=..., threshold=None) for Cloud_Stack cubes (probability only)
         """
         if not enable_update_w.value:
             return obj, False, []
@@ -3643,7 +3650,58 @@ def datacube_editor():
         if not daterange:
             raise ValueError("Please provide a daterange for Update Data Cube.")
 
-        # Auto-detect whether original loaded cube had cloud masking (cloud_percentage coord)
+        # Which kind of cube was loaded?
+        loaded_var = state.get("loaded_var")
+        if not loaded_var:
+            try:
+                loaded_var = state.get("loaded_original").name
+            except Exception:
+                loaded_var = None
+
+        # ------------------------------------------------------------------
+        # Cloud cube update (Cloud_Stack) -> cloud probability only
+        # ------------------------------------------------------------------
+        if loaded_var == "Cloud_Stack":
+            # threshold is intentionally None: return probability only
+            import inspect
+
+            sig = inspect.signature(get_cloud_layers)
+            kwargs = {
+                "update": loaded_path,
+                "daterange": daterange,
+                "threshold": None,
+            }
+            if "output" in sig.parameters:
+                kwargs["output"] = None  # in-memory
+            if "q" in sig.parameters:
+                kwargs["q"] = True       # silent for GUI
+
+            updated = get_cloud_layers(**kwargs)
+
+            # Normalize to DataArray
+            if isinstance(updated, xr.Dataset):
+                if "Cloud_Stack" in updated.data_vars:
+                    updated = updated["Cloud_Stack"]
+                elif len(updated.data_vars) > 0:
+                    updated = updated[list(updated.data_vars)[0]]
+                else:
+                    raise ValueError("Cloud update returned a Dataset with no data variables.")
+
+            if not isinstance(updated, xr.DataArray):
+                raise TypeError(f"Cloud update returned unsupported object type: {type(updated)}")
+
+            msgs = [
+                "update_data_cube applied (get_cloud_layers(update=...))",
+                f"daterange={daterange}",
+                "threshold=None (cloud probability only)",
+                "Current working result was replaced with the updated Cloud_Stack.",
+                "Tip: disable Update now if you want to continue with slicing/clipping/stats on the updated cube.",
+            ]
+            return updated, True, msgs
+
+        # ------------------------------------------------------------------
+        # Spectral cube update (existing behavior)
+        # ------------------------------------------------------------------
         loaded_ref = state.get("loaded_original")
         cloud_masking_flag = False
         try:
@@ -3661,8 +3719,8 @@ def datacube_editor():
             cloud_masking=cloud_masking_flag,
             stats=None,
             aggregator=None,
-            output=None,   # <-- return in memory, no overwrite
-            q=True,        # silent for GUI
+            output=None,  # return in memory
+            q=True,       # silent for GUI
         )
 
         if isinstance(updated, xr.Dataset):
@@ -4553,5 +4611,1757 @@ def datacube_editor():
             "result": result_out,
             "status": status_out,
             "visualization": viz_out,
+        },
+    }
+
+
+def ard_cube_tools():
+    
+    xr.set_options(
+        display_expand_data=False,
+        display_expand_coords=True,
+        display_expand_attrs=False,
+        display_expand_data_vars=True,
+    )
+
+    # -----------------------------------------
+    # CSS (card design)
+    # -----------------------------------------
+    css_patch = widgets.HTML(
+        """
+        <style>
+        .stac2cube-card {
+            border: 1px solid #e5e7eb;
+            border-radius: 12px;
+            padding: 12px;
+            background: #fafbfc;
+            box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+        }
+        button.stac2cube-help-btn,
+        button.stac2cube-help-btn:hover,
+        button.stac2cube-help-btn:active,
+        button.stac2cube-help-btn:focus {
+        border-radius: 9999px !important;
+        width: 18px !important;
+        min-width: 18px !important;
+        height: 18px !important;
+        min-height: 18px !important;
+        padding: 0 !important;
+        background: #2D7FF9 !important;
+        color: #ffffff !important;
+        border: 0 !important;
+        outline: none !important;
+        box-shadow: none !important;
+
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        line-height: 18px !important;
+        font-weight: 700 !important;
+        }
+        </style>
+        """
+    )
+
+    # -----------------------------------------
+    # State
+    # -----------------------------------------
+    state = {
+        "loaded_path": None,
+        "loaded_obj": None,          
+        "current_result_path": None, 
+    }
+
+    # -----------------------------------------
+    # Outputs
+    # -----------------------------------------
+    loaded_summary_out = widgets.Output(layout=widgets.Layout(width="99%", max_height="420px", overflow="auto"))
+    result_out = widgets.Output(layout=widgets.Layout(width="99%", max_height="420px", overflow="auto"))
+    status_out = widgets.Output(layout=widgets.Layout(width="99%", max_height="260px", overflow="auto"))
+
+    def _status(*lines, append=False):
+        with status_out:
+            if not append:
+                clear_output()
+            for ln in lines:
+                print(ln)
+
+    def _show_loaded_summary(obj):
+        with loaded_summary_out:
+            clear_output()
+            display(obj)
+
+    def _show_result_from_path(nc_path: str):
+        with result_out:
+            clear_output()
+            if not nc_path:
+                print("No exported result yet.")
+                return
+
+            p = Path(nc_path)
+            if not p.exists():
+                print(f"Exported file not found: {p.as_posix()}")
+                return
+
+            print(f"Exported file: {p.as_posix()}")
+            with xr.open_dataset(p) as ds:
+                if "Spectral_Temporal_Stack" in ds.data_vars:
+                    display(ds["Spectral_Temporal_Stack"])
+                elif "Cloud_Stack" in ds.data_vars:
+                    display(ds["Cloud_Stack"])
+                else:
+                    display(ds)
+
+        try:
+            result_acc.selected_index = 0
+        except Exception:
+            pass
+
+    # -----------------------------------------
+    # File chooser helper (optional)
+    # -----------------------------------------
+    def _guess_dir_from_text(text_value: str) -> str:
+        s = (text_value or "").strip()
+        if not s:
+            return os.getcwd()
+        p = Path(s).expanduser()
+        if p.is_dir():
+            return str(p)
+        if p.parent.exists():
+            return str(p.parent)
+        return os.getcwd()
+
+    def _attach_filechooser(
+        browse_btn: widgets.Button,
+        text_widget: widgets.Text,
+        title: str,
+        pattern=None,
+        select_dirs: bool = False,
+    ):
+        """
+        Folder icon toggles a FileChooser under the textbox.
+        Selecting a file/folder immediately writes into the textbox and closes the chooser.
+        (No 'Use selected' / 'Close' buttons.)
+        """
+        fc_box = widgets.VBox([], layout=widgets.Layout(display="none", width="100%"))
+
+        if FileChooser is None:
+            browse_btn.disabled = True
+            browse_btn.tooltip = "Install ipyfilechooser (pip install ipyfilechooser) or type the path manually."
+            return fc_box
+
+        def _toggle(_):
+            if fc_box.layout.display == "none":
+                start_dir = _guess_dir_from_text(text_widget.value)
+                fc = FileChooser(start_dir)
+                fc.title = f"<b>{title}</b>"
+                fc.use_dir_icons = True
+                fc.show_only_dirs = bool(select_dirs)
+                if pattern is not None:
+                    fc.filter_pattern = pattern
+
+                def _on_select(_chooser):
+                    chosen = fc.selected_path if select_dirs else fc.selected
+                    if chosen:
+                        text_widget.value = str(Path(chosen)).replace("\\", "/")
+                        fc_box.layout.display = "none"
+
+                # Auto-apply selection
+                try:
+                    fc.register_callback(_on_select)
+                except Exception:
+                    pass
+
+                fc_box.children = [fc]
+                fc_box.layout.display = ""
+            else:
+                fc_box.layout.display = "none"
+
+        browse_btn.on_click(_toggle)
+        return fc_box
+
+    # -----------------------------------------
+    # Naming suggestions
+    # -----------------------------------------
+    def _stem_from_loaded():
+        if state["loaded_path"]:
+            return Path(state["loaded_path"]).stem
+        return "cube"
+
+    def _dir_from_loaded():
+        if state["loaded_path"]:
+            return Path(state["loaded_path"]).parent
+        return Path("./results")
+
+    def _suggest_masked_path(threshold: int):
+        base = _stem_from_loaded()
+        outdir = _dir_from_loaded()
+        return (outdir / f"{base}_masked_{int(threshold)}.nc").as_posix()
+
+    def _suggest_cr_path():
+        base = _stem_from_loaded()
+        outdir = _dir_from_loaded()
+        return (outdir / f"{base}_cr.nc").as_posix()
+
+    def _suggest_sr_path():
+        base = _stem_from_loaded()
+        outdir = _dir_from_loaded()
+        return (outdir / f"{base}_sr.nc").as_posix()
+    
+    def _suggest_clouds_path_from_loaded():
+        p = Path(state["loaded_path"])
+        return (p.parent / f"{p.stem}_cloud.nc").as_posix()
+
+    # -----------------------------------------
+    # Header
+    # -----------------------------------------
+    header = widgets.HTML("<div style='margin:0 0 4px 0; font-size:28px; font-weight:700;'>Analysis Ready Data Cube Tools</div>")
+    subtitle = widgets.HTML(
+        "<div style='font-size:13px; color:#6b7280; margin:0 0 4px 0;'>"
+        "• Cloud masking • Co-registration • Super-resolution"
+        "</div>"
+    )
+
+    # -----------------------------------------
+    # Loading card (same pattern as editor)
+    # -----------------------------------------
+    load_path_w = widgets.Text(value="./results/test.nc", layout=widgets.Layout(width="100%"))
+    browse_load_btn = widgets.Button(icon="folder-open", description="", layout=widgets.Layout(width="36px"))
+    load_cube_btn = widgets.Button(description="Load cube", button_style="primary", icon="upload", layout=widgets.Layout(width="140px"))
+    #reset_btn = widgets.Button(description="Reset to loaded cube", icon="undo", layout=widgets.Layout(width="180px"), disabled=True)
+
+    load_fc_box = _attach_filechooser(browse_load_btn, load_path_w, title="Select NetCDF file", pattern=["*.nc", "*"], select_dirs=False)
+
+
+
+
+    COREG_HELP = {
+        "grid_size": """
+    <b>grid_size</b><br>
+    The strength of the area scan. The higher, the longer it takes, but it scans more potential matching areas.<br>
+    If the current setup still removes scenes with low cloud percentages, try increasing it.<br>
+    Increasing grid size does not guarantee that more scenes will be kept, but it can help in some cases.
+    """,
+        "max_cc": """
+    <b>max_cc</b><br>
+    Maximum cloud percentage of scenes (from cloud-masked data cube; either SCL or s2cloudless). Scenes beyond this threshold are excluded.<br>
+    The algorithm already detects some cloudy scenes that cannot be co-registered and automatically deletes them from the time series.<br>
+    However, filtering cloudy scenes can sometimes improve the performance of the co-registration, especially in highly cloud covered regions.
+    """,
+        "time_period": """
+    <b>time_period</b><br>
+    Selection of the time range: <code>["YYYY-MM-DD", "YYYY-MM-DD"]</code>.<br>
+    The co-registration is performed on the selected time range.<br> 
+    It can be useful to exclude problematic surfaces for co-registration algorithm (e.g. snow & ice).
+    """,
+        "min_reliability_keep": """
+    <b>min_reliability_keep</b><br>
+    Threshold for the co-registration reliability score (%). Scenes with a score lower than this value are dropped.<br>
+    Very low scores often indicate highly cloudy scenes.
+    """,
+        "min_reliability_update_ref": """
+    <b>min_reliability_update_ref</b><br>
+    Threshold for the co-registration reliability score (%). Scenes with a score lower than this value are kept,<br>
+    but the algorithm will not select them as reference for the co-registration of the next scene.
+    """,
+        "max_cloud_update_ref": """
+    <b>max_cloud_update_ref</b><br>
+    Maximum cloud percentage for selecting a scene as reference. Scenes above this threshold will not be selected as reference<br>
+    for the co-registration of the following scene.
+    """,
+        "first_scene_mode": """
+    <b>first_scene_mode</b><br>
+    Mode for selecting the first reference in the time series (crucial for the rest).<br>
+    <code>first</code> selects the first scene; <code>composite</code> creates a composite of the first <code>composite_window_days</code> days and selects the median.<br>
+    Use <code>first</code> if the first scene is cloud-free; otherwise <code>composite</code> is more robust.
+    """,
+        "composite_window_days": """
+    <b>composite_window_days</b><br>
+    Days used for composite if <code>first_scene_mode="composite"</code>.<br>
+    Example: first scene 2020-01-15 and <code>composite_window_days=30</code> → median of scenes from 2020-01-15 to 2020-02-15.
+    """,
+        "iteration": """
+    <b>iteration</b><br>
+    Number of iterations to run co-registration. Default 1; 4–5 is usually enough for good results.<br>
+    If <code>first_scene_mode="composite"</code>, it switches to <code>first</code> after the first iteration.
+    """,
+    }
+
+    def _make_help_btn(help_html: str):
+        btn = widgets.Button(description="?", layout=widgets.Layout(width="18px", height="18px", padding="0px"))
+        btn.add_class("stac2cube-help-btn")
+
+        # Optional: keep (doesn't affect circle, but reinforces colors)
+        btn.style.button_color = "#2D7FF9"
+        btn.style.text_color = "white"
+        btn.style.font_weight = "700"
+
+        help_box = widgets.HTML(
+            f"<div style='font-size:12px; color:#444; margin-top:4px; display:none;'>{help_html}</div>"
+        )
+
+        def _toggle(_):
+            cur = help_box.value
+            if "display:none" in cur:
+                help_box.value = cur.replace("display:none", "display:block")
+            else:
+                help_box.value = cur.replace("display:block", "display:none")
+
+        btn.on_click(_toggle)
+        return btn, help_box
+
+    def _stacked_field_with_help(widget, label_text: str, help_key: str):
+        try:
+            widget.description = ""
+        except Exception:
+            pass
+        try:
+            widget.style.description_width = "0px"
+        except Exception:
+            pass
+
+        help_btn, help_box = _make_help_btn(COREG_HELP[help_key])
+        label_row = widgets.HBox(
+            [
+                widgets.HTML(f"<div style='font-weight:500; line-height:1.2; margin:0; padding:0;'>{label_text}:</div>"),
+                help_btn,
+            ],
+            layout=widgets.Layout(width="100%", gap="6px", align_items="center"),
+        )
+        return widgets.VBox([label_row, widget, help_box], layout=widgets.Layout(width="100%", gap="4px"))
+
+
+
+
+
+
+    def _stacked_field(widget, label_text):
+        label = widgets.HTML(f"<div style='font-weight:500; line-height:1.2; margin:0; padding:0;'>{label_text}:</div>")
+        return widgets.VBox([label, widget], layout=widgets.Layout(width="100%", gap="4px"))
+
+    load_input_row = widgets.HBox([browse_load_btn, load_path_w], layout=widgets.Layout(width="100%", gap="6px", align_items="center"))
+    load_input_box = widgets.VBox([load_input_row, load_fc_box], layout=widgets.Layout(width="100%", gap="4px"))
+
+    loading_box = widgets.VBox(
+        [
+            widgets.HTML("<b>Loading</b>"),
+            widgets.HTML("<div style='font-size:12px; color:#666;'>NetCDF only (COGs are not supported as input).</div>"),
+            _stacked_field(load_input_box, "Data cube path"),
+            widgets.HBox([load_cube_btn], layout=widgets.Layout(gap="8px", flex_flow="row wrap")),
+        ],
+        layout=widgets.Layout(width="100%", gap="6px"),
+    )
+    loading_card = widgets.VBox([loading_box], layout=widgets.Layout(width="99%"))
+    loading_card.add_class("stac2cube-card")
+
+    # Loaded cube accordion (same as editor)
+    loaded_summary_box = widgets.VBox([loaded_summary_out], layout=widgets.Layout(width="100%"))
+    loaded_summary_acc = widgets.Accordion(children=[loaded_summary_box], selected_index=None)
+    loaded_summary_acc.set_title(0, "Loaded data cube")
+    loaded_summary_acc.layout = widgets.Layout(width="99%")
+    loaded_summary_card = widgets.VBox([loaded_summary_acc], layout=widgets.Layout(width="100%"))
+    loaded_summary_card.add_class("stac2cube-card")
+
+    # -----------------------------------------
+    # Tools card (3 tool accordions + separate buttons)
+    # -----------------------------------------
+
+    # --- Tool 1: Cloud Masking Data Cube (a) Fully Automated Workflow) ---
+    # NOTE: threshold + outputs live inside sub-accordion (a)
+
+    # Widgets used in sub-accordion (a)
+    mask_threshold_w = widgets.BoundedIntText(value=70, min=0, max=100, step=1, layout=widgets.Layout(width="120px"))
+
+    export_clouds_w = widgets.Checkbox(
+        value=False,
+        description="",
+        indent=False,
+        layout=widgets.Layout(width="22px", min_width="22px"),
+    )
+    try:
+        export_clouds_w.style.description_width = "0px"
+    except Exception:
+        pass
+
+    export_clouds_label = widgets.HTML(
+        "<div style='font-size:13px; line-height:1.2; white-space:normal;'>"
+        "Also export cloud probability layers (recommended)"
+        "</div>"
+    )
+
+    export_clouds_row = widgets.HBox(
+        [export_clouds_w, export_clouds_label],
+        layout=widgets.Layout(width="100%", gap="6px", align_items="center"),
+    )
+
+    clouds_out_w = widgets.Text(value="", layout=widgets.Layout(width="100%"), disabled=True)
+    browse_clouds_out_btn = widgets.Button(icon="folder-open", description="", layout=widgets.Layout(width="36px"))
+    browse_clouds_out_btn.disabled = True
+    clouds_out_fc_box = _attach_filechooser(
+        browse_clouds_out_btn,
+        clouds_out_w,
+        title="Select output NetCDF for cloud probability layers",
+        pattern=["*.nc", "*"],
+        select_dirs=False,
+    )
+    clouds_out_row = widgets.HBox(
+        [browse_clouds_out_btn, clouds_out_w],
+        layout=widgets.Layout(width="100%", gap="6px", align_items="center"),
+    )
+    clouds_out_box = widgets.VBox([clouds_out_row, clouds_out_fc_box], layout=widgets.Layout(width="100%", gap="4px"))
+
+    masked_out_w = widgets.Text(value="", layout=widgets.Layout(width="100%"))
+    browse_masked_out_btn = widgets.Button(icon="folder-open", description="", layout=widgets.Layout(width="36px"))
+    masked_out_fc_box = _attach_filechooser(
+        browse_masked_out_btn,
+        masked_out_w,
+        title="Select output NetCDF for masked cube",
+        pattern=["*.nc", "*"],
+        select_dirs=False,
+    )
+    masked_out_row = widgets.HBox(
+        [browse_masked_out_btn, masked_out_w],
+        layout=widgets.Layout(width="100%", gap="6px", align_items="center"),
+    )
+    masked_out_box = widgets.VBox([masked_out_row, masked_out_fc_box], layout=widgets.Layout(width="100%", gap="4px"))
+
+    mask_and_export_btn = widgets.Button(
+        description="Mask and Export",
+        button_style="success",
+        icon="play",
+        layout=widgets.Layout(width="170px"),
+    )
+
+    def _suggest_clouds_path():
+        base = _stem_from_loaded()
+        outdir = _dir_from_loaded()
+        return (outdir / f"{base}_cloud.nc").as_posix()
+
+    def _refresh_mask_outputs(force=False):
+        # Always suggest masked output based on threshold (unless user already typed a custom one and force=False)
+        suggested_masked = _suggest_masked_path(int(mask_threshold_w.value))
+        if force or (not masked_out_w.value.strip()):
+            masked_out_w.value = suggested_masked
+
+        # Suggest clouds output only when enabled
+        if export_clouds_w.value:
+            suggested_clouds = _suggest_clouds_path()
+            if force or (not clouds_out_w.value.strip()):
+                clouds_out_w.value = suggested_clouds
+
+    def _on_export_clouds_toggle(change):
+        if change.get("name") != "value":
+            return
+        enabled = bool(export_clouds_w.value)
+        clouds_out_w.disabled = not enabled
+        browse_clouds_out_btn.disabled = not enabled
+        if enabled:
+            _refresh_mask_outputs(force=True)
+
+    export_clouds_w.observe(_on_export_clouds_toggle, names="value")
+
+    def _on_threshold_change(change):
+        if change.get("name") == "value" and state["loaded_path"]:
+            # Always keep masked output synced to threshold unless user overwrote it manually (simple approach: always update)
+            masked_out_w.value = _suggest_masked_path(int(mask_threshold_w.value))
+
+    mask_threshold_w.observe(_on_threshold_change, names="value")
+
+    def _ensure_nc_suffix(path_str: str) -> str:
+        p = Path(path_str)
+        if p.suffix.lower() != ".nc":
+            p = p.with_suffix(".nc")
+        p.parent.mkdir(parents=True, exist_ok=True)
+        return p.as_posix()
+
+    def _on_mask_and_export_clicked(_):
+        if state["loaded_obj"] is None or not state["loaded_path"]:
+            _status("❌ Load a cube first.")
+            return
+        if get_cloud_layers is None:
+            _status("❌ get_cloud_layers is not available. Check your stac2cube installation/imports.")
+            return
+
+        threshold = int(mask_threshold_w.value)
+
+        out_masked = (masked_out_w.value or "").strip()
+        if not out_masked:
+            out_masked = _suggest_masked_path(threshold)
+            masked_out_w.value = out_masked
+        out_masked = _ensure_nc_suffix(out_masked)
+
+        out_clouds = None
+        if export_clouds_w.value:
+            tmp = (clouds_out_w.value or "").strip()
+            if not tmp:
+                tmp = _suggest_clouds_path()
+                clouds_out_w.value = tmp
+            out_clouds = _ensure_nc_suffix(tmp)
+
+        _status(
+            "Masking and exporting...",
+            f"masking (input) = {state['loaded_path']}",
+            f"threshold = {threshold}",
+            f"output_masked = {out_masked}",
+            f"output_clouds = {out_clouds if out_clouds else 'None'}",
+        )
+
+        try:
+            # Run your tool (exports inside)
+            with status_out:
+                # keep the lines you've already printed, then run the tool so its prints show here
+                get_cloud_layers(
+                    masking=state["loaded_path"],
+                    output_clouds=out_clouds,
+                    output_masked=out_masked,
+                    threshold=threshold,
+                )
+
+            state["current_result_path"] = out_masked
+            _show_result_from_path(out_masked)
+
+            lines = [f"✅ Mask and export finished: {out_masked}"]
+            if out_clouds:
+                lines.append(f"✅ Cloud layers exported: {out_clouds}")
+            _status(*lines)
+
+        except Exception as e:
+            _status(f"❌ {type(e).__name__}: {e}")
+
+    mask_and_export_btn.on_click(_on_mask_and_export_clicked)
+
+    # Sub-accordions inside Tool 1
+    # --- Pretty layout for Tool 1a ---
+    threshold_row = widgets.HBox(
+        [
+            widgets.HTML("<div style='font-weight:500;'>Threshold (%):</div>"),
+            mask_threshold_w,
+        ],
+        layout=widgets.Layout(width="100%", gap="8px", align_items="center"),
+    )
+
+    exports_header = widgets.HTML("<div style='font-weight:700; margin-top:4px;'>Exporting Setup:</div>")
+
+    
+    mask_a_box = widgets.VBox(
+        [
+            widgets.HTML(
+                "<div style='font-size:12px; color:#666;'>"
+                "Masks out the loaded data cube with a single known threshold value.<br> Optionally, exports time series of 'cloud probability + selected threshold binary maps', <br> Cloud probability time series can be used at in step (ii) of the manual workflow to experiment with different thresholds without re-computing probabilities."
+                "</div>"
+            ),
+            threshold_row,
+            exports_header,
+            _stacked_field(masked_out_box, "Output masked cube (NetCDF)"),
+            export_clouds_row,
+            _stacked_field(clouds_out_box, "Output cloud layers (NetCDF)"),
+            mask_and_export_btn,
+        ],
+        layout=widgets.Layout(width="100%", gap="10px"),
+    )
+
+
+
+    mask_a_acc = widgets.Accordion(children=[mask_a_box], selected_index=None)
+    mask_a_acc.set_title(0, "a) Fully Automated Workflow")
+    mask_a_acc.layout = widgets.Layout(width="99%")
+
+    
+
+    # -----------------------------
+    # Tool 1b: Manually Build Cloud Masking Data Cube (UI skeleton)
+    # -----------------------------
+
+    # i) Build Cloud Mask Data Cube
+    b1_cloud_out_w = widgets.Text(value="", layout=widgets.Layout(width="100%"))
+    browse_b1_cloud_out_btn = widgets.Button(icon="folder-open", description="", layout=widgets.Layout(width="36px"))
+    b1_cloud_out_fc_box = _attach_filechooser(
+        browse_b1_cloud_out_btn,
+        b1_cloud_out_w,
+        title="Select output NetCDF for cloud probability cube",
+        pattern=["*.nc", "*"],
+        select_dirs=False,
+    )
+    b1_cloud_out_row = widgets.HBox(
+        [browse_b1_cloud_out_btn, b1_cloud_out_w],
+        layout=widgets.Layout(width="100%", gap="6px", align_items="center"),
+    )
+    b1_cloud_out_box = widgets.VBox([b1_cloud_out_row, b1_cloud_out_fc_box], layout=widgets.Layout(width="100%", gap="4px"))
+    b1_build_btn = widgets.Button(description="Build and Export", button_style="success", icon="play", layout=widgets.Layout(width="170px"))
+
+    b1_thresholds_w = widgets.Text(
+        value="",  # ✅ empty means None
+        placeholder="70  or  [50, 70, 90]  or (leave empty for probability only)",
+        layout=widgets.Layout(width="320px"),
+    )
+
+
+    def _ensure_nc_suffix(path_str: str) -> str:
+        p = Path(path_str)
+        if p.suffix.lower() != ".nc":
+            p = p.with_suffix(".nc")
+        p.parent.mkdir(parents=True, exist_ok=True)
+        return p.as_posix()
+
+    def _on_b1_build_clicked(_):
+        if state["loaded_path"] is None:
+            _status("❌ Load a cube first.")
+            return
+        if get_cloud_layers is None:
+            _status("❌ get_cloud_layers is not available.")
+            return
+        if get_stac_parameters is None:
+            _status("❌ get_stac_parameters is not available.")
+            return
+
+        out_cloud = (b1_cloud_out_w.value or "").strip()
+        if not out_cloud:
+            # default: same folder, *_cloud.nc
+            out_cloud = (Path(state["loaded_path"]).with_name(f"{Path(state['loaded_path']).stem}_cloud.nc")).as_posix()
+            b1_cloud_out_w.value = out_cloud
+        out_cloud = _ensure_nc_suffix(out_cloud)
+        b2_prob_in_w.value = out_cloud
+
+        raw_thr = (b1_thresholds_w.value or "").strip()
+        if raw_thr == "":
+            thresholds = None
+        else:
+            try:
+                parsed = ast.literal_eval(raw_thr)
+            except Exception:
+                # allow simple "70" without brackets
+                if raw_thr.isdigit():
+                    parsed = int(raw_thr)
+                else:
+                    raise ValueError("Thresholds must be empty, an int (e.g. 70), or a list like [50, 70, 90].")
+
+            if isinstance(parsed, (int, np.integer)):
+                thresholds = int(parsed)
+            elif isinstance(parsed, (list, tuple)) and all(isinstance(x, (int, np.integer)) for x in parsed):
+                thresholds = [int(x) for x in parsed]
+            else:
+                raise ValueError("Thresholds must be empty, an int (e.g. 70), or a list like [50, 70, 90].")
+            
+        _status(
+            "Building cloud probability data cube...",
+            f"loaded cube = {state['loaded_path']}",
+            f"output_clouds = {out_cloud}",
+            f"threshold = {thresholds}",
+        )
+
+        try:
+            # Extract polygon + daterange from the loaded cube (same dates, but no masking)
+            params = get_stac_parameters(state["loaded_path"])
+            polygon = params["polygon"]
+            daterange = params["daterange"]
+
+            with status_out:
+                # Capture progress prints from get_cloud_layers
+                cloud_da = get_cloud_layers(
+                    polygon=polygon,
+                    daterange=daterange,
+                    output_clouds=out_cloud,
+                    output_masked=None,
+                    threshold=thresholds,          # probability only
+                    clip_raster=False,
+                    masking=None,            # IMPORTANT: do not trigger masking branch
+                    update=None,
+                )
+
+            state["current_result_path"] = out_cloud
+            _show_result_from_path(out_cloud)
+            _status(f"✅ Cloud probability cube exported: {out_cloud}")
+
+        except Exception as e:
+            _status(f"❌ {type(e).__name__}: {e}")
+
+    b1_build_btn.on_click(_on_b1_build_clicked)
+
+
+
+
+
+    b1_box = widgets.VBox(
+        [
+            widgets.HTML("<div style='font-size:12px; color:#666;'>"
+                        "Builds cloud data cube.<br> If threshold is not given, only cloud probability cube will be built. "
+                        "In that case, binary mask(s) with threshold(s) can be generated in step (ii)."
+                        "</div>"),
+            _stacked_field(b1_thresholds_w, "Threshold(s)"),
+            _stacked_field(b1_cloud_out_box, "Output cloud probability cube (NetCDF)"),
+            b1_build_btn,
+        ],
+        layout=widgets.Layout(width="100%", gap="8px"),
+    )
+    b1_acc = widgets.Accordion(children=[b1_box], selected_index=None)
+    b1_acc.set_title(0, "i) Build Cloud Mask Data Cube")
+    b1_acc.layout = widgets.Layout(width="100%")
+
+    # ii) (Optional) Generate Masks from Probability Map
+    b2_prob_in_w = widgets.Text(value="", layout=widgets.Layout(width="100%"))
+    browse_b2_prob_in_btn = widgets.Button(icon="folder-open", description="", layout=widgets.Layout(width="36px"))
+    b2_prob_in_fc_box = _attach_filechooser(
+        browse_b2_prob_in_btn,
+        b2_prob_in_w,
+        title="Select cloud probability cube (NetCDF)",
+        pattern=["*.nc", "*"],
+        select_dirs=False,
+    )
+    b2_prob_in_row = widgets.HBox([browse_b2_prob_in_btn, b2_prob_in_w],
+                                layout=widgets.Layout(width="100%", gap="6px", align_items="center"))
+    b2_prob_in_box = widgets.VBox([b2_prob_in_row, b2_prob_in_fc_box], layout=widgets.Layout(width="100%", gap="4px"))
+
+    b2_thresholds_w = widgets.Text(
+        value="",
+        placeholder="70  or  [50, 70, 90]",
+        layout=widgets.Layout(width="420px"),
+    )
+    
+    b2_generate_btn = widgets.Button(description="Generate and Overwrite", button_style="success", icon="play",
+                                    layout=widgets.Layout(width="210px"))
+
+
+
+
+
+
+
+
+
+    def _parse_thresholds_text(raw: str):
+        s = (raw or "").strip()
+        if s == "":
+            return None
+        try:
+            parsed = ast.literal_eval(s)
+        except Exception:
+            if s.isdigit():
+                parsed = int(s)
+            else:
+                raise ValueError("Thresholds must be empty, an int (e.g. 70), or a list like [50, 70, 90].")
+
+        if isinstance(parsed, (int, np.integer)):
+            return int(parsed)
+        if isinstance(parsed, (list, tuple)) and all(isinstance(x, (int, np.integer)) for x in parsed):
+            return [int(x) for x in parsed]
+        raise ValueError("Thresholds must be empty, an int (e.g. 70), or a list like [50, 70, 90].")
+
+
+    def _on_b2_generate_overwrite_clicked(_):
+        if state["loaded_path"] is None:
+            _status("❌ Load a cube first.")
+            return
+        if mask_from_probability is None or export_stac is None:
+            _status("❌ mask_from_probability/export_stac not available. Check stac2cube imports.")
+            return
+
+        prob_path = (b2_prob_in_w.value or "").strip()
+        if not prob_path:
+            _status("❌ Please provide an input probability cube path.")
+            return
+
+        thresholds = _parse_thresholds_text(b2_thresholds_w.value)
+        if thresholds is None:
+            _status("ℹ️ No thresholds provided. Nothing to do (leaving probability cube unchanged).")
+            return
+
+        p = Path(prob_path)
+        if not p.exists():
+            _status(f"❌ File not found: {p.as_posix()}")
+            return
+
+        _status(
+            "Generating masks from probability map...",
+            f"input/overwrite file = {p.as_posix()}",
+            f"thresholds = {thresholds}",
+        )
+
+        try:
+            # Load existing cloud cube
+            with xr.open_dataset(p) as ds:
+                if "Cloud_Stack" not in ds.data_vars:
+                    raise ValueError("NetCDF does not contain 'Cloud_Stack'.")
+                cloud = ds["Cloud_Stack"].load()
+
+            # --- Select probability band (this is the only input to mask_from_probability) ---
+            cloud_prob = cloud.sel(band="cloud_prob")
+
+            # --- Generate new masks (we keep average_over/dilation_size hidden in UI) ---
+            new_masks = mask_from_probability(
+                cloud_probability=cloud_prob,
+                threshold=thresholds,
+                average_over=4,
+                dilation_size=2,
+            )  # -> bands: cloud_mask_XX
+
+            # --- Keep existing Cloud_Stack, but drop any mask bands we're about to regenerate ---
+            new_band_names = set(map(str, new_masks["band"].values))
+            base_bands = [b for b in map(str, cloud["band"].values) if b not in new_band_names]
+            base = cloud.sel(band=base_bands)
+
+            # --- Append the new masks (probability stays, old non-conflicting masks stay) ---
+            combined = xr.concat([base, new_masks], dim="band").transpose("time", "band", "y", "x")
+            combined.name = "Cloud_Stack"
+
+            # --- Overwrite the same file (no need to pass crs/transform) ---
+            with status_out:
+                export_stac(combined, p.as_posix(), overwrite=True, var_name="Cloud_Stack")
+
+            state["current_result_path"] = p.as_posix()
+            _show_result_from_path(p.as_posix())
+            _status(f"✅ Masks generated and file overwritten: {p.as_posix()}")
+
+        except Exception as e:
+            _status(f"❌ {type(e).__name__}: {e}")
+
+
+    b2_generate_btn.on_click(_on_b2_generate_overwrite_clicked)
+
+
+
+
+
+
+
+
+
+    b2_box = widgets.VBox(
+        [
+            widgets.HTML("<div style='font-size:12px; color:#666;'>"
+                        "Adds one or more <b>binary mask layers</b> from the probability map, "
+                        "so you can apply different thresholds later without recomputing probabilities.<br>"
+                        "<b>Warning:</b> This overwrites the input NetCDF (keeps cloud_prob, adds/updates mask bands)."
+                        "</div>"),
+            _stacked_field(b2_prob_in_box, "Input probability cube (NetCDF)"),
+            _stacked_field(b2_thresholds_w, "Thresholds"),
+            b2_generate_btn,
+        ],
+        layout=widgets.Layout(width="100%", gap="8px"),
+    )
+    b2_acc = widgets.Accordion(children=[b2_box], selected_index=None)
+    b2_acc.set_title(0, "ii) (Optional) Generate Masks from Probability Map")
+    b2_acc.layout = widgets.Layout(width="100%")
+
+    
+
+
+
+    # iii) Mask out Data Cube (by single threshold value) — NEW design
+
+    # Cloud cube selector (separate from main loaded cube)
+    b3_cloud_path_w = widgets.Text(value="", layout=widgets.Layout(width="100%"))
+    browse_b3_cloud_btn = widgets.Button(icon="folder-open", description="", layout=widgets.Layout(width="36px"))
+    b3_cloud_fc_box = _attach_filechooser(
+        browse_b3_cloud_btn,
+        b3_cloud_path_w,
+        title="Select cloud cube (NetCDF with Cloud_Stack)",
+        pattern=["*.nc", "*"],
+        select_dirs=False,
+    )
+    b3_cloud_row = widgets.HBox(
+        [browse_b3_cloud_btn, b3_cloud_path_w],
+        layout=widgets.Layout(width="100%", gap="6px", align_items="center"),
+    )
+    b3_cloud_box = widgets.VBox([b3_cloud_row, b3_cloud_fc_box], layout=widgets.Layout(width="100%", gap="4px"))
+
+    load_cloud_btn = widgets.Button(
+        description="Load cloud cube",
+        button_style="primary",
+        icon="upload",
+        layout=widgets.Layout(width="160px"),
+    )
+
+    # Mask band dropdown (populated after loading cloud cube)
+    b3_mask_band_w = widgets.Dropdown(
+        options=[],
+        value=None,
+        description="",
+        layout=widgets.Layout(width="60%"),
+        disabled=True,
+    )
+
+    # Output masked cube path
+    b3_masked_out_w = widgets.Text(value="", layout=widgets.Layout(width="100%"))
+    browse_b3_masked_out_btn = widgets.Button(icon="folder-open", description="", layout=widgets.Layout(width="36px"))
+    b3_masked_out_fc_box = _attach_filechooser(
+        browse_b3_masked_out_btn,
+        b3_masked_out_w,
+        title="Select output masked cube (NetCDF)",
+        pattern=["*.nc", "*"],
+        select_dirs=False,
+    )
+    b3_masked_out_row = widgets.HBox(
+        [browse_b3_masked_out_btn, b3_masked_out_w],
+        layout=widgets.Layout(width="100%", gap="6px", align_items="center"),
+    )
+    b3_masked_out_box = widgets.VBox([b3_masked_out_row, b3_masked_out_fc_box], layout=widgets.Layout(width="100%", gap="4px"))
+
+    b3_mask_btn = widgets.Button(
+        description="Mask and Export",
+        button_style="success",
+        icon="play",
+        layout=widgets.Layout(width="170px"),
+    )
+
+    # Keep separate state for cloud cube used in iii)
+    state["cloud_path"] = None
+    state["cloud_mask_bands"] = []
+
+    def _extract_thr_suffix(mask_band: str):
+        """
+        For band like 'cloud_mask_70' -> returns '70'
+        Otherwise returns the raw band string.
+        """
+        s = str(mask_band)
+        m = re.search(r"(\d+)$", s)
+        return m.group(1) if m else s
+
+    def _suggest_masked_output_from_selection():
+        if not state.get("loaded_path"):
+            return ""
+        if not b3_mask_band_w.value:
+            return ""
+
+        thr = _extract_thr_suffix(b3_mask_band_w.value)
+        p = Path(state["loaded_path"])
+        out = p.parent / f"{p.stem}_masked_{thr}.nc"
+        return out.as_posix()
+
+    def _on_load_cloud_clicked(_):
+        if state.get("loaded_path") is None:
+            _status("❌ Load the main data cube first.")
+            return
+
+        cloud_path = (b3_cloud_path_w.value or "").strip()
+        if not cloud_path:
+            _status("❌ Please select a cloud cube NetCDF path.")
+            return
+
+        p = Path(cloud_path)
+        if not p.exists():
+            _status(f"❌ File not found: {p.as_posix()}")
+            return
+
+        try:
+            _status("Loading cloud cube (for masks)...", f"path = {p.as_posix()}")
+
+            with xr.open_dataset(p) as ds:
+                if "Cloud_Stack" not in ds.data_vars:
+                    raise ValueError("NetCDF does not contain 'Cloud_Stack'.")
+                cloud = ds["Cloud_Stack"]
+                if "band" not in cloud.dims:
+                    raise ValueError("Cloud_Stack has no 'band' dimension.")
+                bands = [str(b) for b in cloud["band"].values]
+
+            # Exclude probability band
+            mask_bands = [b for b in bands if b != "cloud_prob"]
+            if not mask_bands:
+                raise ValueError("No mask bands found. Cloud_Stack only contains 'cloud_prob'?")
+
+            state["cloud_path"] = p.as_posix()
+            state["cloud_mask_bands"] = mask_bands
+
+            # Populate dropdown
+            b3_mask_band_w.options = mask_bands
+            b3_mask_band_w.value = mask_bands[0]
+            b3_mask_band_w.disabled = False
+
+            # Auto-suggest output based on selected band
+            b3_masked_out_w.value = _suggest_masked_output_from_selection()
+
+            _status("✅ Cloud cube loaded for masking.", f"Available masks: {mask_bands}")
+
+        except Exception as e:
+            _status(f"❌ {type(e).__name__}: {e}")
+
+    load_cloud_btn.on_click(_on_load_cloud_clicked)
+
+    def _on_mask_band_change(change):
+        if change.get("name") != "value":
+            return
+        if not b3_mask_band_w.value:
+            return
+        # Always refresh suggestion on band change
+        b3_masked_out_w.value = _suggest_masked_output_from_selection()
+
+    b3_mask_band_w.observe(_on_mask_band_change, names="value")
+
+    def _on_b3_mask_export_clicked(_):
+        if state.get("loaded_path") is None:
+            _status("❌ Load the main data cube first.")
+            return
+        if mask_stac_clouds is None:
+            _status("❌ mask_stac_clouds is not available. Check stac2cube imports.")
+            return
+        if state.get("cloud_path") is None:
+            _status("❌ Load a cloud cube first (blue button).")
+            return
+        if not b3_mask_band_w.value:
+            _status("❌ Please select a mask band (e.g., cloud_mask_70).")
+            return
+
+        out_path = (b3_masked_out_w.value or "").strip()
+        if not out_path:
+            out_path = _suggest_masked_output_from_selection()
+            b3_masked_out_w.value = out_path
+
+        out_path = _ensure_nc_suffix(out_path)
+        mask_layer = str(b3_mask_band_w.value)
+
+        _status(
+            "Masking and exporting...",
+            f"input cube = {state['loaded_path']}",
+            f"cloud cube = {state['cloud_path']}",
+            f"mask_layer = {mask_layer}",
+            f"output = {out_path}",
+        )
+
+        try:
+            with status_out:
+                res = mask_stac_clouds(
+                    stac=state["loaded_path"],
+                    cloud=state["cloud_path"],
+                    mask_layer=mask_layer,
+                    output=out_path,
+                )
+
+            # Show result from exported masked cube
+            state["current_result_path"] = out_path
+            _show_result_from_path(out_path)
+            _status(f"✅ Masked cube exported: {out_path}")
+
+        except Exception as e:
+            _status(f"❌ {type(e).__name__}: {e}")
+
+    b3_mask_btn.on_click(_on_b3_mask_export_clicked)
+
+    b3_box = widgets.VBox(
+        [
+            widgets.HTML(
+                "<div style='font-size:12px; color:#666;'>"
+                "Masks the <b>loaded data cube</b> using a selected binary mask band from a <b>Cloud_Stack</b> cube.<br>"
+                "Load a cloud cube, pick a mask band (not cloud_prob), then export a masked cube."
+                "</div>"
+            ),
+            _stacked_field(b3_cloud_box, "Cloud data cube (NetCDF)"),
+            load_cloud_btn,
+            _stacked_field(b3_mask_band_w, "Mask band"),
+            _stacked_field(b3_masked_out_box, "Output masked cube (NetCDF)"),
+            b3_mask_btn,
+        ],
+        layout=widgets.Layout(width="100%", gap="8px"),
+    )
+
+    b3_acc = widgets.Accordion(children=[b3_box], selected_index=None)
+    b3_acc.set_title(0, "iii) Mask out Data Cube (by single threshold value)")
+    b3_acc.layout = widgets.Layout(width="100%")
+
+
+
+
+
+
+
+
+
+    # Tool 1b container
+    mask_b_box = widgets.VBox(
+        [
+            widgets.HTML("<div style='font-size:12px; color:#666;'>"
+                        "Manual workflow: build probability cube → (optional) generate binary masks → apply one threshold to mask the cube."
+                        "</div>"),
+            b1_acc,
+            b2_acc,
+            b3_acc,
+        ],
+        layout=widgets.Layout(width="100%", gap="10px"),
+    )
+
+    mask_b_acc = widgets.Accordion(children=[mask_b_box], selected_index=None)
+    mask_b_acc.set_title(0, "b) Manually Build Cloud Masking Data Cube")
+    mask_b_acc.layout = widgets.Layout(width="99%")
+
+
+    mask_tool_box = widgets.VBox(
+        [
+            #widgets.HTML("<b>1) Cloud Masking Data Cube</b>"),
+            widgets.HTML("<div style='font-size:12px; color:#666;'>If you already know the threshold value, proceed with Fully Automated Workflow. <br>If not, build your cloud data cube manually and inspect the result. <br>Cloud masking data cube can be also loaded and exported as Geotiffs with Data Cube Editor. </div>"),
+            mask_a_acc,
+            mask_b_acc,
+        ],
+        layout=widgets.Layout(width="100%", gap="8px"),
+    )
+    mask_tool_acc = widgets.Accordion(children=[mask_tool_box], selected_index=None)
+    mask_tool_acc.set_title(0, "1) Cloud Masking Data Cube")
+    mask_tool_acc.layout = widgets.Layout(width="99%")
+
+    # --- Tool 2: Co-register Data Cube ---
+
+    # Compact, consistent widget widths (no percent widths)
+    cr_grid_size_w = widgets.BoundedIntText(value=7, min=1, max=50, step=1, layout=widgets.Layout(width="200px"))
+    cr_max_cc_w = widgets.BoundedIntText(value=100, min=0, max=100, step=1, layout=widgets.Layout(width="200px"))
+
+    cr_time_period_w = widgets.Text(
+        value="",
+        placeholder='["2023-04-01", "2023-12-31"]',
+        layout=widgets.Layout(width="200px"),
+    )
+
+    cr_min_rel_keep_w = widgets.BoundedFloatText(value=10.0, min=0.0, max=100.0, step=1.0, layout=widgets.Layout(width="200px"))
+    cr_min_rel_update_ref_w = widgets.BoundedFloatText(value=70.0, min=0.0, max=100.0, step=1.0, layout=widgets.Layout(width="200px"))
+    cr_max_cloud_update_ref_w = widgets.BoundedFloatText(value=20.0, min=0.0, max=100.0, step=1.0, layout=widgets.Layout(width="200px"))
+
+    cr_first_scene_mode_w = widgets.Dropdown(
+        options=[("first", "first"), ("composite", "composite")],
+        value="first",
+        layout=widgets.Layout(width="200px"),
+    )
+
+    cr_composite_window_days_w = widgets.BoundedIntText(value=30, min=1, max=365, step=1, layout=widgets.Layout(width="200px"))
+    cr_composite_window_days_w.disabled = True
+
+    cr_iteration_w = widgets.BoundedIntText(value=5, min=1, max=10, step=1, layout=widgets.Layout(width="200px"))
+
+    # output path
+    cr_out_w = widgets.Text(value="", layout=widgets.Layout(width="100%"))
+    browse_cr_out_btn = widgets.Button(icon="folder-open", description="", layout=widgets.Layout(width="36px"))
+    cr_out_fc_box = _attach_filechooser(
+        browse_cr_out_btn,
+        cr_out_w,
+        title="Select output NetCDF for co-registered cube",
+        pattern=["*.nc", "*"],
+        select_dirs=False,
+    )
+    cr_out_row = widgets.HBox(
+        [browse_cr_out_btn, cr_out_w],
+        layout=widgets.Layout(width="100%", gap="6px", align_items="center"),
+    )
+    cr_out_box = widgets.VBox([cr_out_row, cr_out_fc_box], layout=widgets.Layout(width="100%", gap="4px"))
+
+    cr_run_btn = widgets.Button(
+        description="Co-register and Export",
+        button_style="success",
+        icon="play",
+        layout=widgets.Layout(width="210px"),
+    )
+
+    def _on_first_scene_mode_change(change):
+        if change.get("name") != "value":
+            return
+        cr_composite_window_days_w.disabled = (cr_first_scene_mode_w.value != "composite")
+
+    cr_first_scene_mode_w.observe(_on_first_scene_mode_change, names="value")
+
+    def _parse_time_period(txt: str):
+        s = (txt or "").strip()
+        if s == "":
+            return None
+        import ast
+        obj = ast.literal_eval(s)
+        if not (isinstance(obj, (list, tuple)) and len(obj) == 2 and all(isinstance(x, str) for x in obj)):
+            raise ValueError('time_period must be ["YYYY-MM-DD","YYYY-MM-DD"] or empty.')
+        return list(obj)
+
+    def _on_coregister_clicked(_):
+        if state.get("loaded_path") is None:
+            _status("❌ Load a cube first.")
+            return
+        if coregister_cube is None:
+            _status("❌ coregister_cube is not available. Check stac2cube imports.")
+            return
+
+        out_path = (cr_out_w.value or "").strip()
+        if not out_path:
+            out_path = _suggest_cr_path()
+            cr_out_w.value = out_path
+        out_path = _ensure_nc_suffix(out_path)
+
+        try:
+            time_period = _parse_time_period(cr_time_period_w.value)
+        except Exception as e:
+            _status(f"❌ ValueError: {e}")
+            return
+
+        _status(
+            "Co-registering and exporting...",
+            f"input_path = {state['loaded_path']}",
+            f"output_path = {out_path}",
+        )
+
+        try:
+            with status_out:
+                coregister_cube(
+                    input_path=state["loaded_path"],
+                    grid_size=int(cr_grid_size_w.value),
+                    max_cc=int(cr_max_cc_w.value),
+                    time_period=time_period,
+                    min_reliability_keep=float(cr_min_rel_keep_w.value),
+                    min_reliability_update_ref=float(cr_min_rel_update_ref_w.value),
+                    max_cloud_update_ref=float(cr_max_cloud_update_ref_w.value),
+                    first_scene_mode=str(cr_first_scene_mode_w.value),
+                    composite_window_days=int(cr_composite_window_days_w.value),
+                    iteration=int(cr_iteration_w.value),
+                    output_path=out_path,
+                )
+
+            state["current_result_path"] = out_path
+            _show_result_from_path(out_path)
+            _status(f"✅ Co-registration finished and exported: {out_path}")
+
+        except Exception as e:
+            _status(f"❌ {type(e).__name__}: {e}")
+
+    cr_run_btn.on_click(_on_coregister_clicked)
+
+
+    # --- Pretty layout (compact rows) ---
+
+    def _auto(box):
+        # Make field blocks not stretch to full width
+        box.layout.width = "auto"
+        box.layout.flex = "0 0 auto"
+        return box
+
+    def _row(fields, gap_px=16):
+        # gap_px controls the distance between boxes reliably
+        items = []
+        for i, f in enumerate(fields):
+            f.layout.width = "auto"
+            f.layout.flex = "0 0 auto"
+            items.append(f)
+            if i < len(fields) - 1:
+                items.append(widgets.HTML(f"<div style='width:{gap_px}px;'></div>"))
+
+        return widgets.HBox(
+            items,
+            layout=widgets.Layout(
+                width="100%",
+                justify_content="flex-start",
+                align_items="flex-start",
+                flex_flow="row wrap",
+            ),
+        )
+
+    row1 = widgets.VBox(
+        [
+            widgets.HTML("<b>Filter time-series (optional)</b>"),
+            _row(
+                [
+                    _stacked_field_with_help(cr_max_cc_w, "Max Cloud Coverage", "max_cc"),
+                    _stacked_field_with_help(cr_time_period_w, "Time Period", "time_period"),
+                ],
+                gap_px=20,
+            ),
+        ],
+        layout=widgets.Layout(width="100%", gap="6px"),
+    )
+
+    row2 = widgets.VBox(
+        [
+            widgets.HTML("<b>Primary Parameters</b>"),
+            _row(
+                [
+                    _stacked_field_with_help(cr_grid_size_w, "Grid Size", "grid_size"),
+                    _stacked_field_with_help(cr_iteration_w, "Iteration", "iteration"),
+                ],
+                gap_px=20,
+            ),
+        ],
+        layout=widgets.Layout(width="100%", gap="6px"),
+    )
+
+    row3 = widgets.VBox(
+        [
+            widgets.HTML("<b>Secondary Parameters</b>"),
+            _row(
+                [
+                    _stacked_field_with_help(cr_min_rel_keep_w, "Min Reliability to Keep Scenes", "min_reliability_keep"),
+                    _stacked_field_with_help(cr_min_rel_update_ref_w, "Min Reliability to Update Reference", "min_reliability_update_ref"),
+                    _stacked_field_with_help(cr_max_cloud_update_ref_w, "Max Cloud Coverage to Update Reference", "max_cloud_update_ref"),
+                ],
+                gap_px=20,
+            ),
+        ],
+        layout=widgets.Layout(width="100%", gap="6px"),
+    )
+
+    row4 = widgets.VBox(
+        [
+            widgets.HTML("<b>First Scene Behavior</b>"),
+            _row(
+                [
+                    _stacked_field_with_help(cr_first_scene_mode_w, "First Reference Scene", "first_scene_mode"),
+                    _stacked_field_with_help(cr_composite_window_days_w, "Composite Window (days)", "composite_window_days"),
+                ],
+                gap_px=20,
+            ),
+        ],
+        layout=widgets.Layout(width="100%", gap="6px"),
+    )
+
+    section_spacer = widgets.HTML("<div style='height:10px;'></div>")  # adjust 6/8/10/12
+
+    cr_tool_box = widgets.VBox(
+        [
+            widgets.HTML(
+                "<div style='font-size:12px; color:#666;'>"
+                "Co-registers the data cube.<br>"
+                "Performs the best in relatively larger areas with heterogeneous land cover."
+                "</div>"
+            ),
+            row1,
+            section_spacer,
+            row2,
+            section_spacer,
+            row3,
+            section_spacer,
+            row4,
+            section_spacer,
+            _stacked_field(cr_out_box, "Output NetCDF"),
+            section_spacer,
+            cr_run_btn,
+        ],
+        layout=widgets.Layout(width="100%", gap="10px"),
+    )
+
+    cr_tool_acc = widgets.Accordion(children=[cr_tool_box], selected_index=None)
+    cr_tool_acc.set_title(0, "2) Co-register Data Cube")
+    cr_tool_acc.layout = widgets.Layout(width="99%")
+
+   
+
+
+
+    # --- Tool 3: Super-resolve Data Cube (single mode dropdown) ---
+
+    def _suggest_sr_path_from_loaded():
+        if state.get("loaded_path"):
+            p = Path(state["loaded_path"])
+            return (p.parent / f"{p.stem}_sr.nc").as_posix()
+        return "./results/cube_sr.nc"
+
+    sr_mode_w = widgets.Dropdown(
+        options=[
+            ("10-m RGBN to 2.5-m", "rgbn"),
+            ("10-m Full Spectral to 2.5-m", "full_spectral"),
+            ("20-m Bands to 10-m", "20to10"),
+        ],
+        value="rgbn",
+        layout=widgets.Layout(width="320px"),
+    )
+
+    SR_DESC = {
+        "rgbn": (
+            "- Required band setup -> <code>blue, green, red, nir</code><br>"
+            "- If exist, indices must be only 10-meter resolution ones, e.g., ndvi, ndwi<br>"
+            "- Use this model if you don't have 20-m bands. Much faster model!"
+        ),
+        "full_spectral": (
+            "- Required band setup -> <code>blue, green, red, nir, nir08, rededge1, rededge2, rededge3, swir16, swir22</code><br>"
+            "- If exist, indices can be both 10 and 20-meter resolution ones, e.g., ndvi, ndwi, ndmi<br>"
+            "- Use this model only if you need to super resolve 20-meter bands.<br>"
+            "- Even if you need to super-resolve one of the 20-meter bands, still need to include all of the required ones."
+        ),
+        "20to10": "Under development :)",
+    }
+
+    sr_desc_html = widgets.HTML(
+        f"<div style='font-size:12px; color:#666;'>{SR_DESC[sr_mode_w.value]}</div>"
+    )
+
+    # Output NetCDF
+    sr_out_w = widgets.Text(value="", layout=widgets.Layout(width="100%"))
+    browse_sr_out_btn = widgets.Button(icon="folder-open", description="", layout=widgets.Layout(width="36px"))
+    sr_out_fc_box = _attach_filechooser(
+        browse_sr_out_btn,
+        sr_out_w,
+        title="Select output NetCDF for super-resolved cube",
+        pattern=["*.nc", "*"],
+        select_dirs=False,
+    )
+    sr_out_row = widgets.HBox([browse_sr_out_btn, sr_out_w], layout=widgets.Layout(width="100%", gap="6px", align_items="center"))
+    sr_out_box = widgets.VBox([sr_out_row, sr_out_fc_box], layout=widgets.Layout(width="100%", gap="4px"))
+
+    sr_run_btn = widgets.Button(
+        description="Super-resolve and Export",
+        button_style="success",
+        icon="play",
+        layout=widgets.Layout(width="220px"),
+    )
+
+    def _on_sr_mode_change(change):
+        if change.get("name") != "value":
+            return
+        mode = sr_mode_w.value
+        sr_desc_html.value = f"<div style='font-size:12px; color:#666;'>{SR_DESC[mode]}</div>"
+
+        # Disable run for under-development mode
+        if mode == "20to10":
+            sr_run_btn.disabled = True
+        else:
+            # enabled state will also depend on load status via _set_enabled_after_load
+            sr_run_btn.disabled = (state.get("loaded_path") is None)
+
+    sr_mode_w.observe(_on_sr_mode_change, names="value")
+
+    
+    def _on_sr_run_clicked(_):
+        if state.get("loaded_path") is None:
+            _status("❌ Load a cube first.")
+            return
+        if super_resolve_cube is None:
+            _status("❌ super_resolve_cube is not available. Check stac2cube imports.")
+            return
+
+        mode = sr_mode_w.value
+        if mode == "20to10":
+            _status("ℹ️ 20-m Bands to 10-m is under development :)")
+            return
+
+        out_path = (sr_out_w.value or "").strip()
+        if not out_path:
+            out_path = _suggest_sr_path_from_loaded()
+            sr_out_w.value = out_path
+        out_path = _ensure_nc_suffix(out_path)
+
+        p_out = Path(out_path)
+        existed_before = p_out.exists()
+        old_mtime = p_out.stat().st_mtime if existed_before else None
+        old_size = p_out.stat().st_size if existed_before else None
+
+        _status(
+            "Super-resolving and exporting...",
+            f"input_path = {state['loaded_path']}",
+            f"mode = {mode}",
+            f"output_path = {out_path}",
+        )
+
+        try:
+            # Capture progress prints from the tool
+            with status_out:
+                super_resolve_cube(
+                    input_path=state["loaded_path"],
+                    output_path=out_path,
+                    model_type=("rgbn" if mode == "rgbn" else "full_spectral"),
+                )
+
+            # --- Verify export actually happened (prevents false ✅) ---
+            if not p_out.exists():
+                with status_out:
+                    print("❌ Super-resolution failed: output file was not created.")
+                return
+
+            new_mtime = p_out.stat().st_mtime
+            new_size = p_out.stat().st_size
+
+            if existed_before and (new_mtime == old_mtime) and (new_size == old_size):
+                with status_out:
+                    print(
+                        "❌ Super-resolution failed: output file was not updated "
+                        "(likely missing required bands for the selected mode)."
+                    )
+                return
+
+            # Ensure file is readable
+            try:
+                with xr.open_dataset(p_out) as _:
+                    pass
+            except Exception as e:
+                with status_out:
+                    print(f"❌ Super-resolution failed: output file is not readable ({type(e).__name__}: {e})")
+                return
+
+            # Success
+            state["current_result_path"] = out_path
+            _show_result_from_path(out_path)
+            _status(f"✅ Super-resolution finished and exported: {out_path}")
+
+        except Exception as e:
+            _status(f"❌ {type(e).__name__}: {e}")
+
+
+    sr_run_btn.on_click(_on_sr_run_clicked)
+
+    # Initial disable (until load)
+    sr_run_btn.disabled = True
+
+    sr_tool_box = widgets.VBox(
+        [
+            #widgets.HTML("<b>3) Super-resolve Data Cube</b>"),
+            widgets.HTML("<div style='font-size:12px; color:#666;'>Super resolves the loaded data cube. Select one of the three modes below.</div>"),
+            _stacked_field(sr_mode_w, "Mode"),
+            sr_desc_html,
+            _stacked_field(sr_out_box, "Output NetCDF"),
+            sr_run_btn,
+        ],
+        layout=widgets.Layout(width="100%", gap="8px"),
+    )
+
+    sr_tool_acc = widgets.Accordion(children=[sr_tool_box], selected_index=None)
+    sr_tool_acc.set_title(0, "3) Super-resolve Data Cube")
+    sr_tool_acc.layout = widgets.Layout(width="100%")
+
+
+
+
+
+
+
+
+
+
+    sr_tool_acc = widgets.Accordion(children=[sr_tool_box], selected_index=None)
+    sr_tool_acc.set_title(0, "3) Super-resolve Data Cube")
+    sr_tool_acc.layout = widgets.Layout(width="99%")
+
+    tools_box = widgets.VBox(
+        [
+            widgets.HTML("<b>Tools</b>"),
+            widgets.HTML("<div style='font-size:12px; color:#666;'>Each tool exports its result to NetCDF (no COG export here).</div>"),
+            mask_tool_acc,
+            cr_tool_acc,
+            sr_tool_acc,
+        ],
+        layout=widgets.Layout(width="100%", gap="8px"),
+    )
+    tools_card = widgets.VBox([tools_box], layout=widgets.Layout(width="100%"))
+    tools_card.add_class("stac2cube-card")
+
+    # -----------------------------------------
+    # Result card (shows exported file result)
+    # -----------------------------------------
+    # Result accordion
+    result_box = widgets.VBox(
+        [
+            widgets.HTML("<div style='font-size:12px; color:#666;'>Shows the exported NetCDF result after a tool run.</div>"),
+            result_out,
+        ],
+        layout=widgets.Layout(width="100%", gap="6px"),
+    )
+
+    result_acc = widgets.Accordion(children=[result_box], selected_index=None)
+    result_acc.set_title(0, "Result")
+    result_acc.layout = widgets.Layout(width="99%")
+
+    result_card = widgets.VBox([result_acc], layout=widgets.Layout(width="100%"))
+    result_card.add_class("stac2cube-card")
+
+    # -----------------------------------------
+    # Status card
+    # -----------------------------------------
+    status_card = widgets.VBox(
+        [
+            widgets.HTML("<b>Status</b>"),
+            status_out,
+        ],
+        layout=widgets.Layout(width="100%", gap="6px"),
+    )
+    status_card.add_class("stac2cube-card")
+
+    # -----------------------------------------
+    # Initialize tool output suggestions (after load)
+    # -----------------------------------------
+    def _refresh_output_suggestions():
+        _refresh_mask_outputs(force=True)
+        b1_cloud_out_w.value = _suggest_clouds_path()
+        b2_prob_in_w.value = b1_cloud_out_w.value
+        b3_cloud_path_w.value = _suggest_clouds_path()
+        cr_out_w.value = _suggest_cr_path()
+        sr_path = _suggest_sr_path_from_loaded()
+        sr_out_w.value = _suggest_sr_path_from_loaded()
+
+    def _set_enabled_after_load(enabled: bool):
+        #reset_btn.disabled = not enabled
+
+        # Tool 1a controls
+        mask_threshold_w.disabled = not enabled
+        masked_out_w.disabled = not enabled
+        browse_masked_out_btn.disabled = not enabled
+
+        b1_cloud_out_w.disabled = not enabled
+        browse_b1_cloud_out_btn.disabled = not enabled
+        b1_build_btn.disabled = not enabled
+
+        b2_prob_in_w.disabled = not enabled
+        browse_b2_prob_in_btn.disabled = not enabled
+        b2_thresholds_w.disabled = not enabled
+        b2_generate_btn.disabled = not enabled
+
+        export_clouds_w.disabled = not enabled
+        # clouds_out depends on checkbox
+        clouds_out_w.disabled = (not enabled) or (not export_clouds_w.value)
+        browse_clouds_out_btn.disabled = (not enabled) or (not export_clouds_w.value)
+
+        mask_and_export_btn.disabled = not enabled
+
+        b3_cloud_path_w.disabled = not enabled
+        browse_b3_cloud_btn.disabled = not enabled
+        load_cloud_btn.disabled = not enabled
+
+        # dropdown remains disabled until cloud cube is loaded
+        if not enabled:
+            b3_mask_band_w.disabled = True
+
+        b3_masked_out_w.disabled = not enabled
+        browse_b3_masked_out_btn.disabled = not enabled
+        b3_mask_btn.disabled = not enabled
+
+        # Tool 2/3 Co-registration
+        cr_grid_size_w.disabled = not enabled
+        cr_max_cc_w.disabled = not enabled
+        cr_time_period_w.disabled = not enabled
+        cr_min_rel_keep_w.disabled = not enabled
+        cr_min_rel_update_ref_w.disabled = not enabled
+        cr_max_cloud_update_ref_w.disabled = not enabled
+        cr_first_scene_mode_w.disabled = not enabled
+        cr_composite_window_days_w.disabled = (not enabled) or (cr_first_scene_mode_w.value != "composite")
+        cr_iteration_w.disabled = not enabled
+        cr_out_w.disabled = not enabled
+        browse_cr_out_btn.disabled = not enabled
+        cr_run_btn.disabled = not enabled
+
+        # Tool 3/3 Super-resolution
+        sr_mode_w.disabled = not enabled
+        sr_out_w.disabled = not enabled
+        browse_sr_out_btn.disabled = not enabled
+
+        # run enabled only if loaded AND mode not under development
+        if not enabled:
+            sr_run_btn.disabled = True
+        else:
+            sr_run_btn.disabled = (sr_mode_w.value == "20to10")
+
+
+    _set_enabled_after_load(False)
+
+    # -----------------------------------------
+    # Events
+    # -----------------------------------------
+    def _on_load_clicked(_):
+        path = (load_path_w.value or "").strip()
+        if not path:
+            _status("❌ Please select a NetCDF path.")
+            return
+        p = Path(path)
+        if not p.exists():
+            _status(f"❌ File not found: {p.as_posix()}")
+            return
+
+        try:
+            _status("Loading cube...")
+            with xr.open_dataset(p) as ds:
+                if "Spectral_Temporal_Stack" in ds.data_vars:
+                    obj = ds["Spectral_Temporal_Stack"].load()
+                else:
+                    obj = ds.load()
+
+            state["loaded_path"] = p.as_posix()
+            state["loaded_obj"] = obj
+            #reset_btn.disabled = False
+            _set_enabled_after_load(True)
+            _refresh_output_suggestions()
+
+            _show_loaded_summary(obj)
+            loaded_summary_acc.selected_index = 0
+            _status("✅ Cube loaded.", f"Loaded path: {state['loaded_path']}", "Select one of the listed tools to proceed.")
+        except Exception as e:
+            _status(f"❌ {type(e).__name__}: {e}")
+
+    def _on_reset_clicked(_):
+        if state["loaded_obj"] is None:
+            _status("❌ No loaded cube to reset to.")
+            return
+        # For this UI, reset just clears the result display pointer
+        state["current_result_path"] = None
+        with result_out:
+            clear_output()
+            print("No exported result yet.")
+        _status("✅ Reset done. (No exported result selected.)")
+
+
+    load_cube_btn.on_click(_on_load_clicked)
+    #reset_btn.on_click(_on_reset_clicked)
+
+    # Tool buttons: skeleton only (no logic wired yet)
+    def _run_tool_stub(tool_name: str, out_path: str):
+        if state["loaded_obj"] is None or not state["loaded_path"]:
+            _status("❌ Load a cube first.")
+            return
+        if not out_path.strip():
+            _status("❌ Please set an output NetCDF path.")
+            return
+        _status(
+            f"🚧 {tool_name} is not wired yet (skeleton).",
+            f"Would export to: {Path(out_path).as_posix()}",
+            "Next: we will plug in your real tool functions + parameters step by step.",
+        )
+        # no result to show yet
+
+    
+
+    def _on_run_cr(_):
+        _run_tool_stub("Tool 2: Co-register Data Cube", cr_out_w.value)
+
+    #def _on_run_sr(_):
+     #   _run_tool_stub("Tool 3: Super-resolve Data Cube", sr_out_w.value)
+
+
+    
+    
+
+    # -----------------------------------------
+    # Compose UI (cards + spacing)
+    # -----------------------------------------
+    spacer_small = widgets.HTML("<div style='height:6px;'></div>")
+    spacer_med = widgets.HTML("<div style='height:12px;'></div>")
+
+    ui = widgets.VBox(
+        [
+            css_patch,
+            header,
+            subtitle,
+
+            loading_card,
+            spacer_small,
+            loaded_summary_card,
+
+            spacer_med,
+            tools_card,
+
+            spacer_med,
+            result_card,
+
+            spacer_med,
+            status_card,
+        ],
+        layout=widgets.Layout(width="96%", max_width="980px", margin="0 auto", gap="8px"),
+    )
+
+    outer = widgets.HBox([ui], layout=widgets.Layout(width="100%", justify_content="center"))
+    display(outer)
+
+    _status("ℹ️ Load a data cube to start. Then select one of the tools.")
+
+    return {
+        "ui": ui,
+        "outer": outer,
+        "state": state,
+        "widgets": {
+            "load_path": load_path_w,
+            "load_cube_btn": load_cube_btn,
+            #"reset_btn": reset_btn,
+            "mask_threshold": mask_threshold_w,
+            "cr_out": cr_out_w,
+            #"sr_out": sr_out_w,
+            #"run_sr_btn": run_sr_btn,
+            "loaded_summary_acc": loaded_summary_acc,
+            "mask_tool_acc": mask_tool_acc,
+            "cr_tool_acc": cr_tool_acc,
+            "sr_tool_acc": sr_tool_acc,
+        },
+        "outputs": {
+            "loaded_summary": loaded_summary_out,
+            "result": result_out,
+            "status": status_out,
         },
     }
