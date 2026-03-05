@@ -14,7 +14,7 @@
 ## Table of Contents
 - [Feature Overview](#feature-overview)
 - [Installation](#installation)
-- [Examples](#examples)
+- [How to run](#how-to-run)
 - [How to run on HPC](#how-to-run-on-hpc)
 - [Access and Licensing Details for STAC Catalogs](#access-and-licensing-details-for-stac-catalogs)
 - [Method References](#method-references)
@@ -82,7 +82,7 @@ If git is not available for you, download and unzip the file: https://github.com
 
 ---
 
-## Examples
+## How to run
 ### Interactive User Interface on Jupyter Notebook:
 For a quick and beginner-friendly workflow, use the 3 interactive GUI tools available in the [User Interface Tools](https://github.com/BaturalpArisoy/stac2cube/tree/main/interactive/User_Interface_Tools.ipynb). <br>
 
