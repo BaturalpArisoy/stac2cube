@@ -18,54 +18,102 @@ warnings.filterwarnings("ignore", category=NotGeoreferencedWarning)
 def get_cloud_layers(
     polygon=None,
     daterange=None,
-    output_clouds=None,    
-    output_masked=None,     
-    output=None,           
+    output_clouds=None,
+    output_masked=None,
+    output=None,
     threshold=None,
     clip_raster=None,
     masking=None,
     update=None,
     slurm_timer=None,
 ):
-
-    
     if output_clouds is None and output is not None:
         output_clouds = output
+
+    # If we are called from an existing cube (seasonal mode), we must use its exact time list
+    reference_times = None
 
     if masking:
         stac_parameters = get_stac_parameters(masking)
         polygon = stac_parameters["polygon"]
         daterange = stac_parameters["daterange"]
+
+        # Use the exact seasonal timestamps from the initial cube
+        with xr.open_dataset(masking) as ds:
+            if "Spectral_Temporal_Stack" in ds:
+                reference_times = ds["Spectral_Temporal_Stack"].time.values
+            else:
+                reference_times = ds["time"].values
+
     if update:
         stac_parameters = get_stac_parameters(update)
         polygon = stac_parameters["polygon"]
-        #output_clouds = update
-    else:
-        if not daterange:
-            raise ValueError("Error: Please select a daterange.")
-        if not polygon:
-            raise ValueError(
-                "Error: Please select a polygon or bbox list with geographic coordinates."
-            )
+        if daterange is None:
+            daterange = stac_parameters.get("daterange")
+
+        # In update mode, restrict to the times already present in the existing cloud cube
+        with xr.open_dataset(update) as ds:
+            if "Cloud_Stack" in ds:
+                reference_times = ds["Cloud_Stack"].time.values
+            else:
+                reference_times = ds["time"].values
+
+    if not daterange:
+        raise ValueError("Error: Please select a daterange.")
+    if not polygon:
+        raise ValueError("Error: Please select a polygon or bbox list with geographic coordinates.")
 
     # --- STAC Retrieval ---
-    # Default maximum cloud cover and mission configuration.
     max_cc = 100
     mission = "sentinel_2_l1c"
     bands = [
-        "coastal",
-        "blue",
-        "red",
-        "rededge1",
-        "nir",
-        "nir08",
-        "nir09",
-        "cirrus",
-        "swir16",
-        "swir22",
+        "coastal", "blue", "red", "rededge1", "nir", "nir08", "nir09",
+        "cirrus", "swir16", "swir22",
     ]
 
-    # Retrieve the lazy STAC DataArray.
+    def _filter_to_reference_times(stac_da: xr.DataArray, ref_times) -> xr.DataArray:
+        st = np.asarray(stac_da.time.values).astype("datetime64[ns]")
+        rt = np.asarray(ref_times).astype("datetime64[ns]")
+
+        # 1) exact timestamp match
+        if np.all(np.isin(rt, st)):
+            order = [int(np.where(st == t)[0][0]) for t in rt]
+            out = stac_da.isel(time=order).assign_coords(time=ref_times)
+            return out
+
+        # 2) fallback: day-level matching (handles duplicates in the reference list)
+        st_d = st.astype("datetime64[D]")
+        rt_d = rt.astype("datetime64[D]")
+
+        from collections import defaultdict
+        pos = defaultdict(list)
+        for i, d in enumerate(st_d):
+            pos[d].append(i)
+
+        used = defaultdict(int)
+        order = []
+        missing = []
+        for d in rt_d:
+            k = used[d]
+            if d not in pos or k >= len(pos[d]):
+                missing.append(d)
+            else:
+                order.append(pos[d][k])
+                used[d] += 1
+
+        if missing:
+            ex = ", ".join(np.datetime_as_string(m, unit="D") for m in missing[:5])
+            raise ValueError(
+                "Cloud STAC retrieval is missing some reference dates. "
+                f"Missing (first up to 5): {ex}"
+            )
+
+        out = stac_da.isel(time=order)
+        # Keep the reference time coordinate for alignment
+        if out.sizes["time"] == len(ref_times):
+            out = out.assign_coords(time=ref_times)
+        return out
+
     stac = get_stac_layers(
         mission=mission,
         polygon=polygon,
@@ -75,6 +123,10 @@ def get_cloud_layers(
         clip_raster=clip_raster,
         q=True,
     )
+
+    if reference_times is not None:
+        stac = _filter_to_reference_times(stac, reference_times)
+
     crs = stac.crs
     transform = stac.transform
     bbox = stac.bbox
