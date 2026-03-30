@@ -314,7 +314,7 @@ def coregister_cube(
         stac, masked_stac, cloud_pct_da, input_path_str = _load_coreg_input(
             _input_obj, stack_name=stack_name
         )
-
+        input_crs_attr = masked_stac.attrs.get("crs", None)
         # replace hard-coded test filters
         filtered_data = _apply_time_and_cloud_filters(
             masked_stac, max_cc=max_cc, time_period=time_period
@@ -531,6 +531,8 @@ def coregister_cube(
             "time", "band", "y", "x"
         )
         corrected_stack = corrected_stack.rio.write_crs(crs_wkt, inplace=True)
+        if input_crs_attr is not None:
+            corrected_stack.attrs["crs"] = input_crs_attr
         corrected_stack.name = "Spectral_Temporal_Stack"
 
         out_ds = xr.Dataset({"Spectral_Temporal_Stack": corrected_stack})
@@ -680,7 +682,7 @@ def coregister_cube_roi(
         stac, masked_stac, cloud_pct_da, input_path_str = _load_coreg_input(
             _input_obj, stack_name=stack_name
         )
-
+        input_crs_attr = masked_stac.attrs.get("crs", None)
         filtered_data = _apply_time_and_cloud_filters(
             masked_stac, max_cc=max_cc, time_period=time_period
         )
@@ -858,6 +860,8 @@ def coregister_cube_roi(
             "time", "band", "y", "x"
         )
         corrected_stack = corrected_stack.rio.write_crs(crs_wkt, inplace=True)
+        if input_crs_attr is not None:
+            corrected_stack.attrs["crs"] = input_crs_attr
         corrected_stack.name = "Spectral_Temporal_Stack"
 
         out_ds = xr.Dataset({"Spectral_Temporal_Stack": corrected_stack})
