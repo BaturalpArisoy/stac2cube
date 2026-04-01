@@ -1020,6 +1020,14 @@ def _stretch_to_uint8(rgb_yxb, p2=2, p98=98):
     return (img * 255).astype(np.uint8)
 
 
+def _to_dmy(time_values):
+    """Convert a numpy datetime64 array to a list of 'dd.mm.yyyy' strings."""
+    return [
+        "{2}.{1}.{0}".format(*np.datetime_as_string(t, unit="D").split("-"))
+        for t in time_values
+    ]
+
+
 def spectral_profiler(
     before_path, after_path, stack_name="Spectral_Temporal_Stack", rgb_time="first"
 ):
@@ -1068,11 +1076,15 @@ def spectral_profiler(
             text="NDVI Spectral Profile",
             x=0.5,
             xanchor="center",
-            pad=dict(t=10, b=20),  # <-- extra space below title
+            pad=dict(t=10, b=20),
         ),
-        xaxis_title="time",
+        xaxis=dict(
+            title="time",
+            tickangle=-45,   # <-- incline labels so they don't overlap
+            type="category", # <-- treat x as categorical strings, not numbers
+        ),
         yaxis_title="NDVI",
-        margin=dict(l=40, r=10, t=110, b=40),  # <-- more top margin
+        margin=dict(l=40, r=10, t=110, b=80),  # extra bottom margin for angled labels
         height=450,
         width=650,
         legend=dict(
@@ -1080,7 +1092,7 @@ def spectral_profiler(
             xanchor="left",
             x=0,
             yanchor="top",
-            y=1.08,  # <-- push legend higher
+            y=1.08,
         ),
     )
 
@@ -1098,9 +1110,9 @@ def spectral_profiler(
         s_a = stac_a.sel(band=ndvi_a).sel(x=x0, y=y0, method="nearest")
 
         with fig_ts.batch_update():
-            fig_ts.data[0].x = s_b.time.values
+            fig_ts.data[0].x = _to_dmy(s_b.time.values)  # <-- converted to dd.mm.yyyy
             fig_ts.data[0].y = s_b.values
-            fig_ts.data[1].x = s_a.time.values
+            fig_ts.data[1].x = _to_dmy(s_a.time.values)  # <-- converted to dd.mm.yyyy
             fig_ts.data[1].y = s_a.values
 
         with out:
