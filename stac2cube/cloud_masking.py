@@ -51,13 +51,6 @@ def get_cloud_layers(
         if daterange is None:
             daterange = stac_parameters.get("daterange")
 
-        # In update mode, restrict to the times already present in the existing cloud cube
-        with xr.open_dataset(update) as ds:
-            if "Cloud_Stack" in ds:
-                reference_times = ds["Cloud_Stack"].time.values
-            else:
-                reference_times = ds["time"].values
-
     if not daterange:
         raise ValueError("Error: Please select a daterange.")
     if not polygon:

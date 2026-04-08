@@ -3695,7 +3695,6 @@ def datacube_editor():
                 f"daterange={daterange}",
                 "threshold=None (cloud probability only)",
                 "Current working result was replaced with the updated Cloud_Stack.",
-                "Tip: disable Update now if you want to continue with slicing/clipping/stats on the updated cube.",
             ]
             return updated, True, msgs
 
@@ -3736,7 +3735,6 @@ def datacube_editor():
             f"daterange={daterange}",
             f"cloud_masking auto-detected from loaded cube: {cloud_masking_flag}",
             "Current working result was replaced with the updated Spectral_Temporal_Stack.",
-            "Tip: disable Update now if you want to continue with slicing/clipping/stats on the updated cube.",
         ]
         return updated, True, msgs
     
