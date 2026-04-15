@@ -192,7 +192,8 @@ def superresolve_single_time(
       2) Crop edges in HR (edge_crop_px)
       3) Apply NaN buffer in HR (nan_pixel_buffer)
     """
-    da = da.sel(band=bands_to_use).rio.set_spatial_dims("x", "y", inplace=False)
+    da = da.sel(band=bands_to_use)
+    da.rio.set_spatial_dims("x", "y", inplace=True)
 
     # This is the "cube order" for the subset you selected (used to restore at the end)
     orig_band_order = da.band.values
@@ -304,12 +305,10 @@ def superresolve_single_time(
     if time_coord is not None:
         da_hr = da_hr.assign_coords(time=time_coord)
 
-    ds_tmp = (
-        da_hr.to_dataset(name=var_name)
-        .rio.set_spatial_dims("x", "y", inplace=False)
-        .rio.write_crs(crs_wkt, inplace=False)
-        .rio.write_transform(cropped_tf, inplace=False)
-    )
+    ds_tmp = da_hr.to_dataset(name=var_name)
+    ds_tmp.rio.set_spatial_dims("x", "y", inplace=True)
+    ds_tmp.rio.write_crs(crs_wkt, inplace=True)
+    ds_tmp.rio.write_transform(cropped_tf, inplace=True)
 
     # restore "cube order" for the selected subset
     ds_tmp = ds_tmp.sel(band=orig_band_order)
@@ -325,10 +324,10 @@ def superresolve_single_time(
         y=("y", ys.astype(np.float64)),
     )
 
-    da_super = ds_tmp[var_name].rio.set_spatial_dims("x", "y", inplace=False)
-    da_super = da_super.rio.write_crs(crs_wkt, inplace=False).rio.write_transform(
-        cropped_tf, inplace=False
-    )
+    da_super = ds_tmp[var_name]
+    da_super.rio.set_spatial_dims("x", "y", inplace=True)
+    da_super.rio.write_crs(crs_wkt, inplace=True)
+    da_super.rio.write_transform(cropped_tf, inplace=True)
 
     da_super.attrs.update(orig_attrs)
     #da_super.attrs["status"] = "super-resolved"
@@ -536,11 +535,9 @@ def super_resolve_cube(
         da_super_all = _copy_time_coords(dataarray, da_super_all)
 
         tf0 = super_list[0].rio.transform()
-        da_super_all = (
-            da_super_all.rio.set_spatial_dims("x", "y", inplace=False)
-            .rio.write_crs(crs_wkt, inplace=False)
-            .rio.write_transform(tf0, inplace=False)
-        )
+        da_super_all.rio.set_spatial_dims("x", "y", inplace=True)
+        da_super_all.rio.write_crs(crs_wkt, inplace=True)
+        da_super_all.rio.write_transform(tf0, inplace=True)
 
     else:
         da_super_all = superresolve_single_time(
@@ -577,11 +574,9 @@ def super_resolve_cube(
                 stac_idx = stac_idx.expand_dims(band=[idx_name])
 
         da_super_all = xr.concat([da_super_all, stac_idx], dim="band")
-        da_super_all = (
-            da_super_all.rio.set_spatial_dims("x", "y", inplace=False)
-            .rio.write_crs(crs_wkt, inplace=False)
-            .rio.write_transform(da_super_all.rio.transform(), inplace=False)
-        )
+        da_super_all.rio.set_spatial_dims("x", "y", inplace=True)
+        da_super_all.rio.write_crs(crs_wkt, inplace=True)
+        da_super_all.rio.write_transform(tf0, inplace=True)
         da_super_all.attrs["indices"] = indices
 
     # ===========================
@@ -591,9 +586,10 @@ def super_resolve_cube(
     #da_super_all.attrs["status"] = f"super_resolved_{model_type_used}"
 
     ds_out = da_super_all.to_dataset(name=var_name)
-    ds_out = ds_out.rio.set_spatial_dims("x", "y", inplace=False)
-    ds_out = ds_out.rio.write_crs(crs_wkt, inplace=False)
-    ds_out = ds_out.rio.write_transform(da_super_all.rio.transform(), inplace=False)
+    tf_out_final = da_super_all.rio.transform()
+    ds_out.rio.set_spatial_dims("x", "y", inplace=True)
+    ds_out.rio.write_crs(crs_wkt, inplace=True)
+    ds_out.rio.write_transform(tf_out_final, inplace=True)
 
     ds_out[var_name].attrs.pop("grid_mapping", None)
     ds_out[var_name].encoding["grid_mapping"] = "spatial_ref"
