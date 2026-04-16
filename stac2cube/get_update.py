@@ -51,7 +51,10 @@ def get_stac_parameters(stac_existing):
         # Spectral bands
         spectral_bands = stac_existing.spectral_bands
         # Indices
-        indices = stac_existing.indices
+        if hasattr(stac_existing, "indices"):
+            indices = stac_existing.indices
+        else:
+            indices = None
 
     stac_parameters = {
         "mission": mission,
