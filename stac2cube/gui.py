@@ -5941,7 +5941,7 @@ def ard_cube_tools():
     sr_mode_w = widgets.Dropdown(
         options=[
             ("10-m RGBN to 2.5-m", "rgbn"),
-            ("10-m Full Spectral to 2.5-m", "full_spectral"),
+            ("10-m and 20-m Full Spectral to 2.5-m", "full_spectral"),
             ("20-m Bands to 10-m", "20to10"),
         ],
         value="rgbn",
