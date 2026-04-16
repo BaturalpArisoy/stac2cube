@@ -177,7 +177,7 @@ def get_stac_layers(
     # stac = stac.copy()
     stac.attrs.pop("nodata", None)
     try:
-        stac = stac.rio.write_nodata(None, inplace=False)
+        stac = stac.rio.write_nodata(None, inplace=True)
     except Exception:
         pass
 
@@ -191,8 +191,8 @@ def get_stac_layers(
         stac.attrs["crs"] = crs
         stac.attrs["transform"] = transform
         try:
-            stac = stac.rio.write_crs(crs, inplace=False)
-            stac = stac.rio.write_transform(transform, inplace=False)
+            stac = stac.rio.write_crs(crs, inplace=True)
+            stac = stac.rio.write_transform(transform, inplace=True)
         except Exception:
             pass
 
