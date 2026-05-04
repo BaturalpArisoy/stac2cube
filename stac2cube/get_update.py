@@ -83,6 +83,11 @@ def update_stac(stac_existing, stac_updated):
     # Compute the missing slices (only these will be computed now)
     computed_missing = stac_missing.compute()
 
+    # Floor existing times to day so the concat aligns cleanly with the new data
+    stac_existing = stac_existing.assign_coords(
+        time=stac_existing.time.astype("datetime64[D]").astype("datetime64[ns]")
+    )
+
     # Merge the computed missing data with the existing dataarray along the time dimension
     updated = xr.concat([stac_existing, computed_missing], dim="time")
     updated = updated.sortby("time")
@@ -106,6 +111,15 @@ def update_stac(stac_existing, stac_updated):
 
 
 def find_missing_times(stac_old, stac_new):
+
+    # Floor both to day-precision so timestamps like 10:23:45 vs 00:00:00
+    # on the same date are treated as equal (main.py floors stac_new already).
+    stac_old = stac_old.assign_coords(
+        time=stac_old.time.astype("datetime64[D]").astype("datetime64[ns]")
+    )
+    stac_new = stac_new.assign_coords(
+        time=stac_new.time.astype("datetime64[D]").astype("datetime64[ns]")
+    )
 
     existing_times = set(stac_old.time.values)
     updating_times = set(stac_new.time.values)
