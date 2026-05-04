@@ -5285,7 +5285,7 @@ def ard_cube_tools():
                         "Builds cloud data cube.<br> If threshold is not given, only cloud probability cube will be built. "
                         "In that case, binary mask(s) with threshold(s) can be generated in step (ii)."
                         "</div>"),
-            _stacked_field(b1_thresholds_w, "Threshold(s)"),
+            _stacked_field(b1_thresholds_w, "Threshold(s) (Optional)"),
             _stacked_field(b1_cloud_out_box, "Output cloud probability cube (NetCDF)"),
             b1_build_btn,
         ],
@@ -5401,6 +5401,14 @@ def ard_cube_tools():
             combined = xr.concat([base, new_masks], dim="band").transpose("time", "band", "y", "x")
             combined.name = "Cloud_Stack"
 
+            band_names = [str(b) for b in combined["band"].values]
+            combined = combined.assign_coords(band=np.array(band_names, dtype=object))
+
+            combined.encoding = {}
+            combined["band"].encoding = {}
+            for coord in combined.coords:
+                combined[coord].encoding = {}
+
             # --- Overwrite the same file (no need to pass crs/transform) ---
             with status_out:
                 export_stac(combined, p.as_posix(), overwrite=True, var_name="Cloud_Stack")
@@ -5431,7 +5439,7 @@ def ard_cube_tools():
                         "<b>Warning:</b> This overwrites the input NetCDF (keeps cloud_prob, adds/updates mask bands)."
                         "</div>"),
             _stacked_field(b2_prob_in_box, "Input probability cube (NetCDF)"),
-            _stacked_field(b2_thresholds_w, "Thresholds"),
+            _stacked_field(b2_thresholds_w, "Threshold(s)"),
             b2_generate_btn,
         ],
         layout=widgets.Layout(width="100%", gap="8px"),
