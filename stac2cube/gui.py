@@ -1660,7 +1660,7 @@ def datacube_builder(missions_func=missions):
         # Data Source (only applicable for Sentinel-2 L2A)
         if m_name == "sentinel_2_l2a":
             source_w.options = [
-                ("Element84 (default)", "element84"),
+                ("Element84 (Earth Search)", "element84"),
                 ("Terrabyte (DLR)", "terrabyte"),
                 ("Planetary Computer (Microsoft)", "planetary_computer"),
             ]
