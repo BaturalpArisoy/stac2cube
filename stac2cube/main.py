@@ -32,6 +32,7 @@ def get_stac_layers(
     topographic_features=None,
     animation=None,
     update=None,
+    source=None,
     q=None,
 ):
 
@@ -58,6 +59,8 @@ def get_stac_layers(
         indices = stac_parameters["indices"]
         if not isinstance(indices, list):
             indices = indices.tolist()
+        if source is None:
+            source = stac_parameters.get("stac_api", "element84")
         # NOTE: do NOT force output=update here anymore.
         # This allows update mode to return an in-memory updated cube when output=None.
     else:
@@ -73,7 +76,8 @@ def get_stac_layers(
     #    polygon = proj_check(polygon)
 
     stac, baselines, tiles = get_stac(
-        mission, polygon, resolution, daterange, bands, max_cc, cloud_masking
+        mission, polygon, resolution, daterange, bands, max_cc, cloud_masking,
+        source=source or "element84",
     )
     crs = stac.spatial_ref.projected_crs_name
     transform = stac.rio.transform()
@@ -125,6 +129,8 @@ def get_stac_layers(
     if not update:
         stac.attrs["spectral_bands"] = bands
         stac.attrs["mission"] = mission
+        _source_aliases = {"e84": "element84", "tb": "terrabyte", "pc": "planetary_computer"}
+        stac.attrs["stac_api"] = _source_aliases.get(source or "element84", source or "element84")
         if mission in ("sentinel_2_l2a", "sentinel_2_l1c"):
             tile_list = np.array(tiles, dtype="U10").tolist()
             stac.attrs["tile_id"] = tile_list

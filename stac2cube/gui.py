@@ -441,6 +441,18 @@ def datacube_builder(missions_func=missions):
         style={"description_width": "120px"},
     )
 
+    source_w = widgets.Dropdown(
+        options=[
+            ("Element84 (Earth Search)", "element84"),
+            ("Terrabyte (DLR)", "terrabyte"),
+            ("Planetary Computer (Microsoft)", "planetary_computer"),
+        ],
+        value="element84",
+        description="Data Source:",
+        layout=widgets.Layout(width="100%"),
+        style={"description_width": "120px"},
+    )
+
     resolution_w = widgets.IntText(
         value=10,
         description="Resolution:",
@@ -1126,6 +1138,7 @@ def datacube_builder(missions_func=missions):
         clip_raster = clip_raster_w.value
         cloud_masking = cloud_masking_w.value
         aggregator = aggregator_w.value
+        source = source_w.value  # None for non-S2 missions
 
         export_mode = export_mode_w.value
         export_target = (export_target_w.value or "").strip() or None
@@ -1148,6 +1161,7 @@ def datacube_builder(missions_func=missions):
             "output": output_for_get_stac,
             "aggregator": aggregator,
             "stats": stats,
+            "source": source,
             "q": True,  # hidden in UI, keep output cleaner while progress bars still show where applicable
         }
 
@@ -1307,6 +1321,7 @@ def datacube_builder(missions_func=missions):
         json_payload = {
             "parameters": {
                 "mission": mission_for_json,
+                "source": source_w.value,
                 "polygon": polygon,
                 "resolution": resolution,
                 "daterange": daterange,
@@ -1641,6 +1656,20 @@ def datacube_builder(missions_func=missions):
     def _update_from_mission(*_):
         m_name = mission_dd.value
         meta = mission_meta[m_name]
+
+        # Data Source (only applicable for Sentinel-2 L2A)
+        if m_name == "sentinel_2_l2a":
+            source_w.options = [
+                ("Element84 (default)", "element84"),
+                ("Terrabyte (DLR)", "terrabyte"),
+                ("Planetary Computer (Microsoft)", "planetary_computer"),
+            ]
+            source_w.value = "element84"
+            source_w.disabled = False
+        else:
+            source_w.options = [("Not applicable", None)]
+            source_w.value = None
+            source_w.disabled = True
 
         # Resolution
         if _is_supported(meta.get("default_resolution")):
@@ -2052,6 +2081,7 @@ def datacube_builder(missions_func=missions):
         [
             #widgets.HTML("<b>Basic Parameters</b>"),
             _stacked_field(mission_dd, "Mission"),
+            _stacked_field(source_w, "Data Source"),
             _stacked_field(resolution_w, "Resolution"),
             _with_help_left(polygon_input_box, "polygon", label_text="Polygon"),
             _with_help_left(
@@ -2217,6 +2247,7 @@ def datacube_builder(missions_func=missions):
         "state": state,
         "widgets": {
             "mission": mission_dd,
+            "source": source_w,
             "resolution": resolution_w,
             "polygon": polygon_w,
             "browse_polygon_btn": browse_polygon_btn,

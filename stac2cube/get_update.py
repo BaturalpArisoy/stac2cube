@@ -64,6 +64,7 @@ def get_stac_parameters(stac_existing):
         "spectral_bands": spectral_bands,
         "indices": indices,
         "daterange": daterange,
+        "stac_api": stac_existing.attrs.get("stac_api", "element84"),
     }
 
     return stac_parameters

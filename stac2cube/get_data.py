@@ -12,6 +12,26 @@ import re
 import datetime
 
 
+_S2_COMMON_TO_BNUM = {
+    "coastal": "B01",
+    "blue": "B02",
+    "green": "B03",
+    "red": "B04",
+    "rededge1": "B05",
+    "rededge2": "B06",
+    "rededge3": "B07",
+    "nir": "B08",
+    "nir08": "B8A",
+    "nir09": "B09",
+    "swir16": "B11",
+    "swir22": "B12",
+    "scl": "SCL",
+    "aot": "AOT",
+    "wvp": "WVP",
+}
+_S2_BNUM_TO_COMMON = {v: k for k, v in _S2_COMMON_TO_BNUM.items()}
+
+
 def get_stac(
     mission: str,
     polygon,
@@ -20,13 +40,17 @@ def get_stac(
     bands: list,
     max_cc: int,
     cloud_masking: bool,
+    source: str = "element84",
 ):
+    _source_aliases = {"e84": "element84", "tb": "terrabyte", "pc": "planetary_computer"}
+    source = _source_aliases.get(source, source)
 
     catalogues = {
-        "sentinel_2_l2a": (
-            "https://earth-search.aws.element84.com/v1/",
-            "sentinel-2-l2a",
-        ),  # sentinel-2-c1-l2a for terrabyte
+        "sentinel_2_l2a": {
+            "element84": ("https://earth-search.aws.element84.com/v1/", "sentinel-2-l2a"),
+            "terrabyte": ("https://stac.terrabyte.lrz.de/public/api/", "sentinel-2-c1-l2a"),
+            "planetary_computer": ("https://planetarycomputer.microsoft.com/api/stac/v1", "sentinel-2-l2a"),
+        },
         "sentinel_2_l1c": (
             "https://earth-search.aws.element84.com/v1/",
             "sentinel-2-l1c",
@@ -38,11 +62,11 @@ def get_stac(
         "landsat_c2_l2": (
             "https://planetarycomputer.microsoft.com/api/stac/v1",
             "landsat-c2-l2",
-        ),  # landsat-ot-c2-l2
+        ),
         "sentinel_1_rtc": (
             "https://planetarycomputer.microsoft.com/api/stac/v1",
             "sentinel-1-rtc",
-        ),  # terrabytes sentinel-1-grd does not provide crs metadata, have to write a code that detects the crs by bbox coordinates
+        ),
     }
 
     if resolution is not None:
@@ -62,13 +86,22 @@ def get_stac(
     else:
         bbox = polygon_2_bbox(polygon)
 
-    url, collection = catalogues[mission]
+    if mission == "sentinel_2_l2a":
+        sources = catalogues["sentinel_2_l2a"]
+        if source not in sources:
+            raise ValueError(
+                f"Unknown source '{source}' for sentinel_2_l2a. "
+                f"Valid options: e84, tb, pc (or full names: {list(sources.keys())})."
+            )
+        url, collection = sources[source]
+    else:
+        url, collection = catalogues[mission]
 
-    if mission in ("sentinel_1_rtc", "landsat_c2_l2"):
-        catalog = pystacclient.open(
-            url,
-            modifier=planetary_computer.sign_inplace,
-        )
+    needs_pc_auth = mission in ("sentinel_1_rtc", "landsat_c2_l2") or (
+        mission == "sentinel_2_l2a" and source == "planetary_computer"
+    )
+    if needs_pc_auth:
+        catalog = pystacclient.open(url, modifier=planetary_computer.sign_inplace)
     else:
         catalog = pystacclient.open(url)
 
@@ -114,15 +147,18 @@ def get_stac(
         items = all_items
         tiles = np.array(sorted(tiles_set)) if tiles_set else None
 
-    band_map = _get_band_map(mission)
-    if band_map is not None:
-        bands = [band_map.get(band, band) for band in bands]
+    if mission == "sentinel_2_l2a":
+        bands = list(dict.fromkeys(_S2_BNUM_TO_COMMON.get(b, b) for b in bands))
 
     if cloud_masking is True:
-        if mission == "sentinel_2_l2a":
+        if mission == "sentinel_2_l2a" and "scl" not in bands:
             bands.append("scl")
         if mission == "landsat_c2_l2":
             bands.append("qa_pixel")
+
+    band_map = _get_band_map(mission, source)
+    if band_map is not None:
+        bands = [band_map.get(band, band) for band in bands]
 
     # Pre-filter duplicate items for sentinel_2_l1c based on processing baseline
     if mission == "sentinel_2_l1c":
@@ -366,11 +402,16 @@ def _catalogue_search(catalog, collection, bbox, daterange, query, mission, allo
     # Get Sentinel tile ID
     if mission in ("sentinel_2_l2a", "sentinel_2_l1c"):
         gdf = gpd.GeoDataFrame.from_features(items, "epsg:4326")
-        gdf["granule"] = (
-            gdf["mgrs:utm_zone"].apply(lambda x: f"{x:02d}")
-            + gdf["mgrs:latitude_band"]
-            + gdf["mgrs:grid_square"]
-        )
+        if "mgrs:utm_zone" in gdf.columns:
+            gdf["granule"] = (
+                gdf["mgrs:utm_zone"].apply(lambda x: f"{x:02d}")
+                + gdf["mgrs:latitude_band"]
+                + gdf["mgrs:grid_square"]
+            )
+        elif "s2:mgrs_tile" in gdf.columns:
+            gdf["granule"] = gdf["s2:mgrs_tile"]
+        else:
+            gdf["granule"] = "unknown"
         tiles = gdf["granule"].unique()
     else:
         tiles = None
@@ -378,7 +419,9 @@ def _catalogue_search(catalog, collection, bbox, daterange, query, mission, allo
     return items, crs, stac_mission, tiles
 
 
-def _get_band_map(mission: str):
+def _get_band_map(mission: str, source: str = None):
+    if mission == "sentinel_2_l2a" and source in ("terrabyte", "planetary_computer"):
+        return dict(_S2_COMMON_TO_BNUM)
 
     band_maps = {
         "landsat_ot_c2_l2": {
@@ -407,19 +450,6 @@ def _get_band_map(mission: str):
             "qa_pixel": "qa_pixel",
             "qa_radsat": "qa_radsat",
             "qa_aerosol": "qa_aerosol",
-        },
-        "s2_placeholder": {  # Will be activated once switched to terrabyte catalog from Element84.
-            "coastal": "B01",
-            "blue": "B02",
-            "green": "B03",
-            "red": "B04",
-            "nir": "B08",
-            "red_edge1": "B05",
-            "red_edge2": "B06",
-            "red_edge3": "B07",
-            "swir1": "B11",
-            "swir2": "B12",
-            "scl": "SCL",
         },
     }
 
