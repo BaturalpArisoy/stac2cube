@@ -9,7 +9,7 @@ Copy and paste the following prompt into [Claude Code](https://claude.ai/code) (
 1. Open the `stac2cube` folder in VS Code
 2. Open Claude Code in the terminal
 3. Paste the entire prompt below and press Enter
-4. Answer the two questions it may ask (package manager choice, existing env conflict)
+4. Answer the questions it may ask (package manager choice, environment name, existing env conflict)
 5. Wait for installation to complete
 
 ---
@@ -81,6 +81,23 @@ If only ONE package manager was found, skip this question and use whichever is a
 
 ---
 
+## PHASE 3B — CHOOSE ENVIRONMENT NAME
+
+Ask the user exactly this question and wait for their response before continuing:
+
+"What should the conda environment be named?
+
+  Press Enter to use the default name: stac2cube
+  Or type a custom name and press Enter."
+
+If the user presses Enter without typing anything, use "stac2cube" as the environment name.
+If the user types a name, use that name for all subsequent steps.
+Store this as ENV_NAME for use in all following phases.
+
+Do not proceed past this point until the user replies.
+
+---
+
 ## PHASE 4 — CHECK IF ENVIRONMENT ALREADY EXISTS
 
 Run the appropriate command based on the chosen package manager:
@@ -90,8 +107,8 @@ micromamba env list
 For conda:
 conda env list
 
-If an environment named "stac2cube" already exists, ask the user:
-"A stac2cube environment already exists. 
+If an environment with the name ENV_NAME already exists, ask the user:
+"An environment named ENV_NAME already exists.
 Do you want to:
   1 — Skip installation and use the existing environment
   2 — Remove it and reinstall fresh
@@ -101,29 +118,29 @@ Reply with 1 or 2."
 Wait for the user's reply before continuing.
 
 If they reply 2, remove the existing environment first:
-- micromamba: `micromamba env remove -n stac2cube -y`
-- conda: `conda env remove -n stac2cube -y`
+- micromamba: `micromamba env remove -n ENV_NAME -y`
+- conda: `conda env remove -n ENV_NAME -y`
 
 ---
 
 ## PHASE 5 — INSTALL
 
-Based on the chosen package manager (Phase 3) and detected OS (Phase 1), run exactly one of the following. 
+Based on the chosen package manager (Phase 3), the environment name ENV_NAME (Phase 3B), and the detected OS (Phase 1), run exactly one of the following.
 Warn the user first: "⏳ Starting installation. This may take several minutes. Please wait..."
 
 Micromamba on Linux or macOS:
-micromamba env create -n stac2cube -f environment.yml
+micromamba env create -n ENV_NAME -f environment.yml
 
 Micromamba on Windows:
-micromamba env create -n stac2cube -f environment.yml
-micromamba install -n stac2cube -c conda-forge vs2015_runtime -y
+micromamba env create -n ENV_NAME -f environment.yml
+micromamba install -n ENV_NAME -c conda-forge vs2015_runtime -y
 
 Conda on Linux or macOS:
-conda env create -n stac2cube -f environment.yml
+conda env create -n ENV_NAME -f environment.yml
 
 Conda on Windows:
-conda env create -n stac2cube -f environment.yml
-conda install -n stac2cube -c conda-forge vs2015_runtime -y
+conda env create -n ENV_NAME -f environment.yml
+conda install -n ENV_NAME -c conda-forge vs2015_runtime -y
 
 If the command exits with an error, show the error to the user, diagnose it, and attempt to fix it before retrying. Do not silently continue past a failed installation.
 
@@ -131,25 +148,25 @@ If the command exits with an error, show the error to the user, diagnose it, and
 
 ## PHASE 6 — VERIFY INSTALLATION
 
-Run the appropriate env list command again and confirm "stac2cube" appears:
+Run the appropriate env list command again and confirm ENV_NAME appears:
 
 For micromamba:
 micromamba env list
 For conda:
 conda env list
 
-Then run this import check inside the stac2cube environment:
+Then run this import check inside the environment:
 
 For micromamba:
-micromamba run -n stac2cube python -c "import stac2cube; print('stac2cube imported successfully')"
+micromamba run -n ENV_NAME python -c "import stac2cube; print('stac2cube imported successfully')"
 For conda:
-conda run -n stac2cube python -c "import stac2cube; print('stac2cube imported successfully')"
+conda run -n ENV_NAME python -c "import stac2cube; print('stac2cube imported successfully')"
 
 If the import succeeds, tell the user:
 "✅ Installation complete. stac2cube is ready.
 
 To activate the environment in your terminal:
-  micromamba activate stac2cube   (or: conda activate stac2cube)
+  micromamba activate ENV_NAME   (or: conda activate ENV_NAME)
 
 To start using it, open the interactive notebooks in the /interactive folder."
 
@@ -159,7 +176,8 @@ If the import fails, show the exact error, diagnose it, and attempt to resolve i
 
 ## RULES
 - Run each terminal command yourself. Do not ask the user to run anything.
-- Only ask the user questions at Phase 3 (package manager choice) and Phase 4 (existing env conflict). These are the only two decisions a human must make.
+- Only ask the user questions at Phase 3 (package manager choice), Phase 3B (environment name), and Phase 4 (existing env conflict). These are the only decisions a human must make.
+- In all commands, replace ENV_NAME with the actual name chosen by the user in Phase 3B.
 - Never report success unless you have confirmed it with actual command output.
 - If anything fails unexpectedly, report what happened honestly and stop rather than guessing.
 ```
