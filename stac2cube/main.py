@@ -6,7 +6,7 @@ from .export_cfg import export_stac
 
 # from .get_topo import calculate_topo
 # from .time_series_tools import generate_animation
-from .clip import clip_stac
+from .clip import clip_stac, compute_cloud_percentage
 from .get_statistics import calculate_statistics
 from .get_update import get_stac_parameters, update_stac
 
@@ -168,14 +168,15 @@ def get_stac_layers(
         stac["time"] = stac["time"].dt.floor("D")
 
         if cloud_masking is True:
-            null_count_per_time = stac.isnull().sum(dim=["band", "y", "x"])
-            total_elements = stac.sizes["band"] * stac.sizes["y"] * stac.sizes["x"]
-            cloud_percentage_int = (
-                (null_count_per_time / total_elements) * 100
-            ).astype(int)
-            stac = stac.assign_coords(
-                cloud_percentage=("time", cloud_percentage_int.data)
-            )
+            # Cloud % is measured against the observable AOI footprint: pixels
+            # missing in every scene (incl. anything outside a non-rectangular
+            # clip) are excluded from both numerator and denominator, so only
+            # real clouds count.
+            pct = compute_cloud_percentage(stac)
+            if pct is not None:
+                stac = stac.assign_coords(
+                    cloud_percentage=("time", np.asarray(pct.data))
+                )
 
     stac.attrs["crs"] = crs
     stac.attrs["transform"] = transform

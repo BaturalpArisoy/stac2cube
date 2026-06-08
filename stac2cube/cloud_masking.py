@@ -7,6 +7,7 @@ import xarray as xr
 import sys
 from tqdm.auto import tqdm
 from .export_cfg import export_stac
+from .clip import compute_cloud_percentage
 import rioxarray as rio
 import cv2
 import os
@@ -282,15 +283,14 @@ def mask_stac_clouds(stac, cloud, mask_layer, output=None):
     cloud_mask = cloud.sel(band=mask_layer)
     masked_stac = stac.where(cloud_mask == 0)
 
-    # Calculate cloud percentage per time slice.
-    null_count_per_time = masked_stac.isnull().sum(dim=["band", "y", "x"])
-    total_elements = (
-        masked_stac.sizes["band"] * masked_stac.sizes["y"] * masked_stac.sizes["x"]
-    )
-    cloud_percentage_int = ((null_count_per_time / total_elements) * 100).astype(int)
-    masked_stac = masked_stac.assign_coords(
-        cloud_percentage=("time", cloud_percentage_int.data)
-    )
+    # Cloud percentage per time slice, measured against the observable AOI
+    # footprint: pixels missing in every scene (incl. anything outside a
+    # non-rectangular clip) are excluded from numerator and denominator.
+    pct = compute_cloud_percentage(masked_stac)
+    if pct is not None:
+        masked_stac = masked_stac.assign_coords(
+            cloud_percentage=("time", np.asarray(pct.data))
+        )
 
     #export_stac(masked_stac, output)
     if output is not None:
