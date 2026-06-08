@@ -14,8 +14,9 @@ def _aoi_mask_from_geometries(stac, geometries):
         [getattr(g, "__geo_interface__", g) for g in geometries],
         out_shape=out_shape,
         transform=transform,
-        invert=True,       # True INSIDE the geometries
-        all_touched=True,  # keep boundary pixels
+        invert=True,        # True INSIDE the geometries
+        all_touched=False,  # match rio.clip's pixel selection (center-in), so the
+                            # boundary pixels rio.clip drops aren't counted as cloud
     )
     return xr.DataArray(
         mask, dims=("y", "x"), coords={"y": stac["y"], "x": stac["x"]}
@@ -61,10 +62,14 @@ def compute_cloud_percentage(stac, aoi_mask=None):
 
     denom = int(footprint.sum()) * nbands
     if denom == 0:
-        return xr.zeros_like(stac["time"], dtype=int)
+        return xr.zeros_like(stac["time"], dtype="int16")
 
     nan_in = (isnull & footprint).sum(dim=reduce_dims)  # per-time NaN count in AOI
-    pct = ((nan_in / denom) * 100).astype(int)
+    # Integer percent, rounded UP: any cloud at all -> at least 1%, so that 0%
+    # reliably means a cloud-free scene when filtering. The 1e-9 guard keeps an
+    # exact integer percentage from being bumped up by floating-point noise.
+    frac = (nan_in / denom) * 100.0
+    pct = np.ceil(frac - 1e-9).astype("int16")
     if getattr(pct, "chunks", None) is not None:
         pct = pct.compute()
     return pct
