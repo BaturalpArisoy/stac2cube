@@ -5,6 +5,7 @@ from s2cloudless import S2PixelCloudDetector
 import numpy as np
 import xarray as xr
 import sys
+from tqdm.auto import tqdm
 from .export_cfg import export_stac
 import rioxarray as rio
 import cv2
@@ -154,7 +155,16 @@ def get_cloud_layers(
         slurm_timer = slurm_timer * 3600
         start_time = time.time()
 
-    for i, t in enumerate(stac.time.values, start=1):
+    progress = tqdm(
+        stac.time.values,
+        total=total,
+        desc="Computing",
+        unit="scene",
+        file=sys.stdout,
+        dynamic_ncols=False,
+    )
+    for t in progress:
+        progress.set_description(f"Computing {np.datetime_as_string(t, unit='D')}")
         # Retrieve and compute the current time slice.
         img = stac.sel(time=t).compute()
         times.append(t)
@@ -167,18 +177,13 @@ def get_cloud_layers(
         cp_3d = cloud_detector.get_cloud_probability_maps(img_np)
         cp = cp_3d[0]
         cloud_prob_results.append(cp)
-
-        t_str = np.datetime_as_string(t, unit="D")  # -> "YYYY-MM-DD"
-        print(f"Processed time slice: {i}/{total} (time: {t_str})", flush=True)
         del img, img_transposed, img_np
 
         if slurm_timer:
-            # Calculate the elapsed time
-            elapsed = time.time() - start_time
-            hours, rem = divmod(elapsed, 3600)
-            minutes, seconds = divmod(rem, 60)
             # Check if the elapsed time has reached or exceeded the threshold
+            elapsed = time.time() - start_time
             if elapsed >= slurm_timer:
+                progress.close()
                 print(
                     "Time threshold reached! Exiting loop and exporting the collected cloud maps..."
                 )
