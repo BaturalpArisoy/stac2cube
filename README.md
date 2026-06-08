@@ -60,24 +60,50 @@ The result is a data cube that is cloud-masked with customizable thresholds, spa
 ## Installation
 Installation is possible with package managers like [Micromamba](https://mamba.readthedocs.io/en/latest/installation/micromamba-installation.html) & [Anaconda](https://www.anaconda.com/docs/getting-started/anaconda/install).<br>
 
-Following steps are example how to install with Micromamba or Anaconda.<br><br>
+Choose one of the two methods below:
 
-### Step 1: Clone the repository to your current working directory
+---
+
+### Option A — Automated Installation via Claude Code (Recommended)
+
+If you have [Claude Code](https://claude.ai/code) available, the entire installation can be handled automatically — no manual commands needed.
+
+1. Open the `stac2cube` folder in VS Code
+2. Open Claude Code in the terminal (or any Claude agent with terminal access)
+3. Open [INSTALL_PROMPT.md](INSTALL_PROMPT.md), copy the full prompt inside the code block, and paste it into Claude Code
+4. Claude will detect your OS and package manager, then ask you **at most two questions**:
+   - Which package manager to use (only if both Micromamba and conda are found)
+   - Whether to keep or replace an existing `stac2cube` environment (only if one already exists)
+5. Everything else runs automatically. Claude verifies the install before reporting success.
+
+---
+
+### Option B — Manual Installation
+
+#### Step 1: Clone the repository to your current working directory
+
     $ git clone https://github.com/BaturalpArisoy/stac2cube.git
 
 If git is not available for you, download and unzip the file: https://github.com/BaturalpArisoy/stac2cube/archive/refs/heads/main.zip
 
-### Step 2: Change directory to cloned stac2cube folder 
+#### Step 2: Change directory to cloned stac2cube folder
+
     $ cd "path/to/stac2cube/"
 
 *environment.yml* file should be present in this path, please double check.
 
-### Step 3: Install stac2cube via Micromamba or Anaconda Prompt (this might take a while!)
-#### a) LINUX
+#### Step 3: Install stac2cube via Micromamba or Anaconda Prompt (this might take a while!)
+
+##### a) LINUX
+
     $ micromamba env create -n stac2cube -f environment.yml
-#### b1) WINDOWS Micromamba
+
+##### b1) WINDOWS Micromamba
+
     $ micromamba env create -n stac2cube -f environment.yml; micromamba install -n stac2cube -c conda-forge vs2015_runtime
-#### b2) WINDOWS Anaconda Prompt
+
+##### b2) WINDOWS Anaconda Prompt
+
     $ conda env create -n stac2cube -f environment.yml && conda activate stac2cube && conda install -c conda-forge vs2015_runtime
 
 ---
