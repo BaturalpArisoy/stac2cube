@@ -64,21 +64,7 @@ Choose one of the two methods below:
 
 ---
 
-### Option A — Automated Installation via Claude Code (Recommended)
-
-If you have [Claude Code](https://claude.ai/code) available, the entire installation can be handled automatically — no manual commands needed.
-
-1. Open the `stac2cube` folder in VS Code
-2. Open Claude Code in the terminal (or any Claude agent with terminal access)
-3. Open [INSTALL_PROMPT.md](INSTALL_PROMPT.md), copy the full prompt inside the code block, and paste it into Claude Code
-4. Claude will detect your OS and package manager, then ask you **at most two questions**:
-   - Which package manager to use (only if both Micromamba and conda are found)
-   - Whether to keep or replace an existing `stac2cube` environment (only if one already exists)
-5. Everything else runs automatically. Claude verifies the install before reporting success.
-
----
-
-### Option B — Manual Installation
+### Option A — Manual Installation
 
 #### Step 1: Clone the repository to your current working directory
 
@@ -105,6 +91,20 @@ If git is not available for you, download and unzip the file: https://github.com
 ##### b2) WINDOWS Anaconda Prompt
 
     $ conda env create -n stac2cube -f environment.yml && conda activate stac2cube && conda install -c conda-forge vs2015_runtime
+
+---
+
+### Option B — Automated Installation via Claude Code
+
+If you have [Claude Code](https://claude.ai/code) available, the entire installation can be handled automatically — no manual commands needed.
+
+1. Open the `stac2cube` folder in VS Code
+2. Open Claude Code in the terminal (or any Claude agent with terminal access)
+3. Open [INSTALL_PROMPT.md](INSTALL_PROMPT.md), copy the full prompt inside the code block, and paste it into Claude Code
+4. Claude will detect your OS and package manager, then ask you **at most two questions**:
+   - Which package manager to use (only if both Micromamba and conda are found)
+   - Whether to keep or replace an existing `stac2cube` environment (only if one already exists)
+5. Everything else runs automatically. Claude verifies the install before reporting success.
 
 ---
 

@@ -33,6 +33,19 @@ from stac2cube import (
     super_resolve_cube
 )
 
+from .gui_common import (
+    human_readable_bytes as _human_readable_bytes,
+    estimated_data_size_bytes as _estimated_data_size_bytes,
+    normalize_ui_path as _normalize_ui_path,
+    existing_dir_or_parent as _existing_dir_or_parent,
+    is_str_list_len2 as _is_str_list_len2,
+    validate_date_string as _validate_date_string,
+    parse_daterange_input as _parse_daterange_input,
+    gui_css_widget as _gui_css_widget,
+    stacked_field as _stacked_field,
+    stacked_field_with_help as _field_with_help,
+)
+
 
 # -------------------------------------------------------------------------
 # Parameter help
@@ -120,138 +133,10 @@ PARAM_HELP_HTML = {
 }
 
 
-def _make_help_toggle(help_key: str):
-    btn = widgets.Button(
-        description="?",
-        tooltip="Show help",
-        layout=widgets.Layout(
-            width="22px", min_width="22px", height="22px", padding="0px"
-        ),
-    )
-    btn.add_class("stac2cube-help-btn")
-    btn.style.button_color = "#2563eb"
-    try:
-        btn.style.text_color = "white"
-    except Exception:
-        pass
-    try:
-        btn.style.font_weight = "bold"
-    except Exception:
-        pass
-
-    help_html = widgets.HTML(
-        value=f"""
-        <div style="
-            border:1px solid #dbeafe;
-            border-radius:8px;
-            padding:8px 10px;
-            margin:2px 0 8px 0;
-            line-height:1.35;
-            font-size:12.5px;
-            background:#eff6ff;
-        ">
-            {PARAM_HELP_HTML.get(help_key, "No help available.")}
-        </div>
-        """,
-        layout=widgets.Layout(display="none"),
-    )
-
-    def _toggle(_):
-        help_html.layout.display = "" if help_html.layout.display == "none" else "none"
-
-    btn.on_click(_toggle)
-    return btn, help_html
-
-
-def _with_help_left(widget, help_key: str, label_text: str = None):
-    """
-    Label + ? on first row, widget on next row, help box below.
-    """
-    btn, help_html = _make_help_toggle(help_key)
-
-    if label_text is None and hasattr(widget, "description"):
-        label_text = widget.description or ""
-    label_text = (label_text or "").strip()
-    if label_text and not label_text.endswith(":"):
-        label_text = f"{label_text}:"
-
-    if hasattr(widget, "description"):
-        try:
-            widget.description = ""
-        except Exception:
-            pass
-    if hasattr(widget, "style"):
-        try:
-            widget.style.description_width = "0px"
-        except Exception:
-            pass
-
-    label_html = widgets.HTML(
-        value=f"""
-        <div style="
-            font-weight:500;
-            line-height:1.2;
-            white-space:nowrap;
-            margin:0;
-            padding:0;
-        ">{label_text}</div>
-        """,
-        layout=widgets.Layout(width="auto"),
-    )
-
-    label_row = widgets.HBox(
-        [label_html, btn],
-        layout=widgets.Layout(
-            width="auto",
-            align_items="center",
-            justify_content="flex-start",
-            gap="4px",
-        ),
-    )
-
-    widget_box = widgets.Box([widget], layout=widgets.Layout(width="100%"))
-
-    return widgets.VBox(
-        [label_row, widget_box, help_html], layout=widgets.Layout(width="100%")
-    )
-
-
-def _stacked_field(widget, label_text: str = None):
-    """
-    Label on first row, widget on next row (no help icon).
-    """
-    if label_text is None and hasattr(widget, "description"):
-        label_text = widget.description or ""
-    label_text = (label_text or "").strip()
-    if label_text and not label_text.endswith(":"):
-        label_text = f"{label_text}:"
-
-    if hasattr(widget, "description"):
-        try:
-            widget.description = ""
-        except Exception:
-            pass
-    if hasattr(widget, "style"):
-        try:
-            widget.style.description_width = "0px"
-        except Exception:
-            pass
-
-    label_html = widgets.HTML(
-        value=f"""
-        <div style="
-            font-weight:500;
-            line-height:1.2;
-            white-space:nowrap;
-            margin:0;
-            padding:0;
-        ">{label_text}</div>
-        """,
-        layout=widgets.Layout(width="auto"),
-    )
-
-    widget_box = widgets.Box([widget], layout=widgets.Layout(width="100%"))
-    return widgets.VBox([label_html, widget_box], layout=widgets.Layout(width="100%"))
+def _with_help_left(widget, help_key, label_text=None):
+    """Builder field with a help (?) toggle. Resolves the help text from the
+    builder's PARAM_HELP_HTML and delegates layout to the shared helper."""
+    return _field_with_help(widget, label_text, PARAM_HELP_HTML.get(help_key, ""))
 
 
 def datacube_builder(missions_func=missions):
@@ -400,14 +285,6 @@ def datacube_builder(missions_func=missions):
         elif mode_value == "seasonal_years":
             return '{"season": ["04-01", "10-31"], "years": [2019, 2020, 2021]}'
         return '["2024-04-01", "2024-04-10"]'
-
-    def _normalize_ui_path(path_str: str):
-        if not path_str:
-            return ""
-        try:
-            return os.path.normpath(str(path_str))
-        except Exception:
-            return str(path_str)
 
     # -------------------------------------------------------------------------
     # Load and prepare missions metadata
@@ -630,6 +507,8 @@ def datacube_builder(missions_func=missions):
         border_radius="8px",
         width="100%",
         min_height="70px",
+        max_height="260px",
+        overflow="auto",
     ))
 
     viz_out = widgets.Output(layout=widgets.Layout(
@@ -853,124 +732,9 @@ def datacube_builder(missions_func=missions):
 
         return s
 
-    def _is_str_list_len2(obj):
-        return (
-            isinstance(obj, (list, tuple))
-            and len(obj) == 2
-            and all(isinstance(x, str) for x in obj)
-        )
-
-    def _validate_date_string(s: str, pattern: str, label: str):
-        if not re.match(pattern, s):
-            raise ValueError(f"Invalid {label}: '{s}'")
-
-    def _parse_daterange_input(mode: str, text: str):
-        """
-        Returns Python object expected by get_stac_layers:
-        - None
-        - ["YYYY-MM-DD", "YYYY-MM-DD"]
-        - ["MM-DD", "MM-DD"]
-        - {"season": [...], "years": ...}
-        """
-        s = (text or "").strip()
-        if s == "":
-            return None
-
-        try:
-            obj = ast.literal_eval(s)
-        except Exception as e:
-            raise ValueError(
-                f"Daterange could not be parsed. Please use Python-style list/dict syntax. ({e})"
-            )
-
-        if mode == "standard":
-            if not _is_str_list_len2(obj):
-                raise ValueError('Standard mode expects: ["YYYY-MM-DD", "YYYY-MM-DD"]')
-            for d in obj:
-                _validate_date_string(d, r"^\d{4}-\d{2}-\d{2}$", "date (YYYY-MM-DD)")
-            return list(obj)
-
-        elif mode == "seasonal":
-            if not _is_str_list_len2(obj):
-                raise ValueError('Seasonal mode expects: ["MM-DD", "MM-DD"]')
-            for d in obj:
-                _validate_date_string(d, r"^\d{2}-\d{2}$", "season date (MM-DD)")
-            return list(obj)
-
-        elif mode == "seasonal_years":
-            if not isinstance(obj, dict):
-                raise ValueError(
-                    "Seasonal + year control expects a dict, e.g. "
-                    '{"season": ["04-01", "10-31"], "years": [2019, 2020]}'
-                )
-
-            if "season" not in obj or "years" not in obj:
-                raise ValueError(
-                    'Seasonal + year control requires keys: "season" and "years"'
-                )
-
-            season = obj["season"]
-            years = obj["years"]
-
-            if not _is_str_list_len2(season):
-                raise ValueError('"season" must be ["MM-DD", "MM-DD"]')
-            for d in season:
-                _validate_date_string(d, r"^\d{2}-\d{2}$", "season date (MM-DD)")
-
-            valid_years = False
-            if years == "all":
-                valid_years = True
-            elif isinstance(years, str) and re.match(r"^\d{4}-\d{4}$", years):
-                valid_years = True
-            elif isinstance(years, (list, tuple)) and all(
-                isinstance(y, int) for y in years
-            ):
-                valid_years = True
-
-            if not valid_years:
-                raise ValueError(
-                    '"years" must be one of: "all", "YYYY-YYYY", or a list of years like [2019, 2020, 2021]'
-                )
-
-            return {"season": list(season), "years": years}
-
-        else:
-            raise ValueError(f"Unknown Date Range Mode: {mode}")
-
     # -------------------------------------------------------------------------
     # Result summary (minimal)
     # -------------------------------------------------------------------------
-    def _human_readable_bytes(n):
-        if n is None:
-            return "unknown"
-        n = float(n)
-        units = ["B", "KB", "MB", "GB", "TB", "PB"]
-        i = 0
-        while n >= 1024 and i < len(units) - 1:
-            n /= 1024.0
-            i += 1
-        return f"{n:.2f} {units[i]}"
-
-    def _estimated_data_size_bytes(obj):
-        """
-        Estimated uncompressed data size (shape * dtype), no compute triggered.
-        This is NOT final exported file size on disk.
-        """
-        try:
-            if isinstance(obj, xr.DataArray):
-                return int(getattr(obj, "nbytes", 0))
-            elif isinstance(obj, xr.Dataset):
-                total = 0
-                for _, da in obj.data_vars.items():
-                    try:
-                        total += int(getattr(da, "nbytes", 0))
-                    except Exception:
-                        pass
-                return total
-            return None
-        except Exception:
-            return None
-
     def _show_result_summary(obj):
         with result_out:
             clear_output()
@@ -1407,29 +1171,6 @@ def datacube_builder(missions_func=missions):
     def _hide_gif_out_chooser():
         gif_out_fc_box.layout.display = "none"
 
-    def _existing_dir_or_parent(path_str: str):
-        s = (path_str or "").strip()
-        if not s:
-            return str(Path(".").resolve())
-
-        p = Path(s)
-        if p.is_dir():
-            try:
-                return str(p.resolve())
-            except Exception:
-                return str(p)
-
-        if p.exists():
-            try:
-                return str(p.parent.resolve())
-            except Exception:
-                return str(p.parent)
-
-        parent = p.parent if str(p.parent) not in ("", ".") else Path(".")
-        try:
-            return str(parent.resolve())
-        except Exception:
-            return str(parent)
 
     def _sync_polygon_filechooser_from_text():
         if not filechooser_available or polygon_fc is None:
@@ -1979,38 +1720,7 @@ def datacube_builder(missions_func=missions):
     FORM_WIDTH = "96%"
     FORM_MAX_WIDTH = "950px"
 
-    css_patch = widgets.HTML(
-        """
-        <style>
-        .stac2cube-card {
-            border: 1px solid #e5e7eb;
-            border-radius: 12px;
-            padding: 12px;
-            background: #fafbfc;
-            box-shadow: 0 1px 2px rgba(0,0,0,0.04);
-        }
-        .stac2cube-help-btn,
-        .stac2cube-help-btn button,
-        .stac2cube-help-btn .widget-button {
-            border-radius: 50% !important;
-            width: 22px !important;
-            min-width: 22px !important;
-            height: 22px !important;
-            min-height: 22px !important;
-            padding: 0 !important;
-            line-height: 20px !important;
-            text-align: center !important;
-        }
-        .stac2cube-help-btn button,
-        .stac2cube-help-btn .widget-button {
-            display: inline-flex !important;
-            align-items: center !important;
-            justify-content: center !important;
-            font-weight: 700 !important;
-        }
-        </style>
-        """
-    )
+    css_patch = _gui_css_widget()
 
     header = widgets.HTML(
         "<div style='margin:0 0 4px 0; font-size:28px; font-weight:700;'>Data Cube Builder</div>"
@@ -2217,12 +1927,13 @@ def datacube_builder(missions_func=missions):
             status_card,
         ],
         layout=widgets.Layout(
-            width="50%",
+            width="100%",
             max_width=FORM_MAX_WIDTH,
             margin="0 auto",
             gap="8px",
         ),
     )
+    ui.add_class("stac2cube-root")
 
     # Initialize mission-dependent widgets and defaults
     _update_from_mission()
@@ -2383,38 +2094,6 @@ def datacube_editor():
     # ---------------------------------------------------------------------
     # Helpers
     # ---------------------------------------------------------------------
-    def _normalize_ui_path(path_str):
-        if not path_str:
-            return ""
-        try:
-            return os.path.normpath(str(path_str))
-        except Exception:
-            return str(path_str)
-
-    def _human_readable_bytes(n):
-        if n is None:
-            return "unknown"
-        n = float(n)
-        units = ["B", "KB", "MB", "GB", "TB", "PB"]
-        i = 0
-        while n >= 1024 and i < len(units) - 1:
-            n /= 1024.0
-            i += 1
-        return f"{n:.2f} {units[i]}"
-
-    def _estimated_data_size_bytes(obj):
-        try:
-            if isinstance(obj, xr.DataArray):
-                return int(getattr(obj, "nbytes", 0))
-            if isinstance(obj, xr.Dataset):
-                total = 0
-                for _, da in obj.data_vars.items():
-                    total += int(getattr(da, "nbytes", 0))
-                return total
-            return None
-        except Exception:
-            return None
-
     def _show_preview(out_widget, obj, title_prefix=None):
         with out_widget:
             clear_output()
@@ -2479,29 +2158,6 @@ def datacube_editor():
             )
 
         raise TypeError(f"Unsupported object type for stats: {type(obj)}")
-
-    def _existing_dir_or_parent(path_str):
-        s = (path_str or "").strip()
-        if not s:
-            return str(Path(".").resolve())
-
-        p = Path(s)
-        if p.is_dir():
-            try:
-                return str(p.resolve())
-            except Exception:
-                return str(p)
-        if p.exists():
-            try:
-                return str(p.parent.resolve())
-            except Exception:
-                return str(p.parent)
-
-        parent = p.parent if str(p.parent) not in ("", ".") else Path(".")
-        try:
-            return str(parent.resolve())
-        except Exception:
-            return str(parent)
 
     def _loaded_stem_default():
         p = state.get("loaded_path")
@@ -2804,57 +2460,8 @@ def datacube_editor():
     # ---------------------------------------------------------------------
     # Question mark help UI helpers
     # ---------------------------------------------------------------------
-    def _help_icon_button():
-        b = widgets.Button(
-            description="?",
-            tooltip="Show help",
-            layout=widgets.Layout(width="22px", height="22px", padding="0px", min_width="22px"),
-        )
-        b.style.button_color = "#dbeafe"
-        b.add_class("stac2cube-help-btn")
-        return b
-
     def _stacked_field_with_help(widget, label_text, help_key):
-        try:
-            widget.description = ""
-        except Exception:
-            pass
-        try:
-            widget.style.description_width = "0px"
-        except Exception:
-            pass
-
-        label_html = widgets.HTML(
-            f"<div style='font-weight:500; line-height:1.2; margin:0; padding:0;'>{label_text}:</div>"
-        )
-        q_btn = _help_icon_button()
-
-        help_box = widgets.HTML(
-            value=HELP_HTML.get(help_key, ""),
-            layout=widgets.Layout(
-                display="none",
-                border="1px solid #dbeafe",
-                padding="8px",
-                border_radius="8px",
-                margin="2px 0 2px 0",
-                width="100%",
-            ),
-        )
-
-        def _toggle_help(_):
-            help_box.layout.display = "" if help_box.layout.display == "none" else "none"
-
-        q_btn.on_click(_toggle_help)
-
-        header_row = widgets.HBox(
-            [label_html, q_btn],
-            layout=widgets.Layout(align_items="center", gap="6px"),
-        )
-
-        return widgets.VBox(
-            [header_row, help_box, widget],
-            layout=widgets.Layout(width="100%", gap="4px"),
-        )
+        return _field_with_help(widget, label_text, HELP_HTML.get(help_key, ""))
 
     # ---------------------------------------------------------------------
     # File chooser helpers (optional)
@@ -3314,6 +2921,8 @@ def datacube_editor():
             border_radius="8px",
             width="100%",
             min_height="80px",
+            max_height="260px",
+            overflow="auto",
         )
     )
 
@@ -3332,6 +2941,7 @@ def datacube_editor():
     # ---------------------------------------------------------------------
     state = {
         "loaded_path": None,
+        "loaded_ds": None,        # open (lazy) xr.Dataset; kept open for on-demand reads
         "loaded_original": None,  # untouched Spectral_Temporal_Stack DataArray
         "current": None,          # working result (DataArray or Dataset after stats)
         "last_export_info": None,
@@ -3447,77 +3057,6 @@ def datacube_editor():
 
         state["last_auto_update_daterange_example"] = new_example
 
-    def _is_str_list_len2(obj):
-        return (
-            isinstance(obj, (list, tuple))
-            and len(obj) == 2
-            and all(isinstance(x, str) for x in obj)
-        )
-
-    def _validate_date_string(s: str, pattern: str, label: str):
-        if not re.match(pattern, s):
-            raise ValueError(f"Invalid {label}: '{s}'")
-
-    def _parse_daterange_input(mode: str, text: str):
-        s = (text or "").strip()
-        if s == "":
-            return None
-
-        try:
-            obj = ast.literal_eval(s)
-        except Exception as e:
-            raise ValueError(
-                f"Daterange could not be parsed. Please use Python-style list/dict syntax. ({e})"
-            )
-
-        if mode == "standard":
-            if not _is_str_list_len2(obj):
-                raise ValueError('Standard mode expects: ["YYYY-MM-DD", "YYYY-MM-DD"]')
-            for d in obj:
-                _validate_date_string(d, r"^\d{4}-\d{2}-\d{2}$", "date (YYYY-MM-DD)")
-            return list(obj)
-
-        if mode == "seasonal":
-            if not _is_str_list_len2(obj):
-                raise ValueError('Seasonal mode expects: ["MM-DD", "MM-DD"]')
-            for d in obj:
-                _validate_date_string(d, r"^\d{2}-\d{2}$", "season date (MM-DD)")
-            return list(obj)
-
-        if mode == "seasonal_years":
-            if not isinstance(obj, dict):
-                raise ValueError(
-                    'Seasonal + year control expects a dict, e.g. {"season": ["04-01", "10-31"], "years": [2019, 2020]}'
-                )
-            if "season" not in obj or "years" not in obj:
-                raise ValueError('Seasonal + year control requires keys: "season" and "years"')
-
-            season = obj["season"]
-            years = obj["years"]
-
-            if not _is_str_list_len2(season):
-                raise ValueError('"season" must be ["MM-DD", "MM-DD"]')
-            for d in season:
-                _validate_date_string(d, r"^\d{2}-\d{2}$", "season date (MM-DD)")
-
-            valid_years = False
-            if years == "all":
-                valid_years = True
-            elif isinstance(years, str) and re.match(r"^\d{4}-\d{4}$", years):
-                valid_years = True
-            elif isinstance(years, (list, tuple)) and all(isinstance(y, int) for y in years):
-                valid_years = True
-
-            if not valid_years:
-                raise ValueError(
-                    '"years" must be one of: "all", "YYYY-YYYY", or a list like [2019, 2020, 2021]'
-                )
-
-            return {"season": list(season), "years": years}
-
-        raise ValueError(f"Unknown Date Range Mode: {mode}")
-    
-    
     def _parse_clip_geometry_input(raw_text):
         """
         Returns either:
@@ -3861,8 +3400,30 @@ def datacube_editor():
                 clear_output()
                 print("Loading data cube from NetCDF...")
 
-                with xr.open_dataset(path) as ds:
-                    ds_loaded = ds.load()
+                # Close any previously opened cube to release its file handle
+                # (important on Windows, where an open handle locks the file).
+                _prev_ds = state.get("loaded_ds")
+                if _prev_ds is not None:
+                    try:
+                        _prev_ds.close()
+                    except Exception:
+                        pass
+                    state["loaded_ds"] = None
+
+                # Open lazily (Dask-backed) so large cubes are read from disk on
+                # demand instead of being copied into RAM at load time. The lazy
+                # array keeps reading from this file during preview/edit/export,
+                # so the handle must stay open -- do NOT wrap this in a closing
+                # `with` block.
+                ds_open = xr.open_dataset(path, chunks="auto")
+                # Keep small coordinates in memory; only the data variables stay
+                # lazy. Otherwise chunked non-dimension coords (e.g.
+                # cloud_percentage) become dask arrays, which breaks boolean-indexer
+                # ops such as cloud_filter's .where(cond, drop=True).
+                ds_loaded = ds_open.assign_coords(
+                    {name: coord.compute() for name, coord in ds_open.coords.items()}
+                )
+                state["loaded_ds"] = ds_open
 
                 # Accept either cube name
                 if "Spectral_Temporal_Stack" in ds_loaded.data_vars:
@@ -4162,20 +3723,6 @@ def datacube_editor():
     # ---------------------------------------------------------------------
     # Layout helpers
     # ---------------------------------------------------------------------
-    def _stacked_field(widget, label_text):
-        try:
-            widget.description = ""
-        except Exception:
-            pass
-        try:
-            widget.style.description_width = "0px"
-        except Exception:
-            pass
-
-        label = widgets.HTML(
-            f"<div style='font-weight:500; line-height:1.2; margin:0; padding:0;'>{label_text}:</div>"
-        )
-        return widgets.VBox([label, widget], layout=widgets.Layout(width="100%", gap="4px"))
 
     # ---------------------------------------------------------------------
     # Build layout
@@ -4524,7 +4071,7 @@ def datacube_editor():
             status_card,
         ],
         layout=widgets.Layout(
-            width="50%",
+            width="100%",
             max_width="980px",
             margin="0 auto",
             gap="0px",
@@ -4536,66 +4083,7 @@ def datacube_editor():
     # ---------------------------------------------------------------------
     # Initialize + styling  (inject CSS BEFORE display)
     # ---------------------------------------------------------------------
-    display(
-        widgets.HTML(
-            """
-            <style>
-            .stac2cube-help-btn button {
-                border-radius: 999px !important;
-                font-weight: 700 !important;
-                line-height: 1 !important;
-                border: 1px solid #93c5fd !important;
-            }
-
-            /* Root: kill tiny horizontal overflow */
-            .stac2cube-root {
-                overflow-x: hidden !important;
-            }
-
-            /* Cards */
-            .stac2cube-card {
-                border: 1px solid #e5e7eb;
-                border-radius: 12px;
-                padding: 12px;
-                background: #fafbfc;
-                box-shadow: 0 1px 2px rgba(0,0,0,0.04);
-                box-sizing: border-box;
-                overflow-x: hidden;
-                min-width: 0;
-            }
-
-            /* Prevent accordion panels and nested widget boxes from overflowing */
-            .stac2cube-card .p-Accordion-child,
-            .stac2cube-card .p-Accordion-child > .p-Widget,
-            .stac2cube-card .widget-vbox,
-            .stac2cube-card .widget-hbox {
-                min-width: 0 !important;
-                max-width: 100% !important;
-                box-sizing: border-box !important;
-            }
-
-            /* Constrain text inputs, dropdowns, and select widgets inside cards */
-            .stac2cube-card .widget-text input,
-            .stac2cube-card .widget-dropdown select,
-            .stac2cube-card .widget-select-multiple select {
-                min-width: 0 !important;
-                max-width: 100% !important;
-                box-sizing: border-box !important;
-                overflow-x: hidden !important;
-            }
-
-            /* Outputs: avoid xarray repr forcing horizontal scrollbars */
-            .stac2cube-root .widget-output {
-                overflow-x: hidden !important;
-            }
-            .stac2cube-root .widget-output pre {
-                white-space: pre-wrap !important;
-                overflow-wrap: anywhere !important;
-            }
-            </style>
-            """
-        )
-    )
+    display(_gui_css_widget())
 
     outer = widgets.HBox([ui], layout=widgets.Layout(width="100%", justify_content="center"))
 
@@ -4656,49 +4144,16 @@ def ard_cube_tools():
     # -----------------------------------------
     # CSS (card design)
     # -----------------------------------------
-    css_patch = widgets.HTML(
-        """
-        <style>
-        .stac2cube-card {
-            border: 1px solid #e5e7eb;
-            border-radius: 12px;
-            padding: 12px;
-            background: #fafbfc;
-            box-shadow: 0 1px 2px rgba(0,0,0,0.04);
-        }
-        button.stac2cube-help-btn,
-        button.stac2cube-help-btn:hover,
-        button.stac2cube-help-btn:active,
-        button.stac2cube-help-btn:focus {
-        border-radius: 9999px !important;
-        width: 18px !important;
-        min-width: 18px !important;
-        height: 18px !important;
-        min-height: 18px !important;
-        padding: 0 !important;
-        background: #2D7FF9 !important;
-        color: #ffffff !important;
-        border: 0 !important;
-        outline: none !important;
-        box-shadow: none !important;
-
-        display: inline-flex !important;
-        align-items: center !important;
-        justify-content: center !important;
-        line-height: 18px !important;
-        font-weight: 700 !important;
-        }
-        </style>
-        """
-    )
+    css_patch = _gui_css_widget()
 
     # -----------------------------------------
     # State
     # -----------------------------------------
     state = {
         "loaded_path": None,
-        "loaded_obj": None,          
-        "current_result_path": None, 
+        "loaded_ds": None,           # open (lazy) xr.Dataset; kept open for on-demand reads
+        "loaded_obj": None,
+        "current_result_path": None,
     }
 
     # -----------------------------------------
@@ -4916,57 +4371,14 @@ def ard_cube_tools():
     """,
     }
 
-    def _make_help_btn(help_html: str):
-        btn = widgets.Button(description="?", layout=widgets.Layout(width="18px", height="18px", padding="0px"))
-        btn.add_class("stac2cube-help-btn")
-
-        # Optional: keep (doesn't affect circle, but reinforces colors)
-        btn.style.button_color = "#2D7FF9"
-        btn.style.text_color = "white"
-        btn.style.font_weight = "700"
-
-        help_box = widgets.HTML(
-            f"<div style='font-size:12px; color:#444; margin-top:4px; display:none;'>{help_html}</div>"
-        )
-
-        def _toggle(_):
-            cur = help_box.value
-            if "display:none" in cur:
-                help_box.value = cur.replace("display:none", "display:block")
-            else:
-                help_box.value = cur.replace("display:block", "display:none")
-
-        btn.on_click(_toggle)
-        return btn, help_box
-
-    def _stacked_field_with_help(widget, label_text: str, help_key: str):
-        try:
-            widget.description = ""
-        except Exception:
-            pass
-        try:
-            widget.style.description_width = "0px"
-        except Exception:
-            pass
-
-        help_btn, help_box = _make_help_btn(COREG_HELP[help_key])
-        label_row = widgets.HBox(
-            [
-                widgets.HTML(f"<div style='font-weight:500; line-height:1.2; margin:0; padding:0;'>{label_text}:</div>"),
-                help_btn,
-            ],
-            layout=widgets.Layout(width="100%", gap="6px", align_items="center"),
-        )
-        return widgets.VBox([label_row, widget, help_box], layout=widgets.Layout(width="100%", gap="4px"))
+    def _stacked_field_with_help(widget, label_text, help_key):
+        return _field_with_help(widget, label_text, COREG_HELP.get(help_key, ""))
 
 
 
 
 
 
-    def _stacked_field(widget, label_text):
-        label = widgets.HTML(f"<div style='font-weight:500; line-height:1.2; margin:0; padding:0;'>{label_text}:</div>")
-        return widgets.VBox([label, widget], layout=widgets.Layout(width="100%", gap="4px"))
 
     load_input_row = widgets.HBox([browse_load_btn, load_path_w], layout=widgets.Layout(width="100%", gap="6px", align_items="center"))
     load_input_box = widgets.VBox([load_input_row, load_fc_box], layout=widgets.Layout(width="100%", gap="4px"))
@@ -6286,11 +5698,31 @@ def ard_cube_tools():
 
         try:
             _status("Loading cube...")
-            with xr.open_dataset(p) as ds:
-                if "Spectral_Temporal_Stack" in ds.data_vars:
-                    obj = ds["Spectral_Temporal_Stack"].load()
-                else:
-                    obj = ds.load()
+
+            # Close any previously opened cube to release its file handle
+            # (important on Windows, where an open handle locks the file).
+            _prev_ds = state.get("loaded_ds")
+            if _prev_ds is not None:
+                try:
+                    _prev_ds.close()
+                except Exception:
+                    pass
+                state["loaded_ds"] = None
+
+            # Open lazily (Dask-backed): large cubes are read on demand instead of
+            # being copied into RAM. The handle must stay open for later reads, so
+            # this is deliberately not a closing `with` block.
+            ds_open = xr.open_dataset(p, chunks="auto")
+            # Keep small coordinates in memory; only the data variables stay lazy
+            # (chunked non-dimension coords otherwise break boolean-indexer ops).
+            ds = ds_open.assign_coords(
+                {name: coord.compute() for name, coord in ds_open.coords.items()}
+            )
+            state["loaded_ds"] = ds_open
+            if "Spectral_Temporal_Stack" in ds.data_vars:
+                obj = ds["Spectral_Temporal_Stack"]
+            else:
+                obj = ds
 
             state["loaded_path"] = p.as_posix()
             state["loaded_obj"] = obj
@@ -6371,8 +5803,9 @@ def ard_cube_tools():
             spacer_med,
             status_card,
         ],
-        layout=widgets.Layout(width="96%", max_width="980px", margin="0 auto", gap="8px"),
+        layout=widgets.Layout(width="100%", max_width="980px", margin="0 auto", gap="8px"),
     )
+    ui.add_class("stac2cube-root")
 
     outer = widgets.HBox([ui], layout=widgets.Layout(width="100%", justify_content="center"))
     display(outer)
