@@ -1,5 +1,12 @@
+import os
+
 from .get_data import get_stac
-from .vector_refiner import proj_check, polygon_2_bbox, read_polygon_file
+from .vector_refiner import (
+    proj_check,
+    polygon_2_bbox,
+    read_polygon_file,
+    polygon_2_features,
+)
 from .stac_processing import scale_factor, cloud_mask
 from .get_spectral_indices import calculate_spectral_index
 from .export_cfg import export_stac
@@ -14,6 +21,16 @@ import xarray as xr
 import rioxarray as rio
 import pandas as pd
 import numpy as np
+
+
+def _human_size(nbytes):
+    """Human-readable size for a (logical) byte count."""
+    units = ["B", "KB", "MB", "GB", "TB", "PB"]
+    size = float(nbytes)
+    for unit in units:
+        if size < 1024.0 or unit == units[-1]:
+            return f"{size:.2f} {unit}"
+        size /= 1024.0
 
 
 def get_stac_layers(
@@ -48,6 +65,68 @@ def get_stac_layers(
     if mission == "cop_dem":
         mission = "cop_dem_glo_30"
 
+    # --- Native multi-feature batching ---------------------------------------
+    # When a polygon FILE containing more than one feature is supplied (i.e. not
+    # a bbox list and not update mode), generate one data cube per feature
+    # instead of a single cube over the union of all features. Each feature is
+    # processed by recursing with a one-row GeoDataFrame as the polygon, which
+    # flows through the normal pipeline (search bbox + optional clip) unchanged.
+    if not update and not isinstance(polygon, (list, tuple)):
+        features = polygon_2_features(polygon)
+        if len(features) > 1:
+            n = len(features)
+            results = []
+            for pos, feature_gdf in enumerate(features):
+                idx = pos + 1  # human-friendly: count features from 1, not 0
+                if not q:
+                    print(f"\n=== Feature {idx}/{n} ===", flush=True)
+
+                # Build this feature LAZILY (output=None) so nothing is computed yet.
+                res = get_stac_layers(
+                    mission=mission,
+                    polygon=feature_gdf,
+                    resolution=resolution,
+                    daterange=daterange,
+                    # copy mutable args so per-feature calls don't share/append
+                    # to the same list (e.g. cloud-mask band injection in get_stac)
+                    bands=list(bands) if bands else bands,
+                    max_cc=max_cc,
+                    clip_raster=clip_raster,
+                    cloud_masking=cloud_masking,
+                    indices=list(indices) if indices else indices,
+                    output=None,  # export below, per feature, so RAM frees each time
+                    aggregator=aggregator,
+                    stats=stats,
+                    topographic_features=topographic_features,
+                    animation=animation,
+                    update=update,
+                    source=source,
+                    q=q,
+                )
+
+                # Export this feature now. The heavy compute happens INSIDE
+                # export_stac and is released when this iteration ends, while `res`
+                # stays lazy -- so RAM does not accumulate across features (peak is
+                # ~one feature, not the whole batch).
+                if output and isinstance(res, (xr.DataArray, xr.Dataset)):
+                    stem, ext = os.path.splitext(output)
+                    feature_output = f"{stem}_{idx}{ext}"
+                    export_stac(res, feature_output)
+
+                # Report each cube's estimated (logical, pre-load) data size.
+                if isinstance(res, (xr.DataArray, xr.Dataset)):
+                    size = _human_size(int(res.nbytes))
+                    res.attrs["estimated_size"] = size
+                    if not q:
+                        print(
+                            f"Feature {idx}/{n} — estimated size: {size}",
+                            flush=True,
+                        )
+
+                results.append(res)
+
+            return results
+
     if update:
         stac_parameters = get_stac_parameters(update)
 
@@ -66,7 +145,10 @@ def get_stac_layers(
     else:
         if not mission:
             raise ValueError("Error: Please select a mission.")
-        if not polygon:
+        # `polygon is None` rather than `not polygon`: a single-feature
+        # GeoDataFrame (passed in by the multi-feature batch loop) has an
+        # ambiguous truth value.
+        if polygon is None:
             raise ValueError(
                 "Error: Please select a polygon or bbox list with geographic coordinates."
             )

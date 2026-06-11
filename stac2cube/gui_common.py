@@ -234,6 +234,12 @@ GUI_CSS = """
     overflow-x: hidden !important;
 }
 
+/* "Details for Xarray-Nerds" toggle in the Result panel: bold label. */
+.stac2cube-nerd-toggle label,
+.stac2cube-nerd-toggle span {
+    font-weight: 700 !important;
+}
+
 /* Outputs: wrap long lines (file paths, tracebacks, xarray repr) so Status /
    Result text is fully readable instead of clipped with no scrollbar. */
 .stac2cube-root .widget-output { overflow-x: hidden !important; }
@@ -313,14 +319,19 @@ def help_button(tooltip="Show help"):
     return btn
 
 
-def field_group(title, children, subtitle=None, help_html=None):
+def field_group(title, children, subtitle=None, help_html=None, collapsible=False, open=True):
     """Wrap related fields in a subtly bordered sub-panel with a small heading,
     an optional subtitle and an optional '?' help toggle, to set them apart from
-    neighbouring fields inside a card."""
+    neighbouring fields inside a card.
+
+    When ``collapsible`` is True the panel is rendered as an Accordion titled
+    ``title`` (open by default unless ``open`` is False), so the section can be
+    folded individually while its parent panel stays expanded."""
     title_html = widgets.HTML(
         f"<div style='font-weight:600; font-size:13px; color:#374151; margin:0;'>{title}</div>"
     )
 
+    btn = None
     help_box = None
     if help_html:
         btn = help_button()
@@ -340,16 +351,44 @@ def field_group(title, children, subtitle=None, help_html=None):
             help_box.layout.display = "" if help_box.layout.display == "none" else "none"
 
         btn.on_click(_toggle)
+
+    subtitle_html = (
+        widgets.HTML(
+            f"<div style='font-size:12px; color:#6b7280; margin:0 0 2px 0;'>{subtitle}</div>"
+        )
+        if subtitle else None
+    )
+
+    if collapsible:
+        # Title goes on the accordion bar; keep subtitle + help (?) + fields inside.
+        body_children = []
+        if subtitle_html is not None or btn is not None:
+            row = []
+            if subtitle_html is not None:
+                row.append(subtitle_html)
+            if btn is not None:
+                row.append(btn)
+            body_children.append(
+                widgets.HBox(row, layout=widgets.Layout(align_items="center", gap="6px"))
+            )
+        if help_box is not None:
+            body_children.append(help_box)
+        body_children += list(children)
+        body = widgets.VBox(
+            body_children, layout=widgets.Layout(width="100%", gap="6px")
+        )
+        acc = widgets.Accordion(children=[body], selected_index=(0 if open else None))
+        acc.set_title(0, title)
+        acc.layout = widgets.Layout(width="100%")
+        return acc
+
+    if help_box is not None:
         header = [widgets.HBox([title_html, btn], layout=widgets.Layout(align_items="center", gap="6px"))]
     else:
         header = [title_html]
 
-    if subtitle:
-        header.append(
-            widgets.HTML(
-                f"<div style='font-size:12px; color:#6b7280; margin:0 0 2px 0;'>{subtitle}</div>"
-            )
-        )
+    if subtitle_html is not None:
+        header.append(subtitle_html)
     if help_box is not None:
         header.append(help_box)
 

@@ -573,6 +573,17 @@ def datacube_builder(missions_func=missions):
         disabled=True,
     )
 
+    # Multi-feature picker: choose which cube (polygon feature) the viz tools act
+    # on. Only shown when a build returns several features.
+    viz_feature_w = widgets.Dropdown(
+        options=[("Feature 1", 0)],
+        value=0,
+        description="Visualize feature:",
+        style={"description_width": "initial"},
+        layout=widgets.Layout(width="auto"),
+        disabled=True,
+    )
+
     gif_display_mode_w = widgets.Dropdown(
         options=[
             ("rgb", "rgb"),
@@ -767,12 +778,297 @@ def datacube_builder(missions_func=missions):
     # -------------------------------------------------------------------------
     # Result summary (minimal)
     # -------------------------------------------------------------------------
+    def _friendly_cube_summary_html(obj):
+        """Plain-language overview of a single result cube, for users who don't
+        read xarray reprs. Built ONLY from metadata the cube actually carries
+        (attrs + materialized coords) — nothing is computed and nothing is
+        invented: missing fields show '-'."""
+        da = obj
+        if isinstance(obj, xr.Dataset):
+            da = obj.get("Spectral_Temporal_Stack")
+            if da is None and len(obj.data_vars):
+                da = obj[list(obj.data_vars)[0]]
+
+        attrs = dict(getattr(da, "attrs", {}) or {})
+
+        mission = attrs.get("mission")
+        try:
+            mission_label = _pretty_mission_label(mission) if mission else "-"
+        except Exception:
+            mission_label = mission or "-"
+
+        indices = [str(i) for i in (attrs.get("indices") or [])]
+        bands = [str(b) for b in (attrs.get("spectral_bands") or [])]
+        if not bands and da is not None and "band" in getattr(da, "coords", {}):
+            # Fallback: band coordinate minus the indices.
+            bands = [str(b) for b in da.coords["band"].values if str(b) not in indices]
+
+        crs = attrs.get("crs") or "-"
+        est = _human_readable_bytes(_estimated_data_size_bytes(obj))
+
+        # Extra layers when stats were added (Dataset with more variables).
+        extra_layers = []
+        if isinstance(obj, xr.Dataset):
+            extra_layers = [v for v in obj.data_vars if v != "Spectral_Temporal_Stack"]
+
+        rcell = "padding:4px 12px; text-align:right; color:#374151;"
+        lcell = "padding:4px 12px; text-align:left;"
+        label = (
+            "padding:5px 14px 5px 0; color:#6b7280; white-space:nowrap; "
+            "vertical-align:top; width:1%; border-bottom:1px solid #f3f4f6;"
+        )
+        value = "padding:5px 0; color:#111827; border-bottom:1px solid #f3f4f6;"
+
+        def _row(k, v):
+            return f"<tr><td style='{label}'>{k}</td><td style='{value}'>{v}</td></tr>"
+
+        info_rows = [
+            _row("Mission", mission_label),
+            _row("Bands", ", ".join(bands) if bands else "-"),
+            _row("Indices", ", ".join(indices) if indices else "-"),
+            _row("CRS", crs),
+            _row("Estimated data size", f"<b>{est}</b>"),
+        ]
+        if extra_layers:
+            info_rows.append(_row("Additional layers", ", ".join(extra_layers)))
+
+        # Per-date table with cloud % when the cube carries it; '-' otherwise.
+        dates_html = ""
+        has_time = da is not None and "time" in getattr(da, "coords", {})
+        if has_time:
+            tv = da.coords["time"].values
+            cloud = None
+            if "cloud_percentage" in da.coords:
+                try:
+                    cloud = list(da.coords["cloud_percentage"].values)
+                except Exception:
+                    cloud = None
+            th = "padding:4px 12px; border-bottom:1px solid #d1d5db; color:#374151;"
+            rows = []
+            for i, t in enumerate(tv):
+                cp = "-"
+                if cloud is not None and i < len(cloud):
+                    try:
+                        cp = f"{int(cloud[i])}%"
+                    except Exception:
+                        cp = "-"
+                rows.append(
+                    f"<tr><td style='{lcell}'>{str(t)[:10]}</td>"
+                    f"<td style='{rcell}'>{cp}</td></tr>"
+                )
+            # Show at most 4 dates up front (matches the height of the info block
+            # on the left); the rest folds behind a native <details> expander so a
+            # long time series can't stretch the Result panel forever.
+            table_open = (
+                "<table style='border-collapse:collapse; margin-top:4px; width:100%; "
+                "font-size:12.5px;'>"
+            )
+            header_row = (
+                f"<tr style='background:#f3f4f6;'><th style='{th} text-align:left;'>date</th>"
+                f"<th style='{th} text-align:right;'>cloud %</th></tr>"
+            )
+            dates_html = (
+                f"<div style='font-weight:600;'>Dates ({len(tv)})</div>"
+                + table_open + header_row + "".join(rows[:4]) + "</table>"
+            )
+            if len(rows) > 4:
+                dates_html += (
+                    "<details style='margin-top:2px;'>"
+                    "<summary style='cursor:pointer; color:#2563eb; font-size:12px;'>"
+                    f"Show all {len(tv)} dates</summary>"
+                    + table_open + "".join(rows[4:]) + "</table>"
+                    + "</details>"
+                )
+        else:
+            info_rows.append(
+                _row("Dates", "- (time dimension collapsed by the aggregator)")
+            )
+
+        # Two flexible columns (key facts | dates table) so the summary fills the
+        # Result panel's width instead of clustering top-left; wraps when narrow.
+        info_table = (
+            "<table style='border-collapse:collapse; width:100%; font-size:13px;'>"
+            + "".join(info_rows)
+            + "</table>"
+        )
+        dates_col = (
+            f"<div style='flex:1 1 280px; min-width:240px;'>{dates_html}</div>"
+            if dates_html
+            else ""
+        )
+        viz_note = (
+            "<div style='font-size:12px; color:#1e3a8a; background:#eff6ff; "
+            "border:1px solid #bfdbfe; border-radius:6px; padding:6px 8px; "
+            "margin-top:10px;'>"
+            "ℹ️ Now you can <b>visualize</b> the data cube in the <b>Visualization</b> "
+            "section below - or save it via <b>Export Options</b>."
+            "</div>"
+        )
+        return (
+            "<div style='font-size:13px; width:100%;'>"
+            "<b>✅ Your data cube is ready.</b>"
+            "<div style='display:flex; flex-wrap:wrap; gap:10px 36px; margin-top:8px; "
+            "align-items:flex-start;'>"
+            f"<div style='flex:1 1 340px; min-width:280px;'>{info_table}</div>"
+            + dates_col
+            + "</div>"
+            + viz_note
+            + "</div>"
+        )
+
     def _show_result_summary(obj):
         with result_out:
             clear_output()
-            est_bytes = _estimated_data_size_bytes(obj)
-            print(f"Estimated data size: {_human_readable_bytes(est_bytes)}\n")
-            display(obj)
+            # A polygon FILE with several features returns a LIST of cubes (one
+            # per feature). Dumping every xarray repr is unreadable, so show a
+            # compact table instead.
+            if isinstance(obj, list):
+                _show_multi_feature_summary(obj)
+                return
+
+            # Single cube: friendly summary by default; the bold toggle swaps in
+            # the raw xarray repr for power users.
+            nerd_w = widgets.Checkbox(
+                value=False,
+                description="Details for Xarray-Nerds",
+                indent=False,
+            )
+            nerd_w.add_class("stac2cube-nerd-toggle")
+            body = widgets.Output()
+
+            def _render(*_):
+                with body:
+                    clear_output()
+                    if nerd_w.value:
+                        est_bytes = _estimated_data_size_bytes(obj)
+                        print(
+                            f"Estimated data size: {_human_readable_bytes(est_bytes)}\n"
+                        )
+                        display(obj)
+                    else:
+                        display(HTML(_friendly_cube_summary_html(obj)))
+
+            nerd_w.observe(_render, names="value")
+            _render()
+            toggle_row = widgets.HBox(
+                [nerd_w],
+                layout=widgets.Layout(width="100%", justify_content="flex-end"),
+            )
+            display(widgets.VBox([toggle_row, body], layout=widgets.Layout(gap="4px")))
+
+    def _show_multi_feature_summary(cubes):
+        """Compact, readable summary for a multi-feature batch result (a list of
+        cubes, one per polygon feature). Time/dates are shown PER feature because
+        separate areas can return different acquisition dates; bands/CRS go in the
+        header only when identical across EVERY feature, else flagged as varying.
+        No compute is triggered (.nbytes/.sizes/coords are materialized metadata)."""
+        n = len(cubes)
+        if n == 0:
+            print("No data cubes were produced.")
+            return
+
+        def _main_da(c):
+            if isinstance(c, xr.Dataset):
+                if "Spectral_Temporal_Stack" in c.data_vars:
+                    return c["Spectral_Temporal_Stack"]
+                return next(iter(c.data_vars.values()), None)
+            return c
+
+        def _cube_bytes(c):
+            try:
+                return int(getattr(c, "nbytes", 0))
+            except Exception:
+                return 0
+
+        def _band_key(c):
+            da = _main_da(c)
+            try:
+                if da is not None and "band" in da.coords:
+                    return tuple(str(b) for b in da.coords["band"].values)
+            except Exception:
+                pass
+            return None
+
+        def _time_key(c):
+            da = _main_da(c)
+            try:
+                if da is not None and "time" in da.coords:
+                    return tuple(str(t) for t in da.coords["time"].values)
+            except Exception:
+                pass
+            return None
+
+        def _crs_of(c):
+            da = _main_da(c)
+            try:
+                return da.attrs.get("crs") if da is not None else None
+            except Exception:
+                return None
+
+        total = _human_readable_bytes(sum(_cube_bytes(c) for c in cubes))
+
+        # Bands are requested identically for every feature, so they're the one
+        # truly shared field shown in the header. CRS and time/dates can differ
+        # per area, so those are shown per feature in the table below.
+        time_uniform = len({_time_key(c) for c in cubes}) == 1
+
+        common = []
+        _bands = _band_key(cubes[0])
+        if _bands:
+            common.append("Bands: " + ", ".join(_bands))
+
+        cell = "padding:3px 10px; text-align:right;"
+        lcell = "padding:3px 10px; text-align:left;"
+        th = "padding:3px 10px; border-bottom:1px solid #d1d5db; color:#374151;"
+        rows = []
+        for i, c in enumerate(cubes, 1):
+            da = _main_da(c)
+            s = getattr(da, "sizes", {}) if da is not None else {}
+            rows.append(
+                f"<tr><td style='{cell}'>{i}</td>"
+                f"<td style='{cell}'>{s.get('time', '–')}</td>"
+                f"<td style='{lcell}'>{_crs_of(c) or '–'}</td>"
+                f"<td style='{cell}'>{s.get('y', '–')} × {s.get('x', '–')}</td>"
+                f"<td style='{cell}'>{_human_readable_bytes(_cube_bytes(c))}</td></tr>"
+            )
+
+        warn = ""
+        if not time_uniform:
+            warn = (
+                "<div style='font-size:12px; color:#92400e; background:#fffbeb; "
+                "border:1px solid #fde68a; border-radius:6px; padding:6px 8px; "
+                "margin-top:6px;'>⚠️ Time steps differ between features — each cube "
+                "keeps only the dates with scenes over its own area (see the "
+                "<b>time</b> column; counts can match while the actual dates differ).</div>"
+            )
+
+        html = (
+            "<div style='font-size:13px;'>"
+            f"<b>✅ {n} data cubes</b> - one per polygon feature. "
+            f"Total estimated size: <b>{total}</b>."
+            + (
+                "<div style='font-size:12px; color:#6b7280; margin-top:2px;'>"
+                + " · ".join(common) + "</div>"
+                if common else ""
+            )
+            + warn
+            + "<table style='border-collapse:collapse; margin-top:8px; font-size:12px;'>"
+            + "<tr style='background:#f3f4f6;'>"
+            + f"<th style='{th} text-align:right;'>#</th>"
+            + f"<th style='{th} text-align:right;'>time</th>"
+            + f"<th style='{th} text-align:left;'>CRS</th>"
+            + f"<th style='{th} text-align:right;'>y × x</th>"
+            + f"<th style='{th} text-align:right;'>est. size</th></tr>"
+            + "".join(rows)
+            + "</table>"
+            + "<div style='font-size:12px; color:#6b7280; margin-top:6px;'>"
+            + "Each feature is a separate cube. On export, <b>NetCDF</b> writes one "
+            + "file per feature (<code>name_1.nc</code>, <code>name_2.nc</code>, …); "
+            + "<b>COGs</b> write one subfolder per feature (<code>1/</code>, "
+            + "<code>2/</code>, … each holding that feature's dated tiles)."
+            + "</div></div>"
+        )
+        display(HTML(html))
 
     # -------------------------------------------------------------------------
     # Status helpers
@@ -884,6 +1180,32 @@ def datacube_builder(missions_func=missions):
         raise TypeError(
             f"Unsupported result type for visualization: {type(result_obj)}"
         )
+
+    def _active_result_cube():
+        """The cube the viz tools act on: for a multi-feature list, the one chosen
+        in the feature dropdown; for a single cube, that cube; otherwise None."""
+        obj = state["result"]
+        if obj is None:
+            return None
+        if isinstance(obj, list):
+            if not obj:
+                return None
+            idx = viz_feature_w.value if isinstance(viz_feature_w.value, int) else 0
+            idx = max(0, min(idx, len(obj) - 1))
+            return obj[idx]
+        return obj
+
+    def _refresh_viz_feature_options():
+        """Show + populate the feature picker only when the result is a list of
+        several cubes; hide it for a single cube."""
+        obj = state["result"]
+        if isinstance(obj, list) and len(obj) > 1:
+            viz_feature_w.options = [(f"Feature {i + 1}", i) for i in range(len(obj))]
+            viz_feature_w.value = 0
+            viz_feature_w.disabled = False
+            viz_feature_box.layout.display = ""
+        else:
+            viz_feature_box.layout.display = "none"
 
     def _set_visualization_enabled(enabled: bool):
         viz_dropdown_btn.disabled = not enabled
@@ -1009,6 +1331,54 @@ def datacube_builder(missions_func=missions):
 
         return da
 
+    def _export_feature_list(cubes, export_mode, export_target):
+        """Export a multi-feature batch (list of cubes), one output per feature.
+        Each cube is written then released, so RAM stays ~one feature:
+          - NetCDF: <stem>_<i>.nc   (polygons_1.nc, polygons_2.nc, ...)
+          - COGs:   <folder>/<i>/<date>.tif   (one subfolder per feature)
+        """
+        cubes = [c for c in cubes if isinstance(c, (xr.DataArray, xr.Dataset))]
+        n = len(cubes)
+        if n == 0:
+            raise ValueError("No exportable cubes in the result.")
+
+        def _ref(c):
+            da = c
+            if isinstance(c, xr.Dataset):
+                da = c.get("Spectral_Temporal_Stack")
+                if da is None and len(c.data_vars):
+                    da = c[list(c.data_vars)[0]]
+            crs_ref = da.attrs.get("crs") if da is not None else None
+            transform_ref = da.attrs.get("transform") if da is not None else None
+            return crs_ref, transform_ref
+
+        written = []
+        if export_mode == "netcdf":
+            stem, ext = os.path.splitext(export_target)
+            if ext.lower() != ".nc":
+                stem, ext = export_target, ".nc"
+            for i, c in enumerate(cubes, 1):
+                out_i = f"{stem}_{i}{ext}"
+                Path(out_i).parent.mkdir(parents=True, exist_ok=True)
+                if isinstance(c, xr.DataArray):
+                    export_stac(c, out_i, var_name=(c.name or "Spectral_Temporal_Stack"))
+                else:
+                    crs_ref, transform_ref = _ref(c)
+                    export_stac(c, out_i, crs=crs_ref, transform=transform_ref)
+                written.append(out_i)
+            return {"mode": "netcdf", "target": export_target, "files": written, "count": n}
+
+        if export_mode == "cogs":
+            base = Path(export_target)
+            for i, c in enumerate(cubes, 1):
+                sub = base / str(i)
+                sub.mkdir(parents=True, exist_ok=True)
+                export_to_cogs(stac=c, output_dir=str(sub), prefix="", dtype="float32")
+                written.append(str(sub))
+            return {"mode": "cogs", "target": str(base), "folders": written, "count": n}
+
+        raise ValueError(f"Unsupported export mode: {export_mode}")
+
     def _export_current_result(export_mode: str, export_target: str):
         if state["result"] is None:
             raise ValueError("No generated result is available to export yet.")
@@ -1022,6 +1392,10 @@ def datacube_builder(missions_func=missions):
             raise ValueError("Please provide Output file / folder before exporting.")
 
         obj = state["result"]
+
+        # Multi-feature batch result: a list of cubes -> one output per feature.
+        if isinstance(obj, list):
+            return _export_feature_list(obj, export_mode, export_target)
 
         if export_mode == "netcdf":
             target = export_target
@@ -1424,7 +1798,11 @@ def datacube_builder(missions_func=missions):
             browse_output_btn.disabled = False
             export_target_w.description = "Export dir:"
             export_target_w.placeholder = "./results/cogs"
-            if current == "":
+            # Replace an empty field OR a leftover auto NetCDF suggestion with the
+            # COG default, so switching netcdf -> cogs updates the recommendation
+            # (mirrors how netcdf mode clears a leftover cogs path above). A path
+            # the user typed themselves is preserved.
+            if current == "" or current == state.get("last_auto_netcdf_suggestion"):
                 export_target_w.value = "./results/cogs"
 
             _sync_output_filechooser_from_mode_and_text()
@@ -1556,13 +1934,14 @@ def datacube_builder(missions_func=missions):
     # -------------------------------------------------------------------------
     def _on_viz_dropdown_clicked(_):
         try:
-            if state["result"] is None:
+            cube = _active_result_cube()
+            if cube is None:
                 with viz_out:
                     clear_output()
                     print("ℹ️ Build a data cube first.")
                 return
 
-            da = _pick_dataarray_for_visualization(state["result"])
+            da = _pick_dataarray_for_visualization(cube)
 
             with viz_out:
                 clear_output()
@@ -1581,13 +1960,14 @@ def datacube_builder(missions_func=missions):
 
     def _on_viz_make_gif_clicked(_):
         try:
-            if state["result"] is None:
+            cube = _active_result_cube()
+            if cube is None:
                 with viz_out:
                     clear_output()
                     print("ℹ️ Build a data cube first.")
                 return
 
-            da = _pick_dataarray_for_visualization(state["result"])
+            da = _pick_dataarray_for_visualization(cube)
 
             out_path = (gif_out_path_w.value or "").strip()
             if not out_path:
@@ -1693,6 +2073,7 @@ def datacube_builder(missions_func=missions):
                 state["result"] = result
                 export_result_btn.disabled = False
                 _set_visualization_enabled(True)
+                _refresh_viz_feature_options()
                 _update_gif_output_suggestion()
 
                 # Auto export only if COG mode + target (NetCDF direct export happens in get_stac_layers)
@@ -1712,7 +2093,14 @@ def datacube_builder(missions_func=missions):
                     }
                     # The status was just cleared, so restate the export path here
                     # (export_stac's own print is wiped by clear_output above).
-                    print(f"✅ Data cube generation finished. Exported to: {export_target}")
+                    if isinstance(result, list):
+                        _stem, _ext = os.path.splitext(export_target)
+                        print(
+                            f"✅ Generation finished — exported {len(result)} cubes: "
+                            f"{_stem}_1{_ext} … {_stem}_{len(result)}{_ext}"
+                        )
+                    else:
+                        print(f"✅ Data cube generation finished. Exported to: {export_target}")
 
                 else:
                     print("✅ Data cube generation finished. Result stored in memory.")
@@ -1848,6 +2236,8 @@ def datacube_builder(missions_func=missions):
             ),
         ],
         subtitle="Which spectral bands to include.",
+        collapsible=True,
+        open=False,
     )
 
     indices_box = _field_group(
@@ -1859,6 +2249,8 @@ def datacube_builder(missions_func=missions):
             ),
         ],
         subtitle="Spectral indices to compute.",
+        collapsible=True,
+        open=False,
     )
 
     stats_box = _field_group(
@@ -1869,8 +2261,10 @@ def datacube_builder(missions_func=missions):
                 [stats_all_btn, stats_none_btn], layout=widgets.Layout(gap="6px")
             ),
         ],
-        subtitle="Add over-time summary layers (mean, median, …)?",
+        subtitle="Add over-time summary layers.",
         help_html=PARAM_HELP_HTML.get("stats", ""),
+        collapsible=True,
+        open=False,
     )
 
     # A prominent "OR" separator, reused in the Polygon group and here.
@@ -1923,9 +2317,11 @@ def datacube_builder(missions_func=missions):
     _update_date_inputs_visibility()
 
     date_section = _field_group(
-        "Time period",
+        "Time Period",
         [date_simple_box, advanced_dates_w, date_advanced_box],
         subtitle="Which dates should the data cube cover?",
+        collapsible=True,
+        open=False,
     )
 
     # --- Optional: draw the area of interest on an interactive map ---
@@ -2146,6 +2542,15 @@ def datacube_builder(missions_func=missions):
             _field_group(
                 "Polygon",
                 [
+                    widgets.HTML(
+                        "<div style='font-size:12px; color:#1e3a8a; background:#eff6ff; "
+                        "border:1px solid #bfdbfe; border-radius:6px; padding:6px 8px;'>"
+                        "<b>NOTE:</b> a polygon vector file with <b>multiple features</b> is "
+                        "accepted and automatically activates <b>BATCH PROCESSING</b> (one "
+                        "data cube per feature). A <i>multi-polygon</i>-type vector file is "
+                        "<b>NOT</b> accepted."
+                        "</div>"
+                    ),
                     _boxed(polygon_input_box),
                     clip_raster_w,
                     clip_warning_html,
@@ -2155,6 +2560,8 @@ def datacube_builder(missions_func=missions):
                 ],
                 subtitle="The area to cover. Pick a polygon file or bounding box, or draw it on a map.",
                 help_html=PARAM_HELP_HTML.get("polygon", ""),
+                collapsible=True,
+                open=False,
             ),
             date_section,
             bands_box,
@@ -2194,8 +2601,20 @@ def datacube_builder(missions_func=missions):
         layout=widgets.Layout(width="100%", gap="6px"),
     )
 
+    viz_feature_box = widgets.VBox(
+        [
+            widgets.HTML(
+                "<div style='font-size:12px; color:#6b7280;'>This result has several "
+                "features - choose which one to view or animate and click 'Open Interactive View' each time you change the feature!:</div>"
+            ),
+            viz_feature_w,
+        ],
+        layout=widgets.Layout(width="100%", gap="4px", display="none"),
+    )
+
     visualization_box = widgets.VBox(
         [
+            viz_feature_box,
             # widgets.HTML("<b>Visualization</b>"),
             # widgets.HTML("<div style='font-size:12px; color:#666;'>Available after building a data cube.</div>"),
             widgets.VBox(
@@ -2402,8 +2821,7 @@ def datacube_editor():
         Polygon formats: <code>gpkg</code>, <code>geojson</code>, <code>kml</code>, <code>kmz</code>, <code>shp</code>.<br>
         Polygons can be geographic (WGS84) or projected (e.g., UTM).<br>
         <b>2) List of BBOX</b><br>
-        Can also be a WGS84 bbox list: <code>[xmin, ymin, xmax, ymax]</code> (not projected coords). Useful tool: <code>http://bboxfinder.com/</code><br>
-        <b>Note:</b> If you have multiple features, only the first feature is used.
+        Can also be a WGS84 bbox list: <code>[xmin, ymin, xmax, ymax]</code> (not projected coords). Useful tool: <code>http://bboxfinder.com/</code>
         """,
         "stats": """
         <b>stats</b><br>

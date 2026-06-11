@@ -15,6 +15,24 @@ def polygon_2_gdf(polygon) -> gpd.GeoDataFrame:
     return _process_gdf(gdf)
 
 
+def polygon_2_features(polygon):
+    """
+    Returns a list of single-feature GeoDataFrames (one per geometry), each
+    reprojected to WGS84. Used by get_stac_layers to iterate cube generation
+    per polygon feature.
+
+    - bbox lists/tuples are treated as a single feature and returned as-is.
+    - A file path is read and split into one GeoDataFrame per feature.
+    """
+    if isinstance(polygon, (list, tuple)):
+        return [polygon]
+
+    gdf = polygon_2_gdf(polygon)
+    if gdf is None:
+        return []
+    return [gdf.iloc[[i]] for i in range(len(gdf))]
+
+
 def polygon_2_bbox(polygon) -> list:
     """
     Reads a polygon file and returns the bounding box of the first geometry as a list:
@@ -61,7 +79,15 @@ def proj_check(polygon):
 def read_polygon_file(polygon) -> gpd.GeoDataFrame:
     """
     Reads a polygon file from various geospatial formats and returns a GeoDataFrame.
+
+    If a GeoDataFrame is passed in, it is returned unchanged. This passthrough
+    lets a single feature (a one-row GeoDataFrame) flow through the same pipeline
+    as a file path, which the native multi-feature batching in get_stac_layers
+    relies on.
     """
+    if isinstance(polygon, gpd.GeoDataFrame):
+        return polygon
+
     split_up = os.path.splitext(polygon)
     geo_format = split_up[1].lower()  # use lowercase to handle extensions like '.KML'
 
