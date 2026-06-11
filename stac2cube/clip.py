@@ -88,8 +88,14 @@ def clip_stac(stac, polygon, crs=None, bbox_crs="EPSG:4326"):
     # Decide target CRS
     crs = stac.crs if crs is None else crs
 
-    # Preserve original transform before clip (clip changes extent)
-    transform = stac.transform
+    # Preserve original transform before clip (clip changes extent).
+    # A freshly built cube hasn't had attrs["transform"] set yet (main.py writes
+    # it AFTER this clip call), so fall back to the live grid transform. A
+    # loaded/exported cube already carries the attr, so the Editor/ARD clip path
+    # behaves exactly as before.
+    transform = stac.attrs.get("transform")
+    if transform is None:
+        transform = stac.rio.transform()
 
     # If bbox list/tuple -> build a GeoDataFrame; else use your existing polygon loader
     is_bbox = (

@@ -2,13 +2,15 @@ import ast
 import json
 import os
 import re
+import tempfile
+from datetime import date as _date, datetime as _datetime
 from pathlib import Path
 
 import xarray as xr
 import pandas as pd
 import numpy as np
 import ipywidgets as widgets
-from IPython.display import display, clear_output, Javascript
+from IPython.display import display, clear_output, Javascript, HTML
 
 try:
     from ipyfilechooser import FileChooser
@@ -44,6 +46,8 @@ from .gui_common import (
     gui_css_widget as _gui_css_widget,
     stacked_field as _stacked_field,
     stacked_field_with_help as _field_with_help,
+    field_group as _field_group,
+    boxed_control as _boxed,
 )
 
 
@@ -52,17 +56,18 @@ from .gui_common import (
 # -------------------------------------------------------------------------
 PARAM_HELP_HTML = {
     "daterange_mode": """
-    <b>Date Range Mode</b><br>
-    Choose how <code>daterange</code> is interpreted:<br><br>
-    <b>1) Standard (single window)</b><br>
-    <code>["YYYY-MM-DD", "YYYY-MM-DD"]</code><br><br>
-    <b>2) Seasonal (repeat across years)</b><br>
-    <code>["MM-DD", "MM-DD"]</code><br>
-    Example: vegetation season <code>["04-01", "10-31"]</code><br><br>
-    <b>3) Seasonal + year control</b><br>
+    <b>Season mode</b><br>
+    <b>1) Seasonal (all available years)</b><br>
     <code>{"season": ["MM-DD", "MM-DD"], "years": "all"}</code><br>
-    <code>{"season": ["MM-DD", "MM-DD"], "years": [2019, 2020, 2021]}</code><br>
-    <code>{"season": ["MM-DD", "MM-DD"], "years": "2018-2024"}</code>
+    The season for every year the mission has data.<br><br>
+    <b>2) Seasonal (year range)</b><br>
+    <code>{"season": ["MM-DD", "MM-DD"], "years": "2019-2024"}</code><br>
+    Every year from first to last (inclusive).<br><br>
+    <b>3) Seasonal (selected years only)</b><br>
+    <code>{"season": ["MM-DD", "MM-DD"], "years": [2019, 2021, 2023]}</code><br>
+    Only the years you list.<br><br>
+    <i>Season is MM-DD (no year), e.g. a vegetation season ["04-01", "10-31"]. A season that
+    crosses the new year (e.g. ["11-01", "03-31"]) is handled automatically.</i>
     """,
     "polygon": """
     <b>polygon</b><br>
@@ -71,14 +76,18 @@ PARAM_HELP_HTML = {
     Polygons can be geographic (WGS84) or projected (e.g., UTM).<br>
     <b>2) List of BBOX</b><br>
     Can also be a WGS84 bbox list: <code>[xmin, ymin, xmax, ymax]</code> (not projected coords). Useful tool: <code>http://bboxfinder.com/</code><br>
+    <b>3) Draw on a map</b><br>
+    Tick <b>"Draw the area on a map instead"</b> below to open an interactive map. Use the draw tools at the top-left of the map to draw a rectangle or polygon over your area, then click <b>"Use drawn area"</b>. Your exact outline is saved as a GeoJSON file in the <code>polygons</code> folder and the box above is pointed at it (overwriting any path you typed). To change the background map, use the toolbar at the top-right of the map.<br>
     <b>Note:</b> If you have multiple features, only the first feature is used.
     """,
     "clip_raster": """
-    <b>clip_raster</b><br>
-    <b>True</b>: clip raster to polygon area.<br>
-    <b>False</b>: keep polygon bounding box extent.<br><br>
-    Keep <b>False</b> if you plan co-registration (bbox shape works best).<br>
-    After co-registration you can clip using <code>clip_stac()</code>.
+    <b>Clip data cube to polygon boundaries</b><br>
+    <b>Off (default)</b>: the cube covers the polygon's <b>bounding box</b> — a clean
+    rectangle. This is intentional: a rectangle gives the best results for
+    <b>co-registration</b> and <b>super-resolution</b>.<br>
+    <b>On</b>: the cube is cut to the <b>exact polygon outline</b>; pixels outside the
+    shape become empty (NaN).<br><br>
+    If you prefer to clip later instead, you can use <code>clip_stac()</code>.
     """,
     "max_cc": """
     <b>max_cc</b><br>
@@ -278,13 +287,13 @@ def datacube_builder(missions_func=missions):
         return options
 
     def _daterange_mode_placeholder(mode_value: str):
-        if mode_value == "standard":
-            return '["2024-04-01", "2024-04-10"]'
-        elif mode_value == "seasonal":
-            return '["04-01", "10-31"]'
-        elif mode_value == "seasonal_years":
-            return '{"season": ["04-01", "10-31"], "years": [2019, 2020, 2021]}'
-        return '["2024-04-01", "2024-04-10"]'
+        if mode_value == "seasonal_all":
+            return '{"season": ["04-01", "10-31"], "years": "all"}'
+        elif mode_value == "seasonal_range":
+            return '{"season": ["04-01", "10-31"], "years": "2019-2024"}'
+        elif mode_value == "seasonal_selected":
+            return '{"season": ["04-01", "10-31"], "years": [2019, 2021, 2023]}'
+        return '{"season": ["04-01", "10-31"], "years": "all"}'
 
     # -------------------------------------------------------------------------
     # Load and prepare missions metadata
@@ -321,7 +330,7 @@ def datacube_builder(missions_func=missions):
     source_w = widgets.Dropdown(
         options=[
             ("Element84 (Earth Search)", "element84"),
-            ("Terrabyte (DLR)", "terrabyte"),
+            ("terrabyte (DLR)", "terrabyte"),
             ("Planetary Computer (Microsoft)", "planetary_computer"),
         ],
         value="element84",
@@ -339,30 +348,47 @@ def datacube_builder(missions_func=missions):
 
     polygon_w = widgets.Text(
         value="./polygons/test.gpkg",
-        description="Polygon:",
+        description="",
         placeholder="./polygons/test.gpkg",
         layout=widgets.Layout(width="100%"),
-        style={"description_width": "120px"},
+        style={"description_width": "0px"},
     )
 
     daterange_mode_w = widgets.Dropdown(
         options=[
-            ("Standard (single window)", "standard"),
-            ("Seasonal (repeat across years)", "seasonal"),
-            ("Seasonal + year control", "seasonal_years"),
+            ("Seasonal (all available years)", "seasonal_all"),
+            ("Seasonal (year range)", "seasonal_range"),
+            ("Seasonal (selected years only)", "seasonal_selected"),
         ],
-        value="standard",
-        description="Date Range Mode:",
+        value="seasonal_all",
+        description="Season mode:",
         layout=widgets.Layout(width="100%"),
         style={"description_width": "120px"},
     )
 
     daterange_w = widgets.Text(
-        value=_daterange_mode_placeholder("standard"),  # prefilled example
+        value=_daterange_mode_placeholder("seasonal_all"),  # prefilled example
         description="Daterange:",
-        placeholder=_daterange_mode_placeholder("standard"),
+        placeholder=_daterange_mode_placeholder("seasonal_all"),
         layout=widgets.Layout(width="100%"),
         style={"description_width": "120px"},
+    )
+
+    # Friendly date inputs for the common single-window case. The Python-style
+    # text box above (daterange_w) is kept for the advanced seasonal / multi-year
+    # modes, shown only when "Advanced date options" is ticked.
+    date_from_w = widgets.DatePicker(
+        value=_date(2024, 4, 1),
+        layout=widgets.Layout(width="100%"),
+    )
+    date_to_w = widgets.DatePicker(
+        value=_date(2024, 4, 10),
+        layout=widgets.Layout(width="100%"),
+    )
+    advanced_dates_w = widgets.Checkbox(
+        value=False,
+        description="Use a seasonal date range",
+        indent=False,
     )
 
     bands_w = widgets.SelectMultiple(
@@ -399,12 +425,10 @@ def datacube_builder(missions_func=missions):
     # -------------------------------------------------------------------------
     # Widgets (Advanced)
     # -------------------------------------------------------------------------
-    clip_raster_w = widgets.Dropdown(
-        options=[("False", False), ("True", True)],
+    clip_raster_w = widgets.Checkbox(
         value=False,
-        description="Clip raster:",
-        layout=widgets.Layout(width="100%"),
-        style={"description_width": "120px"},
+        description="Clip to exact polygon outline",
+        indent=False,
     )
 
     max_cc_w = widgets.IntText(
@@ -463,11 +487,11 @@ def datacube_builder(missions_func=missions):
 
     export_target_w = widgets.Text(
         value="",
-        description="Output:",
+        description="",
         placeholder="Disabled (Quick Result, no Export selected)",
         disabled=True,
         layout=widgets.Layout(width="100%"),
-        style={"description_width": "120px"},
+        style={"description_width": "0px"},
     )
 
     browse_polygon_btn = widgets.Button(
@@ -616,6 +640,8 @@ def datacube_builder(missions_func=missions):
         "last_auto_daterange_example": None,
         "last_auto_gif_suggestion": None,
         "last_json_syntax": None,
+        "draw_map": None,        # leafmap map, created lazily on first use
+        "draw_box_built": False,
     }
 
     # -------------------------------------------------------------------------
@@ -728,6 +754,12 @@ def datacube_builder(missions_func=missions):
             except Exception:
                 raise ValueError("Polygon bbox values must be numeric")
 
+            if vals[0] >= vals[2] or vals[1] >= vals[3]:
+                raise ValueError(
+                    "Polygon bbox must cover a real area: it needs xmin < xmax and "
+                    f"ymin < ymax. Got [xmin, ymin, xmax, ymax] = {vals}."
+                )
+
             return vals
 
         return s
@@ -808,6 +840,23 @@ def datacube_builder(missions_func=missions):
             daterange_w.value = new_example
 
         state["last_auto_daterange_example"] = new_example
+
+    def _resolve_daterange():
+        """Build the daterange object get_stac_layers expects, from whichever
+        date input is active: the simple From/To pickers, or (when 'Advanced date
+        options' is on) the Python-style text field. Returns the same shapes as
+        before -- e.g. ["YYYY-MM-DD", "YYYY-MM-DD"] -- so the backend is unchanged.
+        """
+        if advanced_dates_w.value:
+            return _parse_daterange_input(daterange_mode_w.value, daterange_w.value)
+
+        d_from = date_from_w.value
+        d_to = date_to_w.value
+        if d_from is None or d_to is None:
+            raise ValueError("Please choose both a 'From' and a 'To' date.")
+        if d_from > d_to:
+            raise ValueError("The 'From' date is after the 'To' date — please swap them.")
+        return [d_from.isoformat(), d_to.isoformat()]
 
     # -------------------------------------------------------------------------
     # Visualization helpers
@@ -890,7 +939,7 @@ def datacube_builder(missions_func=missions):
     def _prepare_get_stac_layers_params():
         mission = mission_dd.value
         polygon = _parse_polygon_input(polygon_w.value)
-        daterange = _parse_daterange_input(daterange_mode_w.value, daterange_w.value)
+        daterange = _resolve_daterange()
 
         resolution = None if resolution_w.disabled else int(resolution_w.value)
         max_cc = None if max_cc_w.disabled else int(max_cc_w.value)
@@ -899,7 +948,7 @@ def datacube_builder(missions_func=missions):
         indices = list(indices_w.value) if len(indices_w.value) > 0 else None
         stats = list(stats_w.value) if len(stats_w.value) > 0 else None
 
-        clip_raster = clip_raster_w.value
+        clip_raster = bool(clip_raster_w.value)
         cloud_masking = cloud_masking_w.value
         aggregator = aggregator_w.value
         source = source_w.value  # None for non-S2 missions
@@ -1054,7 +1103,7 @@ def datacube_builder(missions_func=missions):
         mission_for_json = meta.get("alias", meta.get("allias", mission_name))
 
         polygon = _parse_polygon_input(polygon_w.value)
-        daterange = _parse_daterange_input(daterange_mode_w.value, daterange_w.value)
+        daterange = _resolve_daterange()
 
         resolution = None if resolution_w.disabled else int(resolution_w.value)
         max_cc = None if max_cc_w.disabled else int(max_cc_w.value)
@@ -1063,7 +1112,7 @@ def datacube_builder(missions_func=missions):
         indices = list(indices_w.value) if len(indices_w.value) > 0 else None
         stats = list(stats_w.value) if len(stats_w.value) > 0 else None
 
-        clip_raster = clip_raster_w.value
+        clip_raster = bool(clip_raster_w.value)
         cloud_masking = cloud_masking_w.value
         aggregator = aggregator_w.value
 
@@ -1402,7 +1451,7 @@ def datacube_builder(missions_func=missions):
         if m_name == "sentinel_2_l2a":
             source_w.options = [
                 ("Element84 (Earth Search)", "element84"),
-                ("Terrabyte (DLR)", "terrabyte"),
+                ("terrabyte (DLR)", "terrabyte"),
                 ("Planetary Computer (Microsoft)", "planetary_computer"),
             ]
             source_w.value = "element84"
@@ -1439,11 +1488,18 @@ def datacube_builder(missions_func=missions):
         indices_all_btn.disabled = len(indices) == 0
         indices_none_btn.disabled = len(indices) == 0
 
-        # Clip raster
+        # Clip-to-polygon — availability depends on the mission. Keep the user's
+        # current choice when the new mission supports clipping; force it OFF and
+        # disable the box when it doesn't.
         clip_cfg = _bool_dropdown_from_metadata(meta.get("clip_raster"), default=False)
-        clip_raster_w.options = clip_cfg["options"]
-        clip_raster_w.value = clip_cfg["value"]
-        clip_raster_w.disabled = clip_cfg["disabled"]
+        _clip_supported = (not clip_cfg["disabled"]) and (
+            True in [v for _, v in clip_cfg["options"]]
+        )
+        if _clip_supported:
+            clip_raster_w.disabled = False
+        else:
+            clip_raster_w.value = False
+            clip_raster_w.disabled = True
 
         # Cloud masking
         cm_meta = meta.get("cloud_masking")
@@ -1602,7 +1658,24 @@ def datacube_builder(missions_func=missions):
 
             with status_out:
                 clear_output()
-                print("Generating data cube...")
+                # Browser-side CSS animation so the dots keep moving even while the
+                # kernel is blocked on a slow STAC build — shows the user it isn't
+                # stuck. It's removed by clear_output(wait=True) once the build
+                # returns, just before the final status message is printed.
+                generating_html = (
+                    "<style>"
+                    "@keyframes s2cBounce{0%,100%{opacity:0.3;transform:translateY(0);}"
+                    "50%{opacity:1;transform:translateY(-3px);}}"
+                    ".s2c-gen-dots span{display:inline-block;font-weight:700;"
+                    "animation:s2cBounce 1.2s infinite;}"
+                    ".s2c-gen-dots span:nth-child(2){animation-delay:0.2s;}"
+                    ".s2c-gen-dots span:nth-child(3){animation-delay:0.4s;}"
+                    "</style>"
+                    "<span style='font-size:13px;'>Generating data cube</span>"
+                    "<span class='s2c-gen-dots' style='font-size:13px;'>"
+                    "<span>.</span><span>.</span><span>.</span></span>"
+                )
+                display(HTML(generating_html))
 
                 # Ensure parent directory exists for direct NetCDF export
                 if params["output"] is not None:
@@ -1611,6 +1684,11 @@ def datacube_builder(missions_func=missions):
                 # If get_stac_layers(output=...) internally calls export_stac(),
                 # Dask ProgressBar output will print inside this status box.
                 result = get_stac_layers(**params)
+
+                # Build done — clear the animated indicator (and any transient
+                # progress) right before the final status is printed. wait=True
+                # swaps the content in without a flash of empty space.
+                clear_output(wait=True)
 
                 state["result"] = result
                 export_result_btn.disabled = False
@@ -1632,8 +1710,9 @@ def datacube_builder(missions_func=missions):
                         "target": export_target,
                         "via": "get_stac_layers",
                     }
-                    # export_stac() already prints the file path
-                    print("✅ Data cube generation finished.")
+                    # The status was just cleared, so restate the export path here
+                    # (export_stac's own print is wiped by clear_output above).
+                    print(f"✅ Data cube generation finished. Exported to: {export_target}")
 
                 else:
                     print("✅ Data cube generation finished. Result stored in memory.")
@@ -1760,46 +1839,327 @@ def datacube_builder(missions_func=missions):
         layout=widgets.Layout(width="100%", gap="4px"),
     )
 
-    bands_box = widgets.VBox(
+    bands_box = _field_group(
+        "Bands",
         [
-            _stacked_field(bands_w, "Bands"),
+            _boxed(bands_w),
             widgets.HBox(
                 [bands_all_btn, bands_none_btn], layout=widgets.Layout(gap="6px")
             ),
-        ]
+        ],
+        subtitle="Which spectral bands to include.",
     )
 
-    indices_box = widgets.VBox(
+    indices_box = _field_group(
+        "Indices",
         [
-            _stacked_field(indices_w, "Indices"),
+            _boxed(indices_w),
             widgets.HBox(
                 [indices_all_btn, indices_none_btn], layout=widgets.Layout(gap="6px")
             ),
-        ]
+        ],
+        subtitle="Spectral indices to compute.",
     )
 
-    stats_box = widgets.VBox(
+    stats_box = _field_group(
+        "Stats",
         [
-            _with_help_left(stats_w, "stats", label_text="Stats"),
+            _boxed(stats_w),
             widgets.HBox(
                 [stats_all_btn, stats_none_btn], layout=widgets.Layout(gap="6px")
             ),
-        ]
+        ],
+        subtitle="Add over-time summary layers (mean, median, …)?",
+        help_html=PARAM_HELP_HTML.get("stats", ""),
     )
+
+    # A prominent "OR" separator, reused in the Polygon group and here.
+    def _or_divider():
+        return widgets.HTML(
+            "<div style='display:flex; align-items:center; gap:12px; margin:16px 0 12px 0;'>"
+            "<span style='flex:1; height:2px; background:#cbd5e1;'></span>"
+            "<span style='font-size:14px; font-weight:700; color:#6b7280; "
+            "letter-spacing:2px;'>OR</span>"
+            "<span style='flex:1; height:2px; background:#cbd5e1;'></span>"
+            "</div>"
+        )
+
+    # --- Time period: simple From/To pickers, with advanced modes tucked away ---
+    # The OR divider lives inside date_simple_box so it hides together with the
+    # From/To pickers when "Use a seasonal date range" is ticked.
+    date_simple_box = widgets.VBox(
+        [
+            _stacked_field(date_from_w, "From"),
+            _stacked_field(date_to_w, "To"),
+            _or_divider(),
+        ],
+        layout=widgets.Layout(width="100%", gap="6px"),
+    )
+
+    # Daterange field with the red MM-DD hint between its label and the input box.
+    _dr_field = _stacked_field(daterange_w, "Daterange")
+    _dr_field.children = [
+        _dr_field.children[0],
+        widgets.HTML(
+            "<div style='font-size:12px; color:#b91c1c; margin:0;'>"
+            "season &rarr; <code>\"MM-DD\" - \"MM-DD\"</code></div>"
+        ),
+        _dr_field.children[1],
+    ]
+    date_advanced_box = widgets.VBox(
+        [
+            _with_help_left(daterange_mode_w, "daterange_mode", label_text="Season mode"),
+            _dr_field,
+        ],
+        layout=widgets.Layout(width="100%", gap="6px", display="none"),
+    )
+
+    def _update_date_inputs_visibility(*_):
+        advanced = advanced_dates_w.value
+        date_simple_box.layout.display = "none" if advanced else ""
+        date_advanced_box.layout.display = "" if advanced else "none"
+
+    advanced_dates_w.observe(lambda change: _update_date_inputs_visibility(), names="value")
+    _update_date_inputs_visibility()
+
+    date_section = _field_group(
+        "Time period",
+        [date_simple_box, advanced_dates_w, date_advanced_box],
+        subtitle="Which dates should the data cube cover?",
+    )
+
+    # --- Optional: draw the area of interest on an interactive map ---
+    draw_polygon_w = widgets.Checkbox(
+        value=False,
+        description="Draw the area on a map (exact polygon outline)",
+        indent=False,
+    )
+    use_drawn_btn = widgets.Button(
+        description="Use drawn area",
+        button_style="success",
+        icon="check",
+        layout=widgets.Layout(width="auto", min_width="220px", height="44px"),
+        style=widgets.ButtonStyle(font_weight="bold", font_size="15px"),
+    )
+    draw_status = widgets.Output()
+    draw_box = widgets.VBox([], layout=widgets.Layout(display="none", width="100%", gap="6px"))
+
+    def _ensure_draw_map():
+        """Create the leafmap map on first use. Lazy so the GUI loads fast and
+        still works if leafmap is not installed."""
+        if state.get("draw_map") is not None:
+            return state["draw_map"]
+        try:
+            import leafmap
+        except Exception:
+            return None
+        # Default view: Istanbul across the Bosphorus, framing both the European
+        # and Asian sides ([lat, lon]).
+        m = leafmap.Map(center=[41.05, 29.00], zoom=10)
+        m.layout.height = "60vh"
+        m.layout.min_height = "320px"
+        m.layout.max_height = "640px"
+        m.layout.width = "100%"
+        try:
+            m.add_basemap("Esri.WorldImagery")  # default: satellite
+        except Exception:
+            pass
+        state["draw_map"] = m
+        return m
+
+    def _update_draw_visibility(*_):
+        if not draw_polygon_w.value:
+            draw_box.layout.display = "none"
+            return
+        if not state.get("draw_box_built"):
+            m = _ensure_draw_map()
+            if m is None:
+                draw_box.children = [
+                    widgets.HTML(
+                        "<div style='color:#b91c1c; font-size:12px;'>Drawing needs the "
+                        "<code>leafmap</code> package, which isn't available here. You can "
+                        "still type a path or bbox above.</div>"
+                    )
+                ]
+            else:
+                draw_box.children = [
+                    widgets.HTML(
+                        "<div style='font-size:12px; color:#6b7280; margin:0 0 4px 0;'>"
+                        "• Use the tools at the <b>top-left</b> of the map to draw your area.<br>"
+                        "&nbsp;&nbsp;Tip: choose <b>“Draw a rectangle”</b> to maximize "
+                        "co-registration and super-resolution efficiency.<br>"
+                        "• Default background is <b>Satellite (Esri)</b>. To change it, open "
+                        "the toolbar at the <b>top-right</b> of the map and choose "
+                        "<b>Change basemap</b>.</div>"
+                    ),
+                    m,
+                    widgets.HBox([use_drawn_btn], layout=widgets.Layout(gap="6px")),
+                    draw_status,
+                ]
+            state["draw_box_built"] = True
+        draw_box.layout.display = ""
+
+    def _on_use_drawn_clicked(_):
+        with draw_status:
+            clear_output()
+            m = state.get("draw_map")
+            if m is None:
+                print("❌ The map isn't ready yet.")
+                return
+            roi = getattr(m, "user_roi", None)
+            if not roi:
+                print(
+                    "✋ Draw a rectangle or polygon on the map first (tools at the "
+                    "top-left of the map), then click “Use drawn area”."
+                )
+                return
+            try:
+                geom = roi.get("geometry", roi) if isinstance(roi, dict) else roi
+                gtype = (geom or {}).get("type")
+                coords = (geom or {}).get("coordinates")
+                if gtype == "Polygon":
+                    ring = coords[0]
+                elif gtype == "MultiPolygon":
+                    ring = coords[0][0]
+                else:
+                    print(
+                        "✋ Please draw an area — a rectangle or polygon — not a point "
+                        f"or line (this looks like a {gtype})."
+                    )
+                    return
+                xs = [pt[0] for pt in ring]
+                ys = [pt[1] for pt in ring]
+                bbox = [min(xs), min(ys), max(xs), max(ys)]  # [xmin, ymin, xmax, ymax] WGS84
+            except Exception as e:
+                print(f"❌ Couldn't read the drawn shape: {e}")
+                return
+
+            if bbox[0] >= bbox[2] or bbox[1] >= bbox[3]:
+                print(
+                    "✋ The drawn area has no width or height (it came out as a line or "
+                    f"point):\n{bbox}\n"
+                    "Please draw a box/polygon that covers an actual area — make sure to "
+                    "drag both sideways and up/down — then click “Use drawn area” again."
+                )
+                return
+
+            # Save the EXACT drawn outline as a WGS84 GeoJSON file and point Polygon
+            # at it, so ticking "Clip data cube to polygon boundaries" clips to the
+            # true shape (not just the bbox). get_stac still derives the bbox from it
+            # for the search.
+            try:
+                feature = (
+                    roi
+                    if (isinstance(roi, dict) and roi.get("type") == "Feature")
+                    else {"type": "Feature", "properties": {}, "geometry": geom}
+                )
+                fc = {"type": "FeatureCollection", "features": [feature]}
+                out_dir = Path("polygons")
+                try:
+                    out_dir.mkdir(parents=True, exist_ok=True)
+                except Exception:
+                    out_dir = Path(tempfile.gettempdir())
+                out_path = out_dir / f"drawn_{_datetime.now().strftime('%Y%m%d_%H%M%S')}.geojson"
+                with open(out_path, "w", encoding="utf-8") as f:
+                    json.dump(fc, f)
+            except Exception as e:
+                print(f"❌ Couldn't save the drawn shape: {e}")
+                return
+
+            polygon_w.value = out_path.as_posix()  # overwrites any path/bbox set above
+            # A drawing is an exact request, so clip to precisely what was drawn.
+            # (Draw a rectangle for a bbox-shaped cube; draw a polygon for that outline.)
+            if not clip_raster_w.disabled:
+                clip_raster_w.value = True
+            print(
+                f'✅ Area from your drawing is saved to "{out_path.as_posix()}" and will be '
+                "used as the new polygon of the data cube. Easy, right mate?"
+            )
+
+    draw_polygon_w.observe(lambda c: _update_draw_visibility(), names="value")
+    use_drawn_btn.on_click(_on_use_drawn_clicked)
+
+    # Warning shown beside the opt-in clip control: bbox is the deliberate default.
+    clip_warning_html = widgets.HTML(
+        "<div style='font-size:12px; color:#92400e; background:#fffbeb; "
+        "border:1px solid #fde68a; border-radius:6px; padding:6px 8px;'>"
+        "⚠️ By default the cube is returned as the polygon's <b>bounding box</b> (a clean "
+        "rectangle). This is intentional: a rectangle gives the best results for "
+        "<b>co-registration</b> and <b>super-resolution</b>. Tick the box above only if you "
+        "want the cube clipped to the <b>exact polygon outline</b> (pixels outside the shape "
+        "become NaN)."
+        "</div>"
+    )
+
+    # Warning shown only when the terrabyte STAC API is the chosen Data Source.
+    terrabyte_warning_html = widgets.HTML(
+        "<div style='font-size:12px; color:#92400e; background:#fffbeb; "
+        "border:1px solid #fde68a; border-radius:6px; padding:6px 8px;'>"
+        "⚠️ The <b>terrabyte</b> STAC API data cube can be built, but it <b>cannot</b> be "
+        "exported nor visualized if the user credentials are not met. In this case, please "
+        "use this repository @ <a href='https://portal.terrabyte.lrz.de/' target='_blank' "
+        "rel='noopener noreferrer'>https://portal.terrabyte.lrz.de/</a>"
+        "</div>",
+        layout=widgets.Layout(display="none"),
+    )
+
+    def _update_terrabyte_warning(*_):
+        show = (source_w.value == "terrabyte") and (not source_w.disabled)
+        terrabyte_warning_html.layout.display = "" if show else "none"
+
+    source_w.observe(
+        lambda change: _update_terrabyte_warning(), names=["value", "disabled"]
+    )
+    _update_terrabyte_warning()
+
+    # Bottom-of-section "collapse" buttons so a long, scrolled accordion can be
+    # folded back up without scrolling to its title bar. Wired to the accordions
+    # below (which don't exist yet at this point).
+    def _collapse_button(tooltip):
+        return widgets.Button(
+            description="Collapse",
+            icon="chevron-up",
+            tooltip=tooltip,
+            layout=widgets.Layout(width="auto"),
+        )
+
+    def _collapse_row(btn):
+        return widgets.HBox(
+            [btn],
+            layout=widgets.Layout(
+                width="100%", justify_content="flex-end", margin="2px 0 0 0"
+            ),
+        )
+
+    basic_collapse_btn = _collapse_button("Collapse Basic Parameters")
+    advanced_collapse_btn = _collapse_button("Collapse Advanced Parameters")
+    viz_collapse_btn = _collapse_button("Collapse Visualization")
 
     basic_box = widgets.VBox(
         [
-            #widgets.HTML("<b>Basic Parameters</b>"),
-            _stacked_field(mission_dd, "Mission"),
-            _stacked_field(source_w, "Data Source"),
-            _stacked_field(resolution_w, "Resolution"),
-            _with_help_left(polygon_input_box, "polygon", label_text="Polygon"),
-            _with_help_left(
-                daterange_mode_w, "daterange_mode", label_text="Date Range Mode"
+            _field_group("Mission", [_boxed(mission_dd)],
+                         subtitle="Which satellite mission to use."),
+            _field_group("Data Source", [_boxed(source_w), terrabyte_warning_html],
+                         subtitle="Which catalog to download from."),
+            _field_group("Resolution", [_boxed(resolution_w)],
+                         subtitle="Output pixel size, in metres."),
+            _field_group(
+                "Polygon",
+                [
+                    _boxed(polygon_input_box),
+                    clip_raster_w,
+                    clip_warning_html,
+                    _or_divider(),
+                    draw_polygon_w,
+                    draw_box,
+                ],
+                subtitle="The area to cover. Pick a polygon file or bounding box, or draw it on a map.",
+                help_html=PARAM_HELP_HTML.get("polygon", ""),
             ),
-            _stacked_field(daterange_w, "Daterange"),
+            date_section,
             bands_box,
             indices_box,
+            _collapse_row(basic_collapse_btn),
         ],
         layout=widgets.Layout(width="100%", gap="6px"),
     )
@@ -1810,14 +2170,17 @@ def datacube_builder(missions_func=missions):
 
     advanced_box = widgets.VBox(
         [
-            #widgets.HTML("<b>Advanced Parameters</b>"),
-            _with_help_left(clip_raster_w, "clip_raster", label_text="Clip raster"),
-            _with_help_left(max_cc_w, "max_cc", label_text="Max CC"),
-            _with_help_left(
-                cloud_masking_w, "cloud_masking", label_text="Cloud masking"
-            ),
+            _field_group("Max CC", [_boxed(max_cc_w)],
+                         subtitle="Maximum scene cloud cover to allow (%).",
+                         help_html=PARAM_HELP_HTML.get("max_cc", "")),
+            _field_group("Cloud masking", [_boxed(cloud_masking_w)],
+                         subtitle="Mask out clouds using the scene classification layer?",
+                         help_html=PARAM_HELP_HTML.get("cloud_masking", "")),
             stats_box,
-            _with_help_left(aggregator_w, "aggregator", label_text="Aggregator"),
+            _field_group("Aggregator", [_boxed(aggregator_w)],
+                         subtitle="Combine all dates into one image (mean / median)?",
+                         help_html=PARAM_HELP_HTML.get("aggregator", "")),
+            _collapse_row(advanced_collapse_btn),
         ],
         layout=widgets.Layout(width="100%", gap="6px"),
     )
@@ -1857,6 +2220,7 @@ def datacube_builder(missions_func=missions):
                 ],
                 layout=widgets.Layout(width="100%", gap="6px"),
             ),
+            _collapse_row(viz_collapse_btn),
         ],
         layout=widgets.Layout(width="100%", gap="8px"),
     )
@@ -1866,6 +2230,12 @@ def datacube_builder(missions_func=missions):
     advanced_acc.set_title(0, "Advanced Parameters")
     advanced_acc.layout = widgets.Layout(width="99%")
 
+    # Now that both accordions exist, wire the bottom collapse buttons to fold them.
+    basic_collapse_btn.on_click(lambda _: setattr(basic_acc, "selected_index", None))
+    advanced_collapse_btn.on_click(
+        lambda _: setattr(advanced_acc, "selected_index", None)
+    )
+
     export_acc = widgets.Accordion(children=[export_box], selected_index=None)
     export_acc.set_title(0, "Export Options")
     export_acc.layout = widgets.Layout(width="99%")
@@ -1873,6 +2243,7 @@ def datacube_builder(missions_func=missions):
     viz_acc = widgets.Accordion(children=[visualization_box], selected_index=None)
     viz_acc.set_title(0, "Visualization")
     viz_acc.layout = widgets.Layout(width="99%")
+    viz_collapse_btn.on_click(lambda _: setattr(viz_acc, "selected_index", None))
 
     result_box = widgets.VBox(
         [result_out], layout=widgets.Layout(width="99%", gap="6px")

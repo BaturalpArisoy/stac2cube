@@ -128,15 +128,15 @@ def parse_daterange_input(mode: str, text: str):
             validate_date_string(d, r"^\d{2}-\d{2}$", "season date (MM-DD)")
         return list(obj)
 
-    if mode == "seasonal_years":
+    if mode in ("seasonal_years", "seasonal_all", "seasonal_range", "seasonal_selected"):
         if not isinstance(obj, dict):
             raise ValueError(
-                "Seasonal + year control expects a dict, e.g. "
+                "Seasonal mode expects a dict, e.g. "
                 '{"season": ["04-01", "10-31"], "years": [2019, 2020]}'
             )
         if "season" not in obj or "years" not in obj:
             raise ValueError(
-                'Seasonal + year control requires keys: "season" and "years"'
+                'Seasonal mode requires keys: "season" and "years"'
             )
 
         season = obj["season"]
@@ -188,6 +188,18 @@ GUI_CSS = """
     min-width: 0;
 }
 
+/* A subtle sub-panel that groups related fields (e.g. the date inputs) and sets
+   them apart from neighbouring fields inside the same card. */
+.stac2cube-group {
+    border: 1px solid #e5e7eb;
+    border-radius: 10px;
+    padding: 10px 12px;
+    background: #ffffff;
+    box-sizing: border-box;
+    min-width: 0;
+    margin-bottom: 10px;
+}
+
 /* Keep accordion panels and nested widget boxes from overflowing the card */
 .stac2cube-card .p-Accordion-child,
 .stac2cube-card .p-Accordion-child > .p-Widget,
@@ -201,6 +213,7 @@ GUI_CSS = """
 /* Let widget containers shrink so long option text / long values can't push a
    stray horizontal scrollbar onto the field (the symptom inside accordions). */
 .stac2cube-card .widget-box,
+.stac2cube-card .widget-checkbox,
 .stac2cube-card .widget-dropdown,
 .stac2cube-card .widget-text,
 .stac2cube-card .widget-textarea,
@@ -298,6 +311,62 @@ def help_button(tooltip="Show help"):
     )
     btn.add_class("stac2cube-help-btn")
     return btn
+
+
+def field_group(title, children, subtitle=None, help_html=None):
+    """Wrap related fields in a subtly bordered sub-panel with a small heading,
+    an optional subtitle and an optional '?' help toggle, to set them apart from
+    neighbouring fields inside a card."""
+    title_html = widgets.HTML(
+        f"<div style='font-weight:600; font-size:13px; color:#374151; margin:0;'>{title}</div>"
+    )
+
+    help_box = None
+    if help_html:
+        btn = help_button()
+        help_box = widgets.HTML(
+            value=help_html,
+            layout=widgets.Layout(
+                display="none",
+                border="1px solid #dbeafe",
+                padding="8px",
+                border_radius="8px",
+                margin="2px 0 2px 0",
+                width="100%",
+            ),
+        )
+
+        def _toggle(_):
+            help_box.layout.display = "" if help_box.layout.display == "none" else "none"
+
+        btn.on_click(_toggle)
+        header = [widgets.HBox([title_html, btn], layout=widgets.Layout(align_items="center", gap="6px"))]
+    else:
+        header = [title_html]
+
+    if subtitle:
+        header.append(
+            widgets.HTML(
+                f"<div style='font-size:12px; color:#6b7280; margin:0 0 2px 0;'>{subtitle}</div>"
+            )
+        )
+    if help_box is not None:
+        header.append(help_box)
+
+    box = widgets.VBox(
+        header + list(children),
+        layout=widgets.Layout(width="100%", gap="6px"),
+    )
+    box.add_class("stac2cube-group")
+    return box
+
+
+def boxed_control(widget):
+    """Clear a widget's built-in description and wrap it in a width-100% box (the
+    wrapper prevents the stray horizontal scrollbar). Use inside field_group when
+    the group title already serves as the field's label."""
+    _clear_description(widget)
+    return widgets.Box([widget], layout=widgets.Layout(width="100%"))
 
 
 def stacked_field(widget, label_text=None):
