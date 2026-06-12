@@ -43,6 +43,7 @@ from .gui_common import (
     is_str_list_len2 as _is_str_list_len2,
     validate_date_string as _validate_date_string,
     parse_daterange_input as _parse_daterange_input,
+    friendly_error as _friendly_error,
     gui_css_widget as _gui_css_widget,
     stacked_field as _stacked_field,
     stacked_field_with_help as _field_with_help,
@@ -78,7 +79,6 @@ PARAM_HELP_HTML = {
     Can also be a WGS84 bbox list: <code>[xmin, ymin, xmax, ymax]</code> (not projected coords). Useful tool: <code>http://bboxfinder.com/</code><br>
     <b>3) Draw on a map</b><br>
     Tick <b>"Draw the area on a map instead"</b> below to open an interactive map. Use the draw tools at the top-left of the map to draw a rectangle or polygon over your area, then click <b>"Use drawn area"</b>. Your exact outline is saved as a GeoJSON file in the <code>polygons</code> folder and the box above is pointed at it (overwriting any path you typed). To change the background map, use the toolbar at the top-right of the map.<br>
-    <b>Note:</b> If you have multiple features, only the first feature is used.
     """,
     "clip_raster": """
     <b>Clip data cube to polygon boundaries</b><br>
@@ -1577,7 +1577,7 @@ def datacube_builder(missions_func=missions):
             _show_status("✅ JSON syntax copied to clipboard.")
 
         except Exception as e:
-            _show_status(f"❌ Could not copy JSON syntax: {type(e).__name__}: {e}")
+            _show_status(_friendly_error(e, "Copying the JSON"))
 
     # -------------------------------------------------------------------------
     # File chooser helpers / callbacks (ipyfilechooser)
@@ -1956,7 +1956,7 @@ def datacube_builder(missions_func=missions):
         except Exception as e:
             with viz_out:
                 clear_output()
-                print(f"❌ Visualization error: {type(e).__name__}: {e}")
+                print(_friendly_error(e, "Visualization"))
 
     def _on_viz_make_gif_clicked(_):
         try:
@@ -1998,7 +1998,7 @@ def datacube_builder(missions_func=missions):
         except Exception as e:
             with viz_out:
                 clear_output()
-                print(f"❌ Animation error: {type(e).__name__}: {e}")
+                print(_friendly_error(e, "Animation"))
 
     # -------------------------------------------------------------------------
     # Main action callbacks
@@ -2117,7 +2117,7 @@ def datacube_builder(missions_func=missions):
                 pass
 
         except Exception as e:
-            _show_status(f"❌ {type(e).__name__}: {e}")
+            _show_status(_friendly_error(e, "Building"))
 
     def _on_export_result_clicked(_):
         try:
@@ -2141,7 +2141,7 @@ def datacube_builder(missions_func=missions):
                     print(f"✅ Export finished: {info['target']}")
 
         except Exception as e:
-            _show_status(f"❌ {type(e).__name__}: {e}")
+            _show_status(_friendly_error(e, "Export"))
 
     # -------------------------------------------------------------------------
     # Wire callbacks
@@ -2578,7 +2578,7 @@ def datacube_builder(missions_func=missions):
     advanced_box = widgets.VBox(
         [
             _field_group("Max CC", [_boxed(max_cc_w)],
-                         subtitle="Maximum scene cloud cover to allow (%).",
+                         subtitle="Maximum scene cloud cover to allow (%), but based on the entire Sentinel-2 tile, not just the area of interest!",
                          help_html=PARAM_HELP_HTML.get("max_cc", "")),
             _field_group("Cloud masking", [_boxed(cloud_masking_w)],
                          subtitle="Mask out clouds using the scene classification layer?",
@@ -4257,7 +4257,7 @@ def datacube_editor():
                 pass
 
         except Exception as e:
-            _show_status(f"❌ {type(e).__name__}: {e}")
+            _show_status(_friendly_error(e, "Loading"))
 
     def _on_reset_clicked(_):
         if state["loaded_original"] is None:
@@ -4368,7 +4368,7 @@ def datacube_editor():
                 pass
 
         except Exception as e:
-            _show_status(f"❌ {type(e).__name__}: {e}")
+            _show_status(_friendly_error(e, "Editing"))
 
     def _on_export_current_clicked(_):
         if state["current"] is None:
@@ -4389,7 +4389,7 @@ def datacube_editor():
                 _print_working_note()
 
         except Exception as e:
-            _show_status(f"❌ {type(e).__name__}: {e}")
+            _show_status(_friendly_error(e, "Export"))
 
     def _on_viz_dropdown_clicked(_):
         if state["current"] is None:
@@ -4411,7 +4411,7 @@ def datacube_editor():
         except Exception as e:
             with viz_out:
                 clear_output()
-                print(f"❌ Visualization error: {type(e).__name__}: {e}")
+                print(_friendly_error(e, "Visualization"))
 
     def _on_make_gif_clicked(_):
         if state["current"] is None:
@@ -4458,7 +4458,7 @@ def datacube_editor():
         except Exception as e:
             with viz_out:
                 clear_output()
-                print(f"❌ Animation error: {type(e).__name__}: {e}")
+                print(_friendly_error(e, "Animation"))
 
     # ---------------------------------------------------------------------
     # Small selection helper callbacks

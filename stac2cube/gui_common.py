@@ -164,6 +164,127 @@ def parse_daterange_input(mode: str, text: str):
 
         return {"season": list(season), "years": years}
 
+
+def friendly_error(e, action="The operation"):
+    """One-line, plain-language error message for the GUI status box.
+
+    Known failure families get a specific sentence with a suggested fix; the
+    package's own validation ValueErrors (already written as human sentences)
+    pass through without the exception-class jargon; anything unrecognized falls
+    back to a generic sentence plus a single technical-detail line. Never shows
+    a traceback. Classification is by exception type + conservative message
+    patterns, so a misclassified error lands in the generic fallback rather
+    than getting a wrong suggestion.
+    """
+    etype = type(e).__name__
+    msg = str(e).strip() or etype
+    low = msg.lower()
+
+    def out(text):
+        return f"❌ {action} failed — {text}"
+
+    # Out of memory
+    if isinstance(e, MemoryError) or "unable to allocate" in low or "out of memory" in low:
+        return out(
+            "not enough memory (RAM) for this data cube. Try selecting a shorter "
+            "date range and use the update mechanism in the Data Cube Editor, which "
+            "usually solves the issue. If even a smaller date range does not work, "
+            "then select a significantly smaller area."
+        )
+
+    # Disk full
+    if "no space left on device" in low or getattr(e, "errno", None) == 28:
+        return out(
+            "not enough disk space to write the file. Free some space or pick "
+            "another location."
+        )
+
+    # Output file locked / write-protected
+    if isinstance(e, PermissionError) or "permission denied" in low:
+        return out(
+            "the output file is in use or write-protected (is it open in another "
+            "program?). Close it or choose a different output name."
+        )
+
+    # File not found (covers fiona/GDAL 'No such file or directory' too)
+    if isinstance(e, FileNotFoundError) or "no such file or directory" in low:
+        path = getattr(e, "filename", None)
+        where = f": {path}" if path else f" ({msg})"
+        return out(
+            f"a file couldn't be found{where}. Check the path, or use the folder "
+            "button to pick the file."
+        )
+
+    # Vector file exists but can't be read as polygon data
+    if etype == "DriverError" or "not recognized as a supported file format" in low:
+        return out(
+            "this file couldn't be read as a polygon. Supported formats: "
+            "gpkg, geojson, kml, kmz, shp."
+        )
+
+    # Invalid / degenerate geometry rejected by the STAC API
+    if "invalid_shape" in low or "cannot determine orientation" in low:
+        return out(
+            "the selected area isn't a valid shape (it may have no width/height or "
+            "self-crossing edges). Please re-draw the area or fix the polygon file, "
+            "then try again."
+        )
+
+    # Access denied (e.g. terrabyte without credentials)
+    if (
+        "unauthorized" in low
+        or "forbidden" in low
+        or "authentication" in low
+        or "invalid token" in low
+        or "401 client error" in low
+        or "403 client error" in low
+    ):
+        return out(
+            "the data service refused access (credentials required). If you're "
+            "using terrabyte, you need valid terrabyte credentials — see "
+            "https://portal.terrabyte.lrz.de/."
+        )
+
+    # Catalog / network unreachable
+    if (
+        etype in (
+            "ConnectionError", "ConnectTimeout", "ReadTimeout", "Timeout",
+            "MaxRetryError", "NewConnectionError", "ProxyError", "SSLError",
+        )
+        or "max retries" in low
+        or "timed out" in low
+        or "getaddrinfo" in low
+        or "connection refused" in low
+        or "connection aborted" in low
+        or "connection reset" in low
+        or "failed to establish" in low
+        or "temporary failure in name resolution" in low
+    ):
+        return out(
+            "couldn't reach the data catalog. Check your internet connection, or "
+            "the service may be temporarily down; try again in a few minutes."
+        )
+
+    # No scenes for the chosen parameters
+    if "no scenes found" in low or "no scenes left" in low or "no scenes were kept" in low:
+        return out(
+            "no scenes were found for these settings. Try a wider time period, a "
+            "higher Max CC, or double-check the polygon's location."
+        )
+
+    # The package's own validation messages are already human sentences — show
+    # them as-is, just without the 'ValueError:' jargon (drop a leading 'Error:').
+    if isinstance(e, ValueError):
+        clean = re.sub(r"^error:\s*", "", msg, flags=re.IGNORECASE).strip()
+        return out(clean if clean else "the input values are not valid.")
+
+    # Unknown: generic sentence + one technical line (no traceback).
+    detail = msg if len(msg) <= 300 else msg[:300] + "…"
+    return (
+        out("something unexpected went wrong and the operation couldn't be completed.")
+        + f"\nTechnical detail (for bug reports): {etype}: {detail}"
+    )
+
     raise ValueError(f"Unknown Date Range Mode: {mode}")
 
 
@@ -198,6 +319,11 @@ GUI_CSS = """
     box-sizing: border-box;
     min-width: 0;
     margin-bottom: 10px;
+    /* Clip any sliver of horizontal overflow inside a group (e.g. the full-width
+       header button) so a group never shows its own ugly horizontal scrollbar.
+       'clip' (not 'hidden') does not force a vertical scrollbar, so the draw map
+       and other tall content still display fully. */
+    overflow-x: clip;
 }
 
 /* Keep accordion panels and nested widget boxes from overflowing the card */
@@ -208,6 +334,24 @@ GUI_CSS = """
     min-width: 0 !important;
     max-width: 100% !important;
     box-sizing: border-box !important;
+}
+
+/* Header button for the custom collapsible groups (Polygon / Time Period / Bands
+   / Indices / Stats): looks like a clickable section title, not a button. */
+button.stac2cube-group-toggle,
+button.stac2cube-group-toggle:hover,
+button.stac2cube-group-toggle:focus,
+button.stac2cube-group-toggle:active {
+    background: transparent !important;
+    color: #374151 !important;
+    font-weight: 600 !important;
+    font-size: 13px !important;
+    text-align: left !important;
+    justify-content: flex-start !important;
+    padding: 2px 0 !important;
+    border: 0 !important;
+    box-shadow: none !important;
+    width: 100% !important;
 }
 
 /* Let widget containers shrink so long option text / long values can't push a
@@ -360,7 +504,16 @@ def field_group(title, children, subtitle=None, help_html=None, collapsible=Fals
     )
 
     if collapsible:
-        # Title goes on the accordion bar; keep subtitle + help (?) + fields inside.
+        # A custom collapse (NOT ipywidgets Accordion, which renders a few px wider
+        # and causes the stray horizontal scrollbar). The whole thing is just the
+        # normal .stac2cube-group box — which already lays out cleanly — with a
+        # clickable header button on top that shows/hides the body.
+        toggle = widgets.Button(
+            description=f"{'▾' if open else '▸'}  {title}",
+            layout=widgets.Layout(width="100%"),
+        )
+        toggle.add_class("stac2cube-group-toggle")
+
         body_children = []
         if subtitle_html is not None or btn is not None:
             row = []
@@ -375,12 +528,24 @@ def field_group(title, children, subtitle=None, help_html=None, collapsible=Fals
             body_children.append(help_box)
         body_children += list(children)
         body = widgets.VBox(
-            body_children, layout=widgets.Layout(width="100%", gap="6px")
+            body_children,
+            layout=widgets.Layout(
+                width="100%", gap="6px", display=("" if open else "none")
+            ),
         )
-        acc = widgets.Accordion(children=[body], selected_index=(0 if open else None))
-        acc.set_title(0, title)
-        acc.layout = widgets.Layout(width="100%")
-        return acc
+
+        def _toggle_body(_):
+            showing = body.layout.display != "none"
+            body.layout.display = "none" if showing else ""
+            toggle.description = f"{'▸' if showing else '▾'}  {title}"
+
+        toggle.on_click(_toggle_body)
+
+        box = widgets.VBox(
+            [toggle, body], layout=widgets.Layout(width="100%", gap="6px")
+        )
+        box.add_class("stac2cube-group")
+        return box
 
     if help_box is not None:
         header = [widgets.HBox([title_html, btn], layout=widgets.Layout(align_items="center", gap="6px"))]
