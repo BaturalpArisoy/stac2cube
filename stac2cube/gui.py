@@ -2659,11 +2659,17 @@ def datacube_builder(missions_func=missions):
     basic_box = widgets.VBox(
         [
             _field_group("Mission", [_boxed(mission_dd)],
-                         subtitle="Which satellite mission to use."),
+                         subtitle="Satellite mission to use."),
             _field_group("Data Source", [_boxed(source_w), terrabyte_warning_html],
-                         subtitle="Which catalog to download from."),
-            _field_group("Resolution", [_boxed(resolution_w)],
-                         subtitle="Output pixel size, in metres."),
+                         subtitle="Catalog to download from. The default is open-source and does not require any credentials :)"),
+            _field_group(
+                        "Resolution",
+                        [_boxed(resolution_w)],
+                        subtitle=(
+                            "Output pixel size, in metres.\n"
+                            "Changing it to 2.5 metres DOES NOT super-resolve the data, it just resamples it."
+                        ),
+                    ),
             _field_group(
                 "Polygon",
                 [
@@ -2703,14 +2709,14 @@ def datacube_builder(missions_func=missions):
     advanced_box = widgets.VBox(
         [
             _field_group("Max CC", [_boxed(max_cc_w)],
-                         subtitle="Maximum scene cloud cover to allow (%), but based on the entire Sentinel-2 tile, not just the area of interest!",
+                         subtitle="Maximum scene cloud cover to allow (%), but based on the entire Sentinel-2 tile, not the area of interest!",
                          help_html=PARAM_HELP_HTML.get("max_cc", "")),
             _field_group("Cloud masking", [_boxed(cloud_masking_w)],
-                         subtitle="Mask out clouds using the scene classification layer?",
+                         subtitle="Mask out clouds using the scene classification layer. (fast but not dynamic, keep it False for s2cloudless later)",
                          help_html=PARAM_HELP_HTML.get("cloud_masking", "")),
             stats_box,
             _field_group("Aggregator", [_boxed(aggregator_w)],
-                         subtitle="Combine all dates into one image (mean / median)?",
+                         subtitle="Combine all dates into one image (mean or median instead of time series)",
                          help_html=PARAM_HELP_HTML.get("aggregator", "")),
             _collapse_row(advanced_collapse_btn),
         ],
