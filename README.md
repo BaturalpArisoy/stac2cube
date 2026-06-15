@@ -3,7 +3,7 @@
 # stac2cube <br> STACs to Analysis-Ready Data Cubes
 
 [![Preprint DOI](https://img.shields.io/badge/DOI-10.5194%2Fegusphere--2026--619-blue)](https://doi.org/10.5194/egusphere-2026-619)
-[![DOI](https://zenodo.org/badge/940592574.svg)](https://doi.org/10.5281/zenodo.18458716)
+[![DOI](https://zenodo.org/badge/940592574.svg)](https://zenodo.org/records/18495808)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
 
 
@@ -64,7 +64,7 @@ Choose one of the two methods below:
 
 ---
 
-### Option A — Manual Installation
+### Option A - Manual Installation (recommended)
 
 #### Step 1: Clone the repository to your current working directory
 
@@ -94,9 +94,10 @@ If git is not available for you, download and unzip the file: https://github.com
 
 ---
 
-### Option B — Automated Installation via Claude Code
+### Option B - Automated Installation via Claude Code
 
-If you have [Claude Code](https://claude.ai/code) available, the entire installation can be handled automatically — no manual commands needed.
+**Important**: AI agents can easily make mistakes and should not be trusted fully. This prompt is for installation only and does not produce any data or another result.<br><br>
+If you have [Claude Code](https://claude.ai/code) available, the entire installation can be handled automatically, no manual commands needed.
 
 1. Open the `stac2cube` folder in VS Code
 2. Open Claude Code in the terminal (or any Claude agent with terminal access)
@@ -110,7 +111,7 @@ If you have [Claude Code](https://claude.ai/code) available, the entire installa
 
 ## How to run
 ### Interactive User Interface on Jupyter Notebook:
-For a quick and beginner-friendly workflow, use the 3 interactive GUI tools available in the [User Interface Tools](https://github.com/BaturalpArisoy/stac2cube/tree/main/interactive/User_Interface_Tools.ipynb). <br>
+For a quick and beginner-friendly workflow, use the 3 interactive GUI tools available in the [User Interface Tools](https://github.com/BaturalpArisoy/stac2cube/tree/main/interactive/0_User_Interface_Tools.ipynb). <br>
 
 1) Data Cube Builder 
 2) Data Cube Editor (see example below) 
@@ -137,8 +138,7 @@ Each step is documented by the numbers and the general explanation is given belo
     - IMPORTANT: Please read notes in the notebook for better quality results.
 4. **Super-resolve Data Cube**
     - Super resolves both 10-meters and 20-meters bands to 2.5-meters. ["blue", "green", "red", "nir", "nir08", "rededge1", "rededge2", "rededge3", "swir16", "swir22"] for the entire Sentinel-2 data cube time-series.
-5. **Batch Processing** (under development!)
-    - (when completed) If the user knows what parameters to use for each function above, can set batch processing instead of using each step separately :) 
+
 
 ## How to run on HPC
 A documentation file on how to use stac2cube features on terrabyte's HPC for compute-intensive processes and for faster processing time can be found in the [slurm folder](https://github.com/BaturalpArisoy/stac2cube/tree/main/slurm). Don't forget to look at *how_to_use.txt*.
@@ -149,9 +149,8 @@ A documentation file on how to use stac2cube features on terrabyte's HPC for com
 
 - **Important**: _terrabyte_ STAC catalogs can be only computed when working on a _terrabyte_ environment.<br>
 - However, stac2cube package is designed to work on both local-machine without _terrabyte_ connection and within _terrabyte_ HPC environment.<br>
-- Therefore, a silent parameter will enable _terrabyte_ STAC catalogs when a SLURM job is activated.<br>
-- The default set-up (_terrabyte_ disabled) will feature STAC catalogs that provide "open-access data" (**not** open-source).<br>
-- Thus, note that stac2cube package **can not** guarantee unlimited access to these open-access data catalogs in the future!
+- The user can select the desired STAC source (also in user interface).<br>
+- Note that stac2cube package **can not** guarantee unlimited access to these open-access data catalogs in the future!
 
 ### STAC Catalog Licenses
 
@@ -161,29 +160,6 @@ A documentation file on how to use stac2cube features on terrabyte's HPC for com
 | Element 84 | Earth Search      | https://earth-search.aws.element84.com/v1/      | Apache License 2.0                                                                           | Yes         | Yes         |
 | Microsoft  | Planetary Computer| https://planetarycomputer.microsoft.com/api/stac/v1    | MIT License Copyright (c) Microsoft Corporation.                                             | Yes         | No          |
 
-### Why use terrabyte then?
-
-Why do _terraybte_ users collect data from _terrabyte_ STAC catalog instead of  open-source Earth Search?
-
-- The data by Element 84 is stored in AWS S3 services. 
-- The data by DLR is stored in the servers of The Leibniz Supercomputing Centre (LRZ) in Garching/Munich.
-- When working on a _terrabyte_ environment, the data query is returned from same server instead of connecting to AWS. <br><br>
-
-#### **Example**: Query for Sentinel-2 L2A: 
-- daterange: ["2017-01-01", "2025-03-28"]
-- polygon: Nord Hubland/Würzburg/Germany<br>
-
-| Service          | Returned Date  | Processing Time (s)|
-|------------------|----------------|--------------------|
-|terrabyte         | 1134           | 24.0               |
-|Earth Search      | 1038           | 140.5              |
-|Planetary Computer| 1133           | 12.2               |
-
-- Indicates* that queries are faster when working on a _terrabyte_ environment.
-- Most importantly, this indicates that Earth Search archive has some missing scenes.
-- Also Earth Search STAC definitions are sometimes faulty (especially Sentinel-2 L1C) and as a developer of this package, I prefer working with _terrabyte_ API.
-
-\* Queries are iterated 10 times per each service and the average time per run is calculated (timeit module).
 
 ## Method References
 
@@ -206,7 +182,7 @@ Why do _terraybte_ users collect data from _terrabyte_ STAC catalog instead of  
 ### Software
 **Please include the exact version**
 
-    Arisoy, B., Betz, F., Stauch, G., Klein, D., Dech, S., & Ullmann, T. (2025). stac2cube (Version 1.3.0). Zenodo. https://doi.org/10.5281/zenodo.18459201
+    Arisoy, B., Betz, F., Stauch, G., Klein, D., Dech, S., & Ullmann, T. (2025). stac2cube (Version 1.4.0). Zenodo. https://zenodo.org/records/18495808
 
 
 ## Contact 
