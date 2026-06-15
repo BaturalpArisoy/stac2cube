@@ -916,9 +916,50 @@ def datacube_builder(missions_func=missions):
             + "</div>"
         )
 
+    def _cube_is_empty(c):
+        """True if a cube carries no actual data (None, no dims, or a zero-length
+        dimension such as time=0). Structural only - no compute is triggered."""
+        if not isinstance(c, (xr.DataArray, xr.Dataset)):
+            return True
+        da = c
+        if isinstance(c, xr.Dataset):
+            da = c.get("Spectral_Temporal_Stack")
+            if da is None and len(c.data_vars):
+                da = c[list(c.data_vars)[0]]
+        if da is None:
+            return True
+        sizes = getattr(da, "sizes", {}) or {}
+        if not sizes:
+            return True
+        return any(int(v) == 0 for v in sizes.values())
+
+    def _result_is_empty(obj):
+        """True when there is nothing worth showing as a 'ready' cube."""
+        if obj is None:
+            return True
+        if isinstance(obj, list):
+            cubes = [c for c in obj if isinstance(c, (xr.DataArray, xr.Dataset))]
+            if not cubes:
+                return True
+            return all(_cube_is_empty(c) for c in cubes)
+        return _cube_is_empty(obj)
+
     def _show_result_summary(obj):
         with result_out:
             clear_output()
+
+            # Never show a 'ready' cube when there is no data: a failed/empty build
+            # must read as a failure here, not as success sitting next to a Status
+            # error.
+            if _result_is_empty(obj):
+                display(HTML(
+                    "<div style='font-size:13px; color:#991b1b; background:#fef2f2; "
+                    "border:1px solid #fecaca; border-radius:6px; padding:8px 10px;'>"
+                    "⚠️ No data cube to show - the build did not produce any data. "
+                    "See the <b>Status</b> panel for the reason.</div>"
+                ))
+                return
+
             # A polygon FILE with several features returns a LIST of cubes (one
             # per feature). Dumping every xarray repr is unreadable, so show a
             # compact table instead.
@@ -1005,15 +1046,25 @@ def datacube_builder(missions_func=missions):
             except Exception:
                 return None
 
-        total = _human_readable_bytes(sum(_cube_bytes(c) for c in cubes))
+        def _is_cube(c):
+            return isinstance(c, (xr.DataArray, xr.Dataset))
+
+        # Defensive: if the result list ever contains a non-cube entry (a failed
+        # feature), split it out so failures are reported honestly instead of
+        # rendered as blank "ready" rows.
+        valid = [c for c in cubes if _is_cube(c)]
+        failed = [c for c in cubes if not _is_cube(c)]
+        n_ok = len(valid)
+
+        total = _human_readable_bytes(sum(_cube_bytes(c) for c in valid))
 
         # Bands are requested identically for every feature, so they're the one
         # truly shared field shown in the header. CRS and time/dates can differ
         # per area, so those are shown per feature in the table below.
-        time_uniform = len({_time_key(c) for c in cubes}) == 1
+        time_uniform = len({_time_key(c) for c in valid}) <= 1
 
         common = []
-        _bands = _band_key(cubes[0])
+        _bands = _band_key(valid[0]) if valid else None
         if _bands:
             common.append("Bands: " + ", ".join(_bands))
 
@@ -1022,6 +1073,14 @@ def datacube_builder(missions_func=missions):
         th = "padding:3px 10px; border-bottom:1px solid #d1d5db; color:#374151;"
         rows = []
         for i, c in enumerate(cubes, 1):
+            if not _is_cube(c):
+                reason = getattr(c, "error", "could not be generated")
+                rows.append(
+                    f"<tr><td style='{cell} color:#b91c1c;'>{i}</td>"
+                    f"<td colspan='4' style='{lcell} color:#b91c1c;'>"
+                    f"failed - {reason}</td></tr>"
+                )
+                continue
             da = _main_da(c)
             s = getattr(da, "sizes", {}) if da is not None else {}
             rows.append(
@@ -1037,14 +1096,25 @@ def datacube_builder(missions_func=missions):
             warn = (
                 "<div style='font-size:12px; color:#92400e; background:#fffbeb; "
                 "border:1px solid #fde68a; border-radius:6px; padding:6px 8px; "
-                "margin-top:6px;'>⚠️ Time steps differ between features — each cube "
+                "margin-top:6px;'>⚠️ Time steps differ between features - each cube "
                 "keeps only the dates with scenes over its own area (see the "
                 "<b>time</b> column; counts can match while the actual dates differ).</div>"
             )
 
+        fail_note = ""
+        if failed:
+            failed_nums = ", ".join(f"#{getattr(m, 'feature', '?')}" for m in failed)
+            fail_note = (
+                "<div style='font-size:12px; color:#991b1b; background:#fef2f2; "
+                "border:1px solid #fecaca; border-radius:6px; padding:6px 8px; "
+                f"margin-top:6px;'>❌ {len(failed)} of {n} feature(s) could not be "
+                f"generated ({failed_nums}). They are listed as <b>failed</b> below "
+                "and are skipped on export/visualization. See the table for the reason.</div>"
+            )
+
         html = (
             "<div style='font-size:13px;'>"
-            f"<b>✅ {n} data cubes</b> - one per polygon feature. "
+            f"<b>✅ {n_ok} data cube(s)</b> generated from {n} polygon feature(s). "
             f"Total estimated size: <b>{total}</b>."
             + (
                 "<div style='font-size:12px; color:#6b7280; margin-top:2px;'>"
@@ -1052,6 +1122,7 @@ def datacube_builder(missions_func=missions):
                 if common else ""
             )
             + warn
+            + fail_note
             + "<table style='border-collapse:collapse; margin-top:8px; font-size:12px;'>"
             + "<tr style='background:#f3f4f6;'>"
             + f"<th style='{th} text-align:right;'>#</th>"
@@ -1188,20 +1259,36 @@ def datacube_builder(missions_func=missions):
         if obj is None:
             return None
         if isinstance(obj, list):
-            if not obj:
+            cubes = [c for c in obj if isinstance(c, (xr.DataArray, xr.Dataset))]
+            if not cubes:
                 return None
-            idx = viz_feature_w.value if isinstance(viz_feature_w.value, int) else 0
-            idx = max(0, min(idx, len(obj) - 1))
-            return obj[idx]
+            idx = viz_feature_w.value if isinstance(viz_feature_w.value, int) else None
+            if (
+                isinstance(idx, int)
+                and 0 <= idx < len(obj)
+                and isinstance(obj[idx], (xr.DataArray, xr.Dataset))
+            ):
+                return obj[idx]
+            return cubes[0]
         return obj
 
     def _refresh_viz_feature_options():
         """Show + populate the feature picker only when the result is a list of
         several cubes; hide it for a single cube."""
         obj = state["result"]
-        if isinstance(obj, list) and len(obj) > 1:
-            viz_feature_w.options = [(f"Feature {i + 1}", i) for i in range(len(obj))]
-            viz_feature_w.value = 0
+        # Only offer features that actually produced a cube; any non-cube entry
+        # (a failed feature) is not selectable for visualization.
+        if isinstance(obj, list):
+            opts = [
+                (f"Feature {i + 1}", i)
+                for i, c in enumerate(obj)
+                if isinstance(c, (xr.DataArray, xr.Dataset))
+            ]
+        else:
+            opts = []
+        if len(opts) > 1:
+            viz_feature_w.options = opts
+            viz_feature_w.value = opts[0][1]
             viz_feature_w.disabled = False
             viz_feature_box.layout.display = ""
         else:
@@ -2070,11 +2157,33 @@ def datacube_builder(missions_func=missions):
                 # swaps the content in without a flash of empty space.
                 clear_output(wait=True)
 
+                # A build that returns but holds no data (e.g. an empty cube) must
+                # be reported as a failure, not shown as a 'ready' cube. Raising
+                # here routes it through the same reset+error handling below.
+                if _result_is_empty(result):
+                    raise ValueError(
+                        "The build produced no data (no scenes or pixels for the "
+                        "given parameters). Try a wider date range, a higher max "
+                        "cloud coverage, or verify the polygon / AOI."
+                    )
+
                 state["result"] = result
                 export_result_btn.disabled = False
                 _set_visualization_enabled(True)
                 _refresh_viz_feature_options()
                 _update_gif_output_suggestion()
+
+                # For a multi-feature batch, some features may have failed (kept in
+                # the list as markers). Count real cubes so messages don't claim a
+                # failed feature was produced/exported.
+                if isinstance(result, list):
+                    n_ok = sum(
+                        1 for c in result
+                        if isinstance(c, (xr.DataArray, xr.Dataset))
+                    )
+                    n_fail = len(result) - n_ok
+                else:
+                    n_ok, n_fail = 1, 0
 
                 # Auto export only if COG mode + target (NetCDF direct export happens in get_stac_layers)
                 if export_mode == "cogs" and export_target:
@@ -2096,8 +2205,8 @@ def datacube_builder(missions_func=missions):
                     if isinstance(result, list):
                         _stem, _ext = os.path.splitext(export_target)
                         print(
-                            f"✅ Generation finished — exported {len(result)} cubes: "
-                            f"{_stem}_1{_ext} … {_stem}_{len(result)}{_ext}"
+                            f"✅ Generation finished - exported {n_ok} cube(s) as "
+                            f"{_stem}_<feature>{_ext}"
                         )
                     else:
                         print(f"✅ Data cube generation finished. Exported to: {export_target}")
@@ -2106,6 +2215,12 @@ def datacube_builder(missions_func=missions):
                     print("✅ Data cube generation finished. Result stored in memory.")
                     #print("")
                     print("ℹ️ Inspect it, then change Export mode if you want to export.")
+
+                if n_fail:
+                    print(
+                        f"⚠️ {n_fail} feature(s) could not be generated and were "
+                        "skipped - see the Result panel for which ones and why."
+                    )
 
             # Show preview in Result panel (not in Status)
             _show_result_summary(state["result"])
@@ -2117,6 +2232,16 @@ def datacube_builder(missions_func=missions):
                 pass
 
         except Exception as e:
+            # A failed build must not leave a stale 'ready' cube in the Result
+            # panel. Reset the result/state and overwrite the panel with a clear
+            # 'no data' message, then show the error in Status.
+            state["result"] = None
+            try:
+                export_result_btn.disabled = True
+                _set_visualization_enabled(False)
+            except Exception:
+                pass
+            _show_result_summary(None)
             _show_status(_friendly_error(e, "Building"))
 
     def _on_export_result_clicked(_):
