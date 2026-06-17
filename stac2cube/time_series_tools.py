@@ -203,11 +203,18 @@ def _nd_to_rgb_uint8(
     """
     Convert a 2D NDVI/NDWI array into an RGB uint8 image using a colormap.
     """
-    import matplotlib.cm as cm
     import matplotlib.colors as colors
 
     norm = colors.Normalize(vmin=vmin, vmax=vmax, clip=True)
-    cmap = cm.get_cmap(cmap_name)
+    # matplotlib.cm.get_cmap was removed in 3.9; matplotlib.colormaps works in 3.5+
+    try:
+        import matplotlib as mpl
+
+        cmap = mpl.colormaps[cmap_name]
+    except (AttributeError, KeyError):
+        import matplotlib.cm as cm
+
+        cmap = cm.get_cmap(cmap_name)
     rgba = cmap(norm(data))  # float RGBA in [0,1]
     rgb = (rgba[:, :, :3] * 255).astype(np.uint8)
     return rgb
