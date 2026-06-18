@@ -2,6 +2,7 @@
   "parameters": {
     "input_path": "/dss/.../test.nc",
     "output_path": "/dss/.../test_superres.nc",
-    "model_type": null
+    "model_type": null,
+    "model_dir": "/dss/.../interactive"
   }
 }

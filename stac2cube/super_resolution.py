@@ -341,6 +341,7 @@ def super_resolve_cube(
     var_name="Spectral_Temporal_Stack",
     nan_pixel_buffer: int = 8,
     model_type: str | None = None,  # NEW: None | "rgbn" | "full_spectral"
+    model_dir: str | None = None,   # folder containing the 'model' dir (e.g. interactive/)
 ):
     """
     Super-resolve full cube.
@@ -398,18 +399,31 @@ def super_resolve_cube(
         return [b for b in cube_order if b in required_set]
 
     def _resolve_model_path(candidates: list[str]) -> str:
-        # Try: relative to cwd
-        for p in candidates:
-            if os.path.exists(p):
-                return p
-        # Try: relative to this file (module dir)
+        search = []
+        # 0) explicit model_dir param: accept both "<dir>/model/<name>" and "<dir>/<name>"
+        if model_dir:
+            for p in candidates:
+                search.append(os.path.join(model_dir, p))
+                search.append(os.path.join(model_dir, os.path.basename(p)))
+        # 1) relative to cwd
+        search.extend(candidates)
+        # 2) relative to this file (module dir)
         base = os.path.join(os.path.dirname(__file__), "")
-        for p in candidates:
-            p2 = os.path.join(base, p)
-            if os.path.exists(p2):
-                return p2
-        # fallback to first candidate
-        return candidates[0]
+        search.extend(os.path.join(base, p) for p in candidates)
+
+        for cand in search:
+            if os.path.exists(cand):
+                return cand
+
+        # Not found: fail clearly instead of handing a bad relative path to mlstac,
+        # which otherwise raises a confusing "Unsupported scheme: snippet" error.
+        raise FileNotFoundError(
+            f"Could not find the SEN2SRLite model {candidates}. Looked under "
+            + (f"model_dir={model_dir!r}, " if model_dir else "")
+            + "the current working directory, and the stac2cube package directory. "
+            "Set model_dir to the folder that contains the 'model' directory "
+            "(e.g. the 'interactive' folder)."
+        )
 
     # ---------------------------
     # output path

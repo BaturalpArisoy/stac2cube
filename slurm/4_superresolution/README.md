@@ -23,6 +23,18 @@ Leave it as `null` to auto-detect from the cube's bands or set it explicitly:
 > The input cube must already contain the bands the chosen model requires,
 > otherwise the run fails with a missing-bands error.
 
+## `model_dir` (required on HPC)
+
+The SEN2SRLite model files live in `interactive/model/` (`SEN2SRLite` and
+`SEN2SRLite_RGBN`). The notebook finds them because it runs from `interactive/`,
+but a SLURM job does not - so you must tell it where the model is via `model_dir`.
+
+Set `model_dir` to the folder that contains the `model` directory (i.e. your
+`interactive` folder); pointing it directly at the `model` folder also works.
+
+> If `model_dir` is wrong/missing, the run fails with a clear
+> `Could not find the SEN2SRLite model ...` error.
+
 ---
 
 ## Example config
@@ -32,7 +44,8 @@ Leave it as `null` to auto-detect from the cube's bands or set it explicitly:
   "parameters": {
     "input_path": "/dss/.../test.nc",
     "output_path": "/dss/.../test_superres.nc",
-    "model_type": null
+    "model_type": null,
+    "model_dir": "/dss/.../interactive"
   }
 }
 ```
