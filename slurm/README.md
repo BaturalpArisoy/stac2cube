@@ -8,21 +8,26 @@ own short README with feature-specific details.
 
 ```
 slurm/
+├── README.md              <- this common guide
 ├── slurm_setup.cmd        <- shared SLURM setup (edit once, used by all features)
 ├── log/                   <- job logs (.out / .err)
 ├── 1_build_data_cube/
+│   ├── README.md          <- feature guide + JSON examples
 │   ├── submit.sh
 │   ├── slurm_run.py
 │   └── get_stac_layers.json
 ├── 2_cloud_masking/
+│   ├── README.md          <- feature guide + JSON examples
 │   ├── submit.sh
 │   ├── slurm_run.py
 │   └── get_cloud_layers.json
 ├── 3_coregistration/
+│   ├── README.md          <- feature guide + JSON examples
 │   ├── submit.sh
 │   ├── slurm_run.py
 │   └── get_coreg_layers.json
 └── 4_superresolution/
+    ├── README.md          <- feature guide + JSON examples
     ├── submit.sh
     ├── slurm_run.py
     └── get_superres_layers.json
