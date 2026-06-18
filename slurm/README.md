@@ -1,24 +1,54 @@
 # Submitting **stac2cube** Features to HPC with **SLURM**
 Run stac2cube workflows on LRZ **terrabyte** (HPC) using SLURM job submission.
 
-> This guide is written for **`1_build_data_cube`**.
+This is the **common** guide shared by all features. Each feature folder will get
+its own short README later with feature-specific details.
+
+## Folder layout
+
+```
+slurm/
+├── slurm_setup.cmd        <- shared SLURM setup (edit once, used by all features)
+├── log/                   <- job logs (.out / .err)
+├── 1_build_data_cube/
+│   ├── submit.sh
+│   ├── slurm_run.py
+│   └── get_stac_layers.json
+├── 2_cloud_masking/
+│   ├── submit.sh
+│   ├── slurm_run.py
+│   └── get_cloud_layers.json
+├── 3_coregistration/
+│   ├── submit.sh
+│   ├── slurm_run.py
+│   └── get_coreg_layers.json
+└── 4_superresolution/
+    ├── submit.sh
+    ├── slurm_run.py
+    └── get_superres_layers.json
+```
+
+The `slurm_setup.cmd` lives **once** at the `slurm/` level and is shared by all
+features. Each `submit.sh` runs it via `sbatch ../slurm_setup.cmd`, so the job's
+working directory becomes that feature's folder and the right `slurm_run.py` and
+`get_*.json` are picked up automatically.
 
 ---
 
 ## Quick overview
-1. **Update SLURM setup** (only once)
-2. **Configure the job** (edit JSON config)
+1. **Update the shared SLURM setup** (only once)
+2. **Configure the job** (edit the feature's JSON config)
 3. **Submit the job**
 4. **Track progress** via logs + portal
 
 ---
 
-## 1) Update SLURM setup (only once)
+## 1) Update the shared SLURM setup (only once)
 
 ### 1.1 Edit `slurm_setup.cmd`
-Open:
+Open the shared file:
 
-- `./1_build_data_cube/slurm_setup.cmd`
+- `./slurm_setup.cmd`
 
 Then update:
 
@@ -27,8 +57,8 @@ Then update:
 - Replace: `#SBATCH --account=<reach your contact person>`
 - With your real terrabyte account/project string *(remove the `<` and `>`)*
 
-> If you don't know your account string, reach your contact person or check
-> an existing job here:
+> If you don't know your account string, reach your contact person or check an
+> existing job here:
 > https://portal.terrabyte.lrz.de/pun/sys/dashboard/activejobs -> any active job -> **Account**.
 >
 > A leftover `<...>` placeholder here makes sbatch fail with
@@ -39,7 +69,7 @@ Change your cluster partition as desired:
 
 - https://docs.terrabyte.lrz.de/services/terrabyte-hpc/introduction/
 
-### 1.3 Choose how you run `slurm_run.py` (local or shared env)
+### 1.3 Choose how you run `slurm_run.py` (local vs shared env)
 
 #### Option A - Local micromamba env (`-n stac2cube`)
 Use this if **stac2cube is installed locally** in your micromamba:
@@ -67,40 +97,49 @@ micromamba run -p /dss/.../envs/stac2cube python slurm_run.py
 
 ---
 
-## 2) Update job configuration
+## 2) Configure the job
 
-Edit and save:
+Each feature has its **own** JSON config in its folder:
 
-- `./1_build_data_cube/get_stac_layers.json`
+| Feature | Config file |
+| --- | --- |
+| `1_build_data_cube` | `get_stac_layers.json` |
+| `2_cloud_masking` | `get_cloud_layers.json` |
+| `3_coregistration` | `get_coreg_layers.json` |
+| `4_superresolution` | `get_superres_layers.json` |
 
-### Recommended: build the JSON with the GUI
-JSON syntax differs from Python and is easy to get wrong by hand. The easiest
-and safest way to produce a valid config is the **Data Cube Builder** GUI:
+Edit the JSON of the feature you want to run and save it.
+
+### Recommended for `1_build_data_cube`: build the JSON with the GUI
+For the **Data Cube Builder** step, the easiest and safest way to produce a valid
+config is the GUI:
 
 1. Open `interactive/0_User_Interface_Tools.ipynb`.
 2. Run **Data Cube Builder** and set your desired parameters interactively.
 3. Click the **Copy JSON** button.
-4. Paste the result into `./1_build_data_cube/get_stac_layers.json` (replacing
-   the existing content) and save.
+4. Paste the result into `./1_build_data_cube/get_stac_layers.json` (replacing the
+   existing content) and save.
 
-> The GUI also documents what each parameter means, so it doubles as a reference
-> if you are unsure about a field.
+> The other features (`2_cloud_masking`, `3_coregistration`, `4_superresolution`)
+> are configured by editing their JSON directly. Their feature-specific READMEs
+> will explain each parameter.
 
 ---
 
 ## 3) Submit SLURM job
 
-### 3.1 Make `submit.sh` executable (only once)
-Run this once in your terminal:
+### 3.1 Make all `submit.sh` executable (only once)
+From inside the `slurm/` folder, run:
 
 ```bash
-chmod +x ./1_build_data_cube/submit.sh
+chmod +x ./*/submit.sh
 ```
 
 ### 3.2 Submit
+Submit the feature you want by running its `submit.sh`.
 
 #### Recommended (MobaXTerm)
-- Middle-click: `./1_build_data_cube/submit.sh`
+- Middle-click the feature's `submit.sh`, e.g. `./1_build_data_cube/submit.sh`
 - If using a laptop touchpad:
   - Right-click -> copy file path to terminal -> **Enter**
 
@@ -117,10 +156,10 @@ or:
 bash path/to/submit.sh
 ```
 
-or submit the batch script directly:
+or submit the shared batch script directly **from inside the feature folder**:
 
 ```bash
-sbatch slurm_setup.cmd
+sbatch ../slurm_setup.cmd
 ```
 
 ---
@@ -152,9 +191,9 @@ You can simply **F5** the page to track the progress.
 
 ---
 
-## Troubleshooting
+## Notes & troubleshooting
 
-### 1 - No new `.out` / `.err` files?
+### Note - No new `.out` / `.err` files?
 If you don't see any newly generated `.out` and `.err` files, most likely it means that your SLURM job is **waiting in the queue**.
 
 The time spent in the queue depends on both server status and access privileges.

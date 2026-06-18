@@ -1,0 +1,9 @@
+{
+  "parameters": {
+    "input_path": "./results/test.nc",
+    "output_path": "./results/test_superres.nc",
+    "var_name": "Spectral_Temporal_Stack",
+    "nan_pixel_buffer": 8,
+    "model_type": null
+  }
+}
