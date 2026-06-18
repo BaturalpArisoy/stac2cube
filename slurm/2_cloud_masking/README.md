@@ -17,6 +17,10 @@ Builds only the probability layer (`cloud_prob`) from an existing data cube. Thi
 is the compute-heavy step you typically run on SLURM. Afterwards you can build
 masks / mask the cube cheaply in the GUI.
 
+`input_cube` makes the probability maps use the data cube's **exact dates** - so a
+**seasonal** cube yields probability maps on the same seasonal dates, not a
+continuous min..max range.
+
 ```json
 {
   "parameters": {
@@ -71,6 +75,30 @@ timestamps are taken from it automatically.
 - `output_masked` is the masked data cube; `output_clouds` (optional) also saves
   the probability + mask stack.
 - This is the same as the GUI's **a) Fully Automated Workflow**.
+
+---
+
+## Example 4 - build from a given date range (no initial data cube)
+
+Use this when you do **not** have an initial data cube. Instead of `input_cube`,
+you specify the `polygon` and `daterange` yourself, and probability maps are built
+over that range (this is the original way of building a cloud cube).
+
+```json
+{
+  "parameters": {
+    "polygon": "/dss/.../test.gpkg",
+    "daterange": ["2024-01-01", "2025-01-01"],
+    "output_clouds": "/dss/.../test_cloud.nc"
+  }
+}
+```
+
+- Add `"threshold": [50, 70, 90]` (or a single int) to also build mask layers.
+- `daterange` accepts the same forms as the data cube builder, including seasonal
+  specs, e.g. `{"season": ["04-01", "10-31"], "years": "2019-2024"}`.
+- Because there is no source cube, dates are **not** filtered to an exact list -
+  every scene STAC returns in the range is computed.
 
 ---
 

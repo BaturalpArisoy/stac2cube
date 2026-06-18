@@ -5611,19 +5611,16 @@ def ard_cube_tools():
         )
 
         try:
-            # Extract polygon + daterange from the loaded cube (same dates, but no masking)
-            params = get_stac_parameters(state["loaded_path"])
-            polygon = params["polygon"]
-            daterange = params["daterange"]
-
             with status_out:
-                # Capture progress prints from get_cloud_layers
+                # Capture progress prints from get_cloud_layers.
+                # input_cube -> probability is computed on the loaded cube's EXACT
+                # dates (seasonal-safe), without masking the cube. polygon/daterange
+                # are derived from the cube inside get_cloud_layers.
                 cloud_da = get_cloud_layers(
-                    polygon=polygon,
-                    daterange=daterange,
+                    input_cube=state["loaded_path"],
                     output_clouds=out_cloud,
                     output_masked=None,
-                    threshold=thresholds,          # probability only
+                    threshold=thresholds,          # None => probability only
                     clip_raster=False,
                     masking=None,            # IMPORTANT: do not trigger masking branch
                     update=None,

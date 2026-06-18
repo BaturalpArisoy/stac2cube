@@ -27,21 +27,29 @@ def get_cloud_layers(
     clip_raster=None,
     masking=None,
     update=None,
+    input_cube=None,
     slurm_timer=None,
 ):
     if output_clouds is None and output is not None:
         output_clouds = output
 
-    # If we are called from an existing cube (seasonal mode), we must use its exact time list
+    # If we are called from an existing cube, we must use its exact time list.
+    # This is what makes seasonal cubes correct: probability is computed on the
+    # cube's exact dates, not on a continuous min..max range.
+    #
+    # A source cube can be supplied two ways:
+    #   - masking=<cube>    -> derive dates AND mask the cube at the end
+    #   - input_cube=<cube> -> derive dates only (probability / masks, no masking)
     reference_times = None
 
-    if masking:
-        stac_parameters = get_stac_parameters(masking)
+    source_cube = masking or input_cube
+    if source_cube:
+        stac_parameters = get_stac_parameters(source_cube)
         polygon = stac_parameters["polygon"]
         daterange = stac_parameters["daterange"]
 
-        # Use the exact seasonal timestamps from the initial cube
-        with xr.open_dataset(masking) as ds:
+        # Use the exact timestamps from the initial cube
+        with xr.open_dataset(source_cube) as ds:
             if "Spectral_Temporal_Stack" in ds:
                 reference_times = ds["Spectral_Temporal_Stack"].time.values
             else:
