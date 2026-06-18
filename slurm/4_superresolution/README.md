@@ -4,9 +4,10 @@ Super-resolves a data cube (Sentinel-2) to 2.5 m using the SEN2SRLite models.
 
 
 > **Recommended: run on a CUDA-capable GPU cluster.** The SEN2SRLite models run
-> the inference far faster on a GPU. Pick a GPU partition in `slurm_setup.cmd`
-> (see the partition list:
-> https://docs.terrabyte.lrz.de/services/terrabyte-hpc/introduction/).
+> the inference far faster on a GPU. To send this job to a GPU node, copy the
+> GPU `#SBATCH` lines from [`gpu_example.cmd`](gpu_example.cmd) into the shared
+> `../slurm_setup.cmd` (replacing the matching CPU lines). Swap them back when
+> running the CPU-only features.
 
 ## `model_type`
 
