@@ -45,6 +45,19 @@ working directory becomes that feature's folder and the right `slurm_run.py` and
 
 ## 1) Update the shared SLURM setup (only once)
 
+### 1.0 Prerequisite: set up micromamba (one-time)
+Set up micromamba on your terrabyte account **once**, via the modules system:
+
+- https://docs.terrabyte.lrz.de/software/environments/micromamba/ -> **"Loading micromamba via modules system"**
+
+Then verify it is recognized by simply typing:
+
+```bash
+micromamba
+```
+
+If it prints its usage/help, you are good.
+
 ### 1.1 Edit `slurm_setup.cmd`
 Open the shared file:
 
