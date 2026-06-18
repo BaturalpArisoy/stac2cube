@@ -1,11 +1,6 @@
 {
   "parameters": {
-    "polygon": "./polygons/test.gpkg",
-    "daterange": ["2024-01-01", "2025-01-01"],
-    "output": "./results/test_cloud.nc",
-    "cloud_layers": ["cloud_prob", "cloud_mask"],
-    "clip_raster": false,
-    "threshold": 0.7,
-    "masking": "./results/test_L2A.nc"
+    "input_cube": "./results/test.nc",
+    "output_clouds": "./results/test_cloud.nc"
   }
 }

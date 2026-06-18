@@ -1,8 +1,8 @@
 # Submitting **stac2cube** Features to HPC with **SLURM**
 Run stac2cube workflows on LRZ **terrabyte** (HPC) using SLURM job submission.
 
-This is the **common** guide shared by all features. Each feature folder will get
-its own short README later with feature-specific details.
+This is the **common** guide shared by all features. Each feature folder has its
+own short README with feature-specific details.
 
 ## Folder layout
 
@@ -110,19 +110,8 @@ Each feature has its **own** JSON config in its folder:
 
 Edit the JSON of the feature you want to run and save it.
 
-### Recommended for `1_build_data_cube`: build the JSON with the GUI
-For the **Data Cube Builder** step, the easiest and safest way to produce a valid
-config is the GUI:
-
-1. Open `interactive/0_User_Interface_Tools.ipynb`.
-2. Run **Data Cube Builder** and set your desired parameters interactively.
-3. Click the **Copy JSON** button.
-4. Paste the result into `./1_build_data_cube/get_stac_layers.json` (replacing the
-   existing content) and save.
-
-> The other features (`2_cloud_masking`, `3_coregistration`, `4_superresolution`)
-> are configured by editing their JSON directly. Their feature-specific READMEs
-> will explain each parameter.
+> Each feature folder has its own `README.md` with **ready-to-copy JSON examples**
+> for the common use cases. Open the feature's README before editing its JSON.
 
 ---
 

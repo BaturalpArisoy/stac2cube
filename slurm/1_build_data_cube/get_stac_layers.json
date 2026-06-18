@@ -2,25 +2,14 @@
   "parameters": {
     "mission": "s2",
     "source": "terrabyte",
-    "polygon": "./polygons/test.gpkg",
+    "polygon": "/dss/.../test.gpkg",
     "resolution": 10,
-    "daterange": [
-      "2024-04-01",
-      "2024-04-30"
-    ],
-    "bands": [
-      "blue",
-      "green",
-      "red",
-      "nir"
-    ],
-    "indices": [
-      "ndvi",
-      "ndwi"
-    ],
+    "daterange": ["2024-04-01", "2024-04-30"],
+    "bands": ["blue", "green", "red", "nir"],
+    "indices": ["ndvi", "ndwi"],
     "max_cc": 100,
     "cloud_masking": true,
-    "output": "./results/test.nc",
+    "output": "/dss/.../test.nc",
     "clip_raster": false,
     "aggregator": null,
     "stats": null
