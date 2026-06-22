@@ -6111,6 +6111,12 @@ def ard_cube_tools():
         layout=widgets.Layout(width="210px"),
     )
 
+    cr_copy_json_btn = widgets.Button(
+        description="Copy JSON",
+        icon="copy",
+        layout=widgets.Layout(width="140px"),  # colorless, like the data cube builder
+    )
+
     def _on_first_scene_mode_change(change):
         if change.get("name") != "value":
             return
@@ -6178,6 +6184,109 @@ def ard_cube_tools():
             _status(f"❌ {type(e).__name__}: {e}")
 
     cr_run_btn.on_click(_on_coregister_clicked)
+
+    def _build_cr_json_syntax_text():
+        """
+        Build JSON syntax for HPC/SLURM coregistration config from current UI state.
+        Mirrors stac2cube.coregistration.coregister_cube(**parameters) and the
+        example in slurm/3_coregistration/README.md. Uses null/true/false via json.dumps.
+        """
+        try:
+            time_period = _parse_time_period(cr_time_period_w.value)
+        except Exception:
+            # Don't block copying on an invalid time_period; emit null and let
+            # the run/validation surface the error.
+            time_period = None
+
+        input_path = state.get("loaded_path")
+        input_for_json = str(input_path) if input_path else None
+
+        out_path = (cr_out_w.value or "").strip()
+        output_for_json = out_path or None
+
+        # composite_window_days only applies in "composite" mode; the widget is
+        # disabled for "first", so emit null there rather than a stale value.
+        composite_window_for_json = (
+            None
+            if cr_composite_window_days_w.disabled
+            else int(cr_composite_window_days_w.value)
+        )
+
+        # Parameter order follows the GUI layout (top -> bottom):
+        # max_cc, time_period, grid_size, iteration, min_reliability_keep,
+        # min_reliability_update_ref, max_cloud_update_ref, first_scene_mode,
+        # composite_window_days. Paths are kept first, as in the SLURM README.
+        json_payload = {
+            "parameters": {
+                "input_path": input_for_json,
+                "output_path": output_for_json,
+                "max_cc": int(cr_max_cc_w.value),
+                "time_period": time_period,
+                "grid_size": int(cr_grid_size_w.value),
+                "iteration": int(cr_iteration_w.value),
+                "min_reliability_keep": float(cr_min_rel_keep_w.value),
+                "min_reliability_update_ref": float(cr_min_rel_update_ref_w.value),
+                "max_cloud_update_ref": float(cr_max_cloud_update_ref_w.value),
+                "first_scene_mode": str(cr_first_scene_mode_w.value),
+                "composite_window_days": composite_window_for_json,
+            }
+        }
+
+        return json.dumps(json_payload, indent=2, ensure_ascii=False)
+
+    def _copy_cr_json_to_clipboard(_):
+        """
+        Build current coregistration JSON syntax and copy it to clipboard.
+        """
+        try:
+            text = _build_cr_json_syntax_text()
+            js_text = json.dumps(text)  # safe JS embedding
+
+            display(
+                Javascript(
+                    f"""
+            (async () => {{
+              const text = {js_text};
+
+              async function fallbackCopy(t) {{
+                const ta = document.createElement('textarea');
+                ta.value = t;
+                ta.setAttribute('readonly', '');
+                ta.style.position = 'fixed';
+                ta.style.left = '-9999px';
+                document.body.appendChild(ta);
+                ta.select();
+                try {{
+                  document.execCommand('copy');
+                }} finally {{
+                  document.body.removeChild(ta);
+                }}
+              }}
+
+              try {{
+                if (navigator.clipboard && window.isSecureContext) {{
+                  await navigator.clipboard.writeText(text);
+                }} else {{
+                  await fallbackCopy(text);
+                }}
+              }} catch (e) {{
+                try {{
+                  await fallbackCopy(text);
+                }} catch (e2) {{
+                  console.error("Clipboard copy failed", e, e2);
+                }}
+              }}
+            }})();
+            """
+                )
+            )
+
+            _status("✅ JSON syntax copied to clipboard.")
+
+        except Exception as e:
+            _status(f"❌ {type(e).__name__}: {e}")
+
+    cr_copy_json_btn.on_click(_copy_cr_json_to_clipboard)
 
 
     # --- Pretty layout (compact rows) ---
@@ -6285,7 +6394,10 @@ def ard_cube_tools():
             section_spacer,
             _stacked_field(cr_out_box, "Output NetCDF"),
             section_spacer,
-            cr_run_btn,
+            widgets.HBox(
+                [cr_run_btn, cr_copy_json_btn],
+                layout=widgets.Layout(gap="8px", align_items="center"),
+            ),
         ],
         layout=widgets.Layout(width="100%", gap="10px"),
     )
