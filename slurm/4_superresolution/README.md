@@ -29,8 +29,9 @@ The SEN2SRLite model files live in `interactive/model/` (`SEN2SRLite` and
 `SEN2SRLite_RGBN`). The notebook finds them because it runs from `interactive/`,
 but a SLURM job does not - so you must tell it where the model is via `model_dir`.
 
-Set `model_dir` to the folder that contains the `model` directory (i.e. your
-`interactive` folder); pointing it directly at the `model` folder also works.
+Set `model_dir` to the **`model` folder itself** (the one containing the
+`SEN2SRLite` and `SEN2SRLite_RGBN` subfolders), e.g. `.../interactive/model`.
+Pointing it at the parent `interactive` folder also works.
 
 > If `model_dir` is wrong/missing, the run fails with a clear
 > `Could not find the SEN2SRLite model ...` error.
@@ -45,7 +46,7 @@ Set `model_dir` to the folder that contains the `model` directory (i.e. your
     "input_path": "/dss/.../test.nc",
     "output_path": "/dss/.../test_superres.nc",
     "model_type": null,
-    "model_dir": "/dss/.../interactive"
+    "model_dir": "/dss/.../interactive/model"
   }
 }
 ```
