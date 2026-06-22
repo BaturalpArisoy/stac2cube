@@ -1158,9 +1158,16 @@ def datacube_builder(missions_func=missions):
         Build a default NetCDF output path from polygon input.
         - ./polygons/test.gpkg -> ./results/test.nc
         - [xmin, ymin, xmax, ymax] -> ./results/bbox.nc
+
+        When the polygon is an absolute path (e.g. one picked via the file
+        chooser), the suggestion is returned as an absolute path too. SLURM
+        jobs run from a different working directory, so a relative
+        "./results/..." would not resolve there - a full path can be copied
+        straight into the job script.
         """
         raw = (polygon_w.value or "").strip()
-        if raw.startswith("[") or raw.startswith("("):
+        is_bbox = raw.startswith("[") or raw.startswith("(")
+        if is_bbox:
             stem = "bbox"
         elif raw:
             try:
@@ -1171,6 +1178,19 @@ def datacube_builder(missions_func=missions):
             stem = "test"
 
         stem = re.sub(r"[^A-Za-z0-9._-]+", "_", stem).strip("._-") or "test"
+
+        # If a polygon file was selected, polygon_w holds an absolute path.
+        # Mirror it to an absolute "<base>/results/<stem>.nc" so the
+        # recommendation is a hard-coded path, not a relative one.
+        if not is_bbox and raw:
+            try:
+                poly_path = Path(raw)
+                if poly_path.is_absolute():
+                    out_dir = poly_path.parent.parent / "results"
+                    return str(out_dir / f"{stem}.nc")
+            except Exception:
+                pass
+
         return f"./results/{stem}.nc"
 
     def _update_netcdf_output_suggestion(force=False):
