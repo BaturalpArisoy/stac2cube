@@ -2,12 +2,6 @@
 
 Coregisters the scenes of a data cube to a common reference geometry.
 
-- **Runner:** `slurm_run.py` -> `stac2cube.coregistration.coregister_cube(**parameters)`
-- **Config:** `get_coreg_layers.json`
-- **Submit:** `submit.sh` (see the common guide in [`../README.md`](../README.md))
-
----
-
 ## Recommended: build the JSON with the GUI
 
 The easiest and safest way to produce a valid config is the
@@ -21,7 +15,7 @@ The easiest and safest way to produce a valid config is the
 
 > The GUI also documents what each parameter means, so it doubles as a reference.
 
----
+
 
 ## Example config
 
@@ -30,8 +24,8 @@ The example below uses the GUI's default parameters:
 ```json
 {
   "parameters": {
-    "input_path": "./results/test.nc",
-    "output_path": "./results/test_coreg.nc",
+    "input_path": "/dss/.../test.nc",
+    "output_path": "/dss/.../test_coreg.nc",
     "max_cc": 100,
     "time_period": null,
     "grid_size": 7,
@@ -45,9 +39,9 @@ The example below uses the GUI's default parameters:
 }
 ```
 
-Only `input_path` is strictly required; any omitted parameter falls back to the
-function default in `stac2cube.coregistration.coregister_cube`. Paths are relative
-to this feature folder (where the job runs).
 
-> `composite_window_days` only applies when `first_scene_mode` is `"composite"`.
-> With the default `"first"` mode it is unused, so the GUI exports it as `null`.
+
+
+
+## Final Step
+- **Submit:** `submit.sh` (see the common guide in [`../README.md`](../README.md))

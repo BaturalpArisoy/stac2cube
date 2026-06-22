@@ -46,7 +46,7 @@ Pointing it at the parent `interactive` folder also works.
     "input_path": "/dss/.../test.nc",
     "output_path": "/dss/.../test_superres.nc",
     "model_type": null,
-    "model_dir": "/dss/.../interactive/model"
+    "model_dir": "/dss/.../stac2cube/interactive/model"
   }
 }
 ```
