@@ -141,7 +141,7 @@ Each step is documented by the numbers and the general explanation is given belo
 
 
 ## How to run on HPC
-A documentation file on how to use stac2cube features on terrabyte's HPC for compute-intensive processes and for faster processing time can be found in the [slurm folder](https://github.com/BaturalpArisoy/stac2cube/tree/main/slurm). Don't forget to look at *how_to_use.txt*.
+A documentation file on how to use stac2cube features on terrabyte's HPC for compute-intensive processes and for faster processing time can be found in the [slurm folder](https://github.com/BaturalpArisoy/stac2cube/tree/main/slurm). Reading step by step is actually pretty simple.
 
 ## Access and Licensing Details for STAC Catalogs
 
