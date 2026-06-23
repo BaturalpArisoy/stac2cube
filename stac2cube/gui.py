@@ -5823,6 +5823,9 @@ def ard_cube_tools():
             _status(f"❌ File not found: {p.as_posix()}")
             return
 
+        old_mtime = p.stat().st_mtime
+        old_size = p.stat().st_size
+
         _status(
             "Generating masks from probability map...",
             f"input/overwrite file = {p.as_posix()}",
@@ -5867,6 +5870,21 @@ def ard_cube_tools():
             # --- Overwrite the same file (no need to pass crs/transform) ---
             with status_out:
                 export_stac(combined, p.as_posix(), overwrite=True, var_name="Cloud_Stack")
+
+            # --- Verify the file was actually overwritten (prevents false ✅).
+            # On failure, append into status_out (never call _status, which
+            # clears) so the tool's own error is never overwritten by success.
+            if not p.exists() or (p.stat().st_mtime == old_mtime and p.stat().st_size == old_size):
+                with status_out:
+                    print("❌ Mask generation failed: file was not overwritten.")
+                return
+            try:
+                with xr.open_dataset(p) as _:
+                    pass
+            except Exception as e:
+                with status_out:
+                    print(f"❌ Mask generation failed: file is not readable ({type(e).__name__}: {e})")
+                return
 
             state["current_result_path"] = p.as_posix()
             _show_result_from_path(p.as_posix())
@@ -6281,6 +6299,11 @@ def ard_cube_tools():
             _status(f"❌ ValueError: {e}")
             return
 
+        p_out = Path(out_path)
+        existed_before = p_out.exists()
+        old_mtime = p_out.stat().st_mtime if existed_before else None
+        old_size = p_out.stat().st_size if existed_before else None
+
         _status(
             "Co-registering and exporting...",
             f"input_path = {state['loaded_path']}",
@@ -6302,6 +6325,29 @@ def ard_cube_tools():
                     iteration=int(cr_iteration_w.value),
                     output_path=out_path,
                 )
+
+            # --- Verify export actually happened (prevents false ✅).
+            # On failure, append into status_out (never call _status, which
+            # clears) so the tool's own error is never overwritten by success.
+            if not p_out.exists():
+                with status_out:
+                    print("❌ Co-registration failed: output file was not created.")
+                return
+
+            new_mtime = p_out.stat().st_mtime
+            new_size = p_out.stat().st_size
+            if existed_before and (new_mtime == old_mtime) and (new_size == old_size):
+                with status_out:
+                    print("❌ Co-registration failed: output file was not updated.")
+                return
+
+            try:
+                with xr.open_dataset(p_out) as _:
+                    pass
+            except Exception as e:
+                with status_out:
+                    print(f"❌ Co-registration failed: output file is not readable ({type(e).__name__}: {e})")
+                return
 
             state["current_result_path"] = out_path
             _show_result_from_path(out_path)
