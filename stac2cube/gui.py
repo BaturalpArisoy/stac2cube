@@ -5246,6 +5246,16 @@ def ard_cube_tools():
         "</div>"
     )
 
+    tools_info_box = widgets.HTML(
+        "<div style='font-size:13px; color:#1e3a8a; background:#eff6ff; "
+        "border:1px solid #bfdbfe; border-left:4px solid #3b82f6; "
+        "border-radius:6px; padding:10px 12px; margin:0 0 8px 0;'>"
+        "<b>ℹ️ Note:</b> The 3 tools provided below are not chained. For each feature, load a "
+        "separate data cube in NetCDF format with the loader below, then run a "
+        "single tool on it."
+        "</div>"
+    )
+
     # -----------------------------------------
     # Loading card (same pattern as editor)
     # -----------------------------------------
@@ -5479,6 +5489,11 @@ def ard_cube_tools():
                 clouds_out_w.value = tmp
             out_clouds = _ensure_nc_suffix(tmp)
 
+        p_masked = Path(out_masked)
+        existed_before = p_masked.exists()
+        old_mtime = p_masked.stat().st_mtime if existed_before else None
+        old_size = p_masked.stat().st_size if existed_before else None
+
         _status(
             "Masking and exporting...",
             f"masking (input) = {state['loaded_path']}",
@@ -5497,6 +5512,34 @@ def ard_cube_tools():
                     output_masked=out_masked,
                     threshold=threshold,
                 )
+
+            # --- Verify export actually happened (prevents false ✅).
+            # NOTE: on failure we print into status_out (append) instead of
+            # calling _status (which clears), so the tool's own error stays
+            # visible and is never overwritten by a success message.
+            if not p_masked.exists():
+                with status_out:
+                    print("❌ Cloud masking failed: output file was not created.")
+                return
+
+            new_mtime = p_masked.stat().st_mtime
+            new_size = p_masked.stat().st_size
+            if existed_before and (new_mtime == old_mtime) and (new_size == old_size):
+                with status_out:
+                    print(
+                        "❌ Cloud masking failed: output file was not updated "
+                        "(e.g. the cloud cube could not be built for all of the "
+                        "loaded cube's dates)."
+                    )
+                return
+
+            try:
+                with xr.open_dataset(p_masked) as _:
+                    pass
+            except Exception as e:
+                with status_out:
+                    print(f"❌ Cloud masking failed: output file is not readable ({type(e).__name__}: {e})")
+                return
 
             state["current_result_path"] = out_masked
             _show_result_from_path(out_masked)
@@ -5623,6 +5666,11 @@ def ard_cube_tools():
             else:
                 raise ValueError("Thresholds must be empty, an int (e.g. 70), or a list like [50, 70, 90].")
             
+        p_cloud = Path(out_cloud)
+        existed_before = p_cloud.exists()
+        old_mtime = p_cloud.stat().st_mtime if existed_before else None
+        old_size = p_cloud.stat().st_size if existed_before else None
+
         _status(
             "Building cloud probability data cube...",
             f"loaded cube = {state['loaded_path']}",
@@ -5645,6 +5693,33 @@ def ard_cube_tools():
                     masking=None,            # IMPORTANT: do not trigger masking branch
                     update=None,
                 )
+
+            # --- Verify export actually happened (prevents false ✅).
+            # On failure, append into status_out (never call _status, which
+            # clears) so the tool's own error is never overwritten by success.
+            if not p_cloud.exists():
+                with status_out:
+                    print("❌ Build failed: output file was not created.")
+                return
+
+            new_mtime = p_cloud.stat().st_mtime
+            new_size = p_cloud.stat().st_size
+            if existed_before and (new_mtime == old_mtime) and (new_size == old_size):
+                with status_out:
+                    print(
+                        "❌ Build failed: output file was not updated "
+                        "(e.g. the cloud cube could not be built for all of the "
+                        "loaded cube's dates)."
+                    )
+                return
+
+            try:
+                with xr.open_dataset(p_cloud) as _:
+                    pass
+            except Exception as e:
+                with status_out:
+                    print(f"❌ Build failed: output file is not readable ({type(e).__name__}: {e})")
+                return
 
             state["current_result_path"] = out_cloud
             _show_result_from_path(out_cloud)
@@ -5994,6 +6069,11 @@ def ard_cube_tools():
         out_path = _ensure_nc_suffix(out_path)
         mask_layer = str(b3_mask_band_w.value)
 
+        p_out = Path(out_path)
+        existed_before = p_out.exists()
+        old_mtime = p_out.stat().st_mtime if existed_before else None
+        old_size = p_out.stat().st_size if existed_before else None
+
         _status(
             "Masking and exporting...",
             f"input cube = {state['loaded_path']}",
@@ -6010,6 +6090,33 @@ def ard_cube_tools():
                     mask_layer=mask_layer,
                     output=out_path,
                 )
+
+            # --- Verify export actually happened (prevents false ✅).
+            # On failure, append into status_out (never call _status, which
+            # clears) so the tool's own error is never overwritten by success.
+            if not p_out.exists():
+                with status_out:
+                    print("❌ Masking failed: output file was not created.")
+                return
+
+            new_mtime = p_out.stat().st_mtime
+            new_size = p_out.stat().st_size
+            if existed_before and (new_mtime == old_mtime) and (new_size == old_size):
+                with status_out:
+                    print(
+                        "❌ Masking failed: output file was not updated "
+                        "(e.g. the cloud cube does not cover all of the loaded "
+                        "cube's dates)."
+                    )
+                return
+
+            try:
+                with xr.open_dataset(p_out) as _:
+                    pass
+            except Exception as e:
+                with status_out:
+                    print(f"❌ Masking failed: output file is not readable ({type(e).__name__}: {e})")
+                return
 
             # Show result from exported masked cube
             state["current_result_path"] = out_path
@@ -6838,6 +6945,7 @@ def ard_cube_tools():
             css_patch,
             header,
             subtitle,
+            tools_info_box,
 
             loading_card,
             spacer_small,
