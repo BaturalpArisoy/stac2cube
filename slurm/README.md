@@ -1,56 +1,28 @@
 # Submitting **stac2cube** Features to HPC with **SLURM**
-Run stac2cube workflows on LRZ **terrabyte** (HPC) using SLURM job submission.
+Run stac2cube workflows on DLR&LRZ **terrabyte** (HPC) using SLURM job submission.
 
-This is the **common** guide shared by all features. Each feature folder has its
-own short README with feature-specific details.
-
-## Folder layout
-
-```
-slurm/
-├── README.md              <- this common guide
-├── slurm_setup.cmd        <- shared SLURM setup (edit once, used by all features)
-├── log/                   <- job logs (.out / .err)
-├── 1_build_data_cube/
-│   ├── README.md          <- feature guide + JSON examples
-│   ├── submit.sh
-│   ├── slurm_run.py
-│   └── get_stac_layers.json
-├── 2_cloud_masking/
-│   ├── README.md          <- feature guide + JSON examples
-│   ├── submit.sh
-│   ├── slurm_run.py
-│   └── get_cloud_layers.json
-├── 3_coregistration/
-│   ├── README.md          <- feature guide + JSON examples
-│   ├── submit.sh
-│   ├── slurm_run.py
-│   └── get_coreg_layers.json
-└── 4_superresolution/
-    ├── README.md          <- feature guide + JSON examples
-    ├── submit.sh
-    ├── slurm_run.py
-    └── get_superres_layers.json
-```
-
-The `slurm_setup.cmd` lives **once** at the `slurm/` level and is shared by all
-features. Each `submit.sh` runs it via `sbatch ../slurm_setup.cmd`, so the job's
-working directory becomes that feature's folder and the right `slurm_run.py` and
-`get_*.json` are picked up automatically.
 
 ---
+> **Good news:** Section **1** is a **ONE-TIME setup!** Do it once, never again.
+> After that, running any feature is just **2) Configure the job** and **3) Submit the job**.
+---
+
 
 ## Quick overview
-1. **Update the shared SLURM setup** (only once)
-2. **Configure the job** (edit the feature's JSON config)
+1. **ONE-TIME SETUP** 
+2. **Configure the job** - edit the feature's JSON config
 3. **Submit the job**
-4. **Track progress** via logs + portal
+4. **Extras**
+    - Track the progress
+    - Notes & troubleshooting
+    - Switching a feature between CPU and GPU
+    - Folder layout
 
 ---
 
-## 1) Update the shared SLURM setup (only once)
+## 1) One-time setup
 
-### 1.0 Prerequisite: set up micromamba (one-time)
+### 1.1 Micromamba Setup
 Set up micromamba on your terrabyte account **once**, via the modules system:
 
 - https://docs.terrabyte.lrz.de/software/environments/micromamba/ -> **"Loading micromamba via modules system"**
@@ -63,16 +35,17 @@ micromamba
 
 If it prints its usage/help, you are good.
 
-### 1.1 Edit `slurm_setup.cmd`
-Open the shared file:
+### 1.2 Edit the config files
+Both shared setup files need your email and account:
 
-- `./slurm_setup.cmd`
+- `./config_cpu.cmd` (CPU -> Build Data Cube, Cloud Masking, Co-registration)
+- `./config_gpu.cmd` (GPU -> Super-resolution)
 
-Then update:
+In **each** file, update:
 
 - Replace: `#SBATCH --mail-user=<e-mail>`
 - With: `#SBATCH --mail-user=your.email@domain.com` *(remove the `<` and `>`)*
-- Replace: `#SBATCH --account=<reach your contact person>`
+- Replace: `#SBATCH --account=<account>`
 - With your real terrabyte account/project string *(remove the `<` and `>`)*
 
 > If you don't know your account string, reach your contact person or check an
@@ -82,12 +55,7 @@ Then update:
 > A leftover `<...>` placeholder here makes sbatch fail with
 > `Invalid directive found in batch script`.
 
-### 1.2 Choose your partition
-Change your cluster partition as desired:
-
-- https://docs.terrabyte.lrz.de/services/terrabyte-hpc/introduction/
-
-### 1.3 Choose how you run `slurm_run.py` (local vs shared env)
+### 1.3 Choose your python environment (local vs shared env)
 
 #### Option A - Local micromamba env (`-n stac2cube`)
 Use this if **stac2cube is installed locally** in your micromamba:
@@ -113,6 +81,7 @@ micromamba run -p /dss/.../envs/stac2cube python slurm_run.py
 
 > Pick **exactly one** run mode and keep the other commented.
 
+
 ---
 
 ## 2) Configure the job
@@ -121,10 +90,10 @@ Each feature has its **own** JSON config in its folder:
 
 | Feature | Config file |
 | --- | --- |
-| `1_build_data_cube` | `get_stac_layers.json` |
-| `2_cloud_masking` | `get_cloud_layers.json` |
-| `3_coregistration` | `get_coreg_layers.json` |
-| `4_superresolution` | `get_superres_layers.json` |
+| `1_build_data_cube` | `build_data_cube.json` |
+| `2_cloud_masking` | `cloud_masking.json` |
+| `3_coregistration` | `coregistration.json` |
+| `4_superresolution` | `superresolution.json` |
 
 Edit the JSON of the feature you want to run and save it.
 
@@ -135,14 +104,6 @@ Edit the JSON of the feature you want to run and save it.
 
 ## 3) Submit SLURM job
 
-### 3.1 Make all `submit.sh` executable (only once)
-From inside the `slurm/` folder, run:
-
-```bash
-chmod +x ./*/submit.sh
-```
-
-### 3.2 Submit
 Submit the feature you want by running its `submit.sh`.
 
 #### Recommended (MobaXTerm)
@@ -150,8 +111,8 @@ Submit the feature you want by running its `submit.sh`.
 - If using a laptop touchpad:
   - Right-click -> copy file path to terminal -> **Enter**
 
-#### Alternatives (no execute bit needed)
-If not using MobaXTerm, or if middle-click is still denied:
+#### Alternatives (if middle-click is denied)
+If not using MobaXTerm, or if middle-click is denied:
 
 ```bash
 bash submit.sh
@@ -163,48 +124,114 @@ or:
 bash path/to/submit.sh
 ```
 
-or submit the shared batch script directly **from inside the feature folder**:
+or submit the right batch script directly **from inside the feature folder**
+(`config_cpu.cmd` for features 1-3, `config_gpu.cmd` for super-resolution):
 
 ```bash
-sbatch ../slurm_setup.cmd
+sbatch ../config_cpu.cmd
 ```
 
 ---
 
 🎉 Congratulations
 Your job is submitted to HPC! <br><br> 
-Good job!  
+Good job! Now you can track the progress, explained below.
+
+<br>
+<br>
 
 
+# Extras
 
 
-## 4) Following the progress
+## Track the progress
 
-### 4.1 Check log files
-- Progress of xarray computing:
-  - `./log/*.out`
-- Errors or warnings:
-  - `./log/*.err`
+**Check the log files** (in `./log/`):
+- xarray computing progress -> `./log/*.out`
+- errors / warnings -> `./log/*.err`
 
-**Tip:** Don't forget to sort by time for the latest log files.  
-On MobaXTerm you may need to close the editor and reopen it to track progress.
+**Tip:** sort by time for the latest log files. On MobaXTerm you may need to close
+and reopen the editor to refresh.
 
-### 4.2 Recommended: terrabyte portal
-My recommendation is to check the log files on:
-
-- https://portal.terrabyte.lrz.de
-
-You can simply **F5** the page to track the progress.
+**terrabyte portal (recommended):** open https://portal.terrabyte.lrz.de and press
+**F5** to refresh.
 
 ---
 
 ## Notes & troubleshooting
 
-### Note - No new `.out` / `.err` files?
-If you don't see any newly generated `.out` and `.err` files, most likely it means that your SLURM job is **waiting in the queue**.
+**No new `.out` / `.err` files?** <br><br> Your job is most likely still **waiting in the
+queue** (the wait depends on server load and your access privileges). <br> Confirm at
+https://portal.terrabyte.lrz.de -> **Jobs** -> **Active Jobs** and check the
+**status**.
 
-The time spent in the queue depends on both server status and access privileges.
+---
 
-To check if your job is sitting in the queue:
-- https://portal.terrabyte.lrz.de -> **Jobs** -> **Active Jobs**  
-- Check the job **status**.
+## Switching a feature between CPU and GPU
+
+Each feature's `submit.sh` chooses the setup by the file it submits:
+
+- `sbatch ../config_cpu.cmd` -> runs on **CPU**
+- `sbatch ../config_gpu.cmd` -> runs on **GPU**
+
+By default, features 1-3 use `config_cpu.cmd` and super-resolution uses
+`config_gpu.cmd`. To switch a feature, open its `submit.sh` and change that one
+line.
+
+**Example - run Cloud Masking on GPU:** open `2_cloud_masking/submit.sh` and
+change `sbatch ../config_cpu.cmd` to:
+
+```bash
+sbatch ../config_gpu.cmd
+```
+
+> Reminder: the config you switch to must have your email/account filled in
+> (see **1.2**) - otherwise the job will fail.
+
+---
+
+## Choose your partition
+
+**The default setup is good enough** for most use cases. Only change your cluster
+partition in `config.cmd` files if you specifically need to:
+
+- https://docs.terrabyte.lrz.de/services/terrabyte-hpc/introduction/
+
+---
+
+## Folder layout
+
+```
+slurm/
+├── README.md              <- this common guide
+├── config_cpu.cmd         <- CPU SLURM setup (features 1-3)
+├── config_gpu.cmd         <- GPU SLURM setup (feature 4, super-resolution)
+├── log/                   <- job logs (.out / .err)
+├── 1_build_data_cube/
+│   ├── README.md          <- feature guide + JSON examples
+│   ├── submit.sh
+│   ├── slurm_run.py
+│   └── build_data_cube.json
+├── 2_cloud_masking/
+│   ├── README.md          <- feature guide + JSON examples
+│   ├── submit.sh
+│   ├── slurm_run.py
+│   └── cloud_masking.json
+├── 3_coregistration/
+│   ├── README.md          <- feature guide + JSON examples
+│   ├── submit.sh
+│   ├── slurm_run.py
+│   └── coregistration.json
+└── 4_superresolution/
+    ├── README.md          <- feature guide + JSON examples
+    ├── submit.sh
+    ├── slurm_run.py
+    └── superresolution.json
+```
+
+There are two shared setup files at the `slurm/` level: `config_cpu.cmd` (used by
+features 1-3) and `config_gpu.cmd` (used by feature 4, super-resolution, whose
+SEN2SRLite model runs **much faster on a GPU**). Each `submit.sh` already points
+at the right one, so the job's working directory becomes that feature's folder and
+the correct `slurm_run.py` and `.json` are picked up automatically.
+

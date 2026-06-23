@@ -11,7 +11,7 @@ The easiest and safest way to produce a valid config is the **Data Cube Builder*
 1. Open `interactive/0_User_Interface_Tools.ipynb`.
 2. Run **Data Cube Builder** and set your parameters interactively.
 3. Click the **Copy JSON** button.
-4. Paste the result into `get_stac_layers.json` (replacing the content) and save.
+4. Paste the result into `build_data_cube.json` (replacing the content) and save.
 
 > The GUI also documents what each parameter means, so it doubles as a reference.
 

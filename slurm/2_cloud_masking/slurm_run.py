@@ -13,7 +13,7 @@ def load_config_json(config_file):
 
 if __name__ == "__main__":
 
-    config_file = os.path.expanduser('get_cloud_layers.json')
+    config_file = os.path.expanduser('cloud_masking.json')
     config = load_config_json(config_file)
 
     cloud_masking.get_cloud_layers(**config)

@@ -13,7 +13,7 @@ def load_config_json(config_file):
 
 if __name__ == "__main__":
 
-    config_file = os.path.expanduser('get_coreg_layers.json')
+    config_file = os.path.expanduser('coregistration.json')
     config = load_config_json(config_file)
 
     coregistration.coregister_cube(**config)

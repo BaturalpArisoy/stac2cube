@@ -3,11 +3,10 @@
 Super-resolves a data cube (Sentinel-2) to 2.5 m using the SEN2SRLite models.
 
 
-> **Recommended: run on a CUDA-capable GPU cluster.** The SEN2SRLite models run
-> the inference far faster on a GPU. To send this job to a GPU node, copy the
-> GPU `#SBATCH` lines from [`gpu_example.cmd`](gpu_example.cmd) into the shared
-> `../slurm_setup.cmd` (replacing the matching CPU lines). Swap them back when
-> running the CPU-only features.
+> **Runs on GPU automatically.** The SEN2SRLite model is much faster on a GPU,
+> so this feature's `submit.sh` already uses the GPU setup (`../config_gpu.cmd`,
+> partition `hpda2_compute_gpu`) - no CPU/GPU swapping needed. Just make sure your
+> email and account are filled in `config_gpu.cmd` (see the common guide).
 
 ## `model_type`
 
@@ -23,7 +22,7 @@ Leave it as `null` to auto-detect from the cube's bands or set it explicitly:
 > The input cube must already contain the bands the chosen model requires,
 > otherwise the run fails with a missing-bands error.
 
-## `model_dir` (required on HPC)
+## `model_dir` (ONE-TIME CHANGE)
 
 The SEN2SRLite model files live in `interactive/model/` (`SEN2SRLite` and
 `SEN2SRLite_RGBN`). The notebook finds them because it runs from `interactive/`,
