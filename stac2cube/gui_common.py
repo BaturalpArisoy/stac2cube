@@ -295,14 +295,23 @@ GUI_CSS = """
 <style>
 /* Root: kill the tiny horizontal overflow that otherwise shows a useless,
    non-functional scrollbar on the panels. */
-.stac2cube-root { overflow-x: hidden !important; }
+.stac2cube-root {
+    overflow-x: hidden !important;
+    background: #f4f3ec;
+    margin: 18px auto 20px auto !important;
+    padding: 18px 14px 22px 14px;
+    box-sizing: border-box;
+    border: 1px solid #ddd9c8;
+    border-radius: 16px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+}
 
 /* Cards */
 .stac2cube-card {
     border: 1px solid #e5e7eb;
     border-radius: 12px;
     padding: 12px;
-    background: #fafbfc;
+    background: #fbfaf4;
     box-shadow: 0 1px 2px rgba(0,0,0,0.04);
     box-sizing: border-box;
     overflow-x: hidden;
@@ -315,7 +324,7 @@ GUI_CSS = """
     border: 1px solid #e5e7eb;
     border-radius: 10px;
     padding: 10px 12px;
-    background: #ffffff;
+    background: #eef0e3;
     box-sizing: border-box;
     min-width: 0;
     margin-bottom: 10px;
@@ -415,6 +424,30 @@ button.stac2cube-help-btn:focus {
     line-height: 20px !important;
     font-weight: 700 !important;
     font-size: 12px !important;
+}
+
+/* ipywidgets 8 (Lumino) Accordion headers. The default renderer paints these
+   header bars (Basic Parameters / Advanced / Result / Visualization ...) a cool
+   flat gray that clashes with the earthy/sage palette. We retint them to a sage
+   header so the native widgets match the themed cards. The clickable header
+   element is '.lm-AccordionPanel-title' (titleClassName in the bundle); the
+   container is '.jupyter-widget-Accordion'. Lumino adds '.lm-mod-expanded' to
+   the title when its panel is open. If a future ipywidgets/renderer renames
+   these classes, the rules simply no-op (no harm). */
+.stac2cube-root .lm-AccordionPanel-title {
+    background: #e4e8d6 !important;
+    color: #3f4a36 !important;
+    border: 1px solid #d2d8bf !important;
+    border-radius: 8px !important;
+    font-weight: 600 !important;
+}
+.stac2cube-root .lm-AccordionPanel-title:hover {
+    background: #dde2cd !important;
+}
+.stac2cube-root .lm-AccordionPanel-title.lm-mod-expanded {
+    background: #d9dfc6 !important;
+    border-bottom-left-radius: 0 !important;
+    border-bottom-right-radius: 0 !important;
 }
 </style>
 """
