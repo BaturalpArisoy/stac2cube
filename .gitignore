@@ -182,4 +182,7 @@ pyrightconfig.json
 .claude/
 CLAUDE.md
 
+# Credentials
+#credentials/cdse_key
+
 # End of https://www.toptal.com/developers/gitignore/api/python
