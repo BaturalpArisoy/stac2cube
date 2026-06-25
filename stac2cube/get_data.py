@@ -1,4 +1,5 @@
 from .vector_refiner import polygon_2_bbox
+from .cdse_auth import configure_cdse_environment
 
 import pandas as pd
 import geopandas as gpd
@@ -31,6 +32,63 @@ _S2_COMMON_TO_BNUM = {
 }
 _S2_BNUM_TO_COMMON = {v: k for k, v in _S2_COMMON_TO_BNUM.items()}
 
+# --- Copernicus Data Space Ecosystem (CDSE) asset naming --------------------
+# CDSE STAC asset keys differ from element84:
+#   * L1C assets are plain band numbers (B01..B12, B8A, B10).
+#   * L2A assets are resolution-suffixed (B04_10m, B05_20m, B01_60m, SCL_20m...)
+#     and there is NO plain "B04" asset, so each band must be requested at one
+#     concrete resolution. We pick each band's NATIVE resolution; odc.stac then
+#     resamples to the user-requested output resolution.
+# Maps go common-name -> CDSE asset key. After loading, the assets are renamed
+# back to the canonical common names the rest of the pipeline expects.
+_S2_CDSE_L1C = {
+    "coastal": "B01",
+    "blue": "B02",
+    "green": "B03",
+    "red": "B04",
+    "rededge1": "B05",
+    "rededge2": "B06",
+    "rededge3": "B07",
+    "nir": "B08",
+    "nir08": "B8A",
+    "nir09": "B09",
+    "cirrus": "B10",
+    "swir16": "B11",
+    "swir22": "B12",
+}
+_S2_CDSE_L2A = {
+    "coastal": "B01_60m",
+    "blue": "B02_10m",
+    "green": "B03_10m",
+    "red": "B04_10m",
+    "rededge1": "B05_20m",
+    "rededge2": "B06_20m",
+    "rededge3": "B07_20m",
+    "nir": "B08_10m",
+    "nir08": "B8A_20m",
+    "nir09": "B09_60m",
+    "swir16": "B11_20m",
+    "swir22": "B12_20m",
+    "scl": "SCL_20m",
+    "aot": "AOT_10m",
+    "wvp": "WVP_10m",
+}
+
+
+def _s2_baseline(item):
+    """Sentinel-2 processing baseline as a float.
+
+    element84/PC/terrabyte expose it as ``s2:processing_baseline``; CDSE exposes
+    it as ``processing:version`` (e.g. "05.12"). Returns 0.0 if unavailable.
+    """
+    v = item.properties.get("s2:processing_baseline")
+    if v is None:
+        v = item.properties.get("processing:version")
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return 0.0
+
 
 def get_stac(
     mission: str,
@@ -50,11 +108,12 @@ def get_stac(
             "element84": ("https://earth-search.aws.element84.com/v1/", "sentinel-2-l2a"),
             "terrabyte": ("https://stac.terrabyte.lrz.de/public/api/", "sentinel-2-c1-l2a"),
             "planetary_computer": ("https://planetarycomputer.microsoft.com/api/stac/v1", "sentinel-2-l2a"),
+            "cdse": ("https://stac.dataspace.copernicus.eu/v1", "sentinel-2-l2a"),
         },
-        "sentinel_2_l1c": (
-            "https://earth-search.aws.element84.com/v1/",
-            "sentinel-2-l1c",
-        ),
+        "sentinel_2_l1c": {
+            "element84": ("https://earth-search.aws.element84.com/v1/", "sentinel-2-l1c"),
+            "cdse": ("https://stac.dataspace.copernicus.eu/v1", "sentinel-2-l1c"),
+        },
         "cop_dem_glo_30": (
             "https://stac.terrabyte.lrz.de/public/api/",
             "cop-dem-glo-30",
@@ -86,16 +145,24 @@ def get_stac(
     else:
         bbox = polygon_2_bbox(polygon)
 
-    if mission == "sentinel_2_l2a":
-        sources = catalogues["sentinel_2_l2a"]
-        if source not in sources:
+    mission_cat = catalogues[mission]
+    if isinstance(mission_cat, dict):
+        if source not in mission_cat:
             raise ValueError(
-                f"Unknown source '{source}' for sentinel_2_l2a. "
-                f"Valid options: e84, tb, pc (or full names: {list(sources.keys())})."
+                f"Unknown source '{source}' for {mission}. "
+                f"Valid options: {list(mission_cat.keys())} "
+                "(short aliases: e84, tb, pc, cdse)."
             )
-        url, collection = sources[source]
+        url, collection = mission_cat[source]
     else:
-        url, collection = catalogues[mission]
+        url, collection = mission_cat
+
+    # CDSE serves pixels from s3://eodata and needs the user's S3 keys at
+    # compute time. Export them now (also gives an early, clear error if the
+    # credentials file is missing/unfilled) and reset any anonymous settings
+    # that a previous source may have left behind.
+    if source == "cdse":
+        configure_cdse_environment()
 
     needs_pc_auth = mission in ("sentinel_1_rtc", "landsat_c2_l2") or (
         mission == "sentinel_2_l2a" and source == "planetary_computer"
@@ -105,16 +172,21 @@ def get_stac(
     else:
         catalog = pystacclient.open(url)
 
-    query = {"eo:cloud_cover": {"gte": 0, "lte": max_cc}}
-
-    if mission in ("cop_dem_glo_30", "sentinel_1_rtc"):
+    # Only filter on cloud cover when an explicit max_cc is given. A None upper
+    # bound (max_cc not supplied) must mean "no cloud filter": element84's STAC
+    # server tolerates {"lte": null}, but Planetary Computer / terrabyte / CDSE
+    # treat "cloud_cover <= null" as matching nothing -> spurious "No scenes
+    # found". Missions without cloud metadata never get a cloud query.
+    if max_cc is None or mission in ("cop_dem_glo_30", "sentinel_1_rtc"):
         query = None
+    else:
+        query = {"eo:cloud_cover": {"gte": 0, "lte": max_cc}}
 
     season_spec = _parse_season_daterange(daterange)
 
     if season_spec is None:
         items, crs, stac_mission, tiles = _catalogue_search(
-            catalog, collection, bbox, daterange, query, mission
+            catalog, collection, bbox, daterange, query, mission, source=source
         )
     else:
         start_md, end_md, years_spec = season_spec
@@ -128,7 +200,8 @@ def get_stac(
 
         for win in windows:
             win_items, win_crs, win_stac_mission, win_tiles = _catalogue_search(
-                catalog, collection, bbox, win, query, mission, allow_empty=True
+                catalog, collection, bbox, win, query, mission,
+                allow_empty=True, source=source,
             )
             if win_items:
                 all_items.extend(list(win_items))
@@ -172,10 +245,7 @@ def get_stac(
         filtered_items = []
         for date_key, group in grouped.items():
             # Choose item with highest processing baseline (converted to float)
-            best_item = max(
-                group,
-                key=lambda it: float(it.properties.get("s2:processing_baseline", "0")),
-            )
+            best_item = max(group, key=_s2_baseline)
             filtered_items.append(best_item)
         items = filtered_items
 
@@ -202,9 +272,7 @@ def get_stac(
 
     if mission == "sentinel_2_l1c":
         date_list = [item.properties["datetime"] for item in items]
-        processing_baseline_list = [
-            item.properties["s2:processing_baseline"] for item in items
-        ]
+        processing_baseline_list = [_s2_baseline(item) for item in items]
         dates = pd.to_datetime(date_list, format="mixed").to_numpy(
             dtype="datetime64[ns]"
         )
@@ -369,7 +437,8 @@ def _expand_season_windows(start_md: str, end_md: str, years):
 
 
 
-def _catalogue_search(catalog, collection, bbox, daterange, query, mission, allow_empty: bool = False):
+def _catalogue_search(catalog, collection, bbox, daterange, query, mission,
+                      allow_empty: bool = False, source: str = None):
 
     results = catalog.search(
         bbox=bbox,
@@ -380,7 +449,11 @@ def _catalogue_search(catalog, collection, bbox, daterange, query, mission, allo
 
     items = results.item_collection()
 
-    if mission == "sentinel_2_l1c":
+    # element84 stores L1C under the same S3 path as L2A with anonymous,
+    # requester-pays access -> rewrite hrefs and set the anonymous flags.
+    # CDSE L1C uses its own s3://eodata hrefs and *signed* access, so it must
+    # NOT go through this path (its env is configured in get_stac instead).
+    if mission == "sentinel_2_l1c" and source == "element84":
         for item in items:
             for asset in item.assets.values():
                 asset.href = asset.href.replace("sentinel-s2-l2a", "sentinel-s2-l1c")
@@ -398,6 +471,16 @@ def _catalogue_search(catalog, collection, bbox, daterange, query, mission, allo
     crs = sample_item.properties.get("proj:code") or sample_item.properties.get(
         "proj:epsg"
     )
+    # CDSE keeps the CRS at the asset level (proj:code = "EPSG:32632"), not in
+    # item.properties. Fall back to the first asset that carries it.
+    if crs is None:
+        for asset in sample_item.assets.values():
+            asset_crs = asset.extra_fields.get("proj:code") or asset.extra_fields.get(
+                "proj:epsg"
+            )
+            if asset_crs is not None:
+                crs = asset_crs
+                break
     stac_mission = sample_item.to_dict().get("collection")
     # Get Sentinel tile ID
     if mission in ("sentinel_2_l2a", "sentinel_2_l1c"):
@@ -410,6 +493,11 @@ def _catalogue_search(catalog, collection, bbox, daterange, query, mission, allo
             )
         elif "s2:mgrs_tile" in gdf.columns:
             gdf["granule"] = gdf["s2:mgrs_tile"]
+        elif "grid:code" in gdf.columns:
+            # CDSE exposes the tile as grid:code = "MGRS-32UPU".
+            gdf["granule"] = (
+                gdf["grid:code"].astype(str).str.replace("MGRS-", "", regex=False)
+            )
         else:
             gdf["granule"] = "unknown"
         tiles = gdf["granule"].unique()
@@ -422,6 +510,10 @@ def _catalogue_search(catalog, collection, bbox, daterange, query, mission, allo
 def _get_band_map(mission: str, source: str = None):
     if mission == "sentinel_2_l2a" and source in ("terrabyte", "planetary_computer"):
         return dict(_S2_COMMON_TO_BNUM)
+    if source == "cdse" and mission == "sentinel_2_l2a":
+        return dict(_S2_CDSE_L2A)
+    if source == "cdse" and mission == "sentinel_2_l1c":
+        return dict(_S2_CDSE_L1C)
 
     band_maps = {
         "landsat_ot_c2_l2": {

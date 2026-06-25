@@ -359,7 +359,13 @@ HELP_MD = r"""
 - See `missions()` → `aggregators`.
 - Disables `stats`.
 
-**q**  
+**source**
+- Which STAC API / data provider to pull from. If `None` → `element84`.
+- `sentinel_2_l2a` (`s2`): `e84` (element84, default), `tb` (terrabyte), `pc` (planetary_computer), `cdse` (Copernicus Data Space Ecosystem).
+- `sentinel_2_l1c` (`s2_l1c`): `e84` (element84, default), `cdse`.
+- `cdse` downloads pixels from Copernicus S3 (`s3://eodata`) and needs free personal keys: paste them into `credentials/cdse_key` (see `credentials/README.md`).
+
+**q**
 - `True` hides print outputs except progress bar.
 """
 

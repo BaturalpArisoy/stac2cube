@@ -33,17 +33,29 @@ def cloud_mask(stac, mission):
     return stac_masked
 
 
-def scale_factor(stac, mission, baselines):
+def scale_factor(stac, mission, baselines, source=None):
+    # L1C: baseline-aware scaling. The -1000 DN radiometric offset was introduced
+    # at processing baseline 04.00; reflectance = (DN - 1000)/10000 for >= 04.00,
+    # else DN/10000. L1C carries no SCL and the per-scene baseline also matters
+    # downstream (s2cloudless), so L1C stays baseline-driven.
     if mission == "sentinel_2_l1c":
         baselines = baselines.astype(float)
         baselines_aligned = baselines.sel(time=stac.time)
         stac = xr.where(baselines_aligned >= 4.00, (stac - 1000) / 10000, stac / 10000)
         return stac
-    else:
-        cfg = _mission_cfg(mission)
-        gain = cfg[2]
-        offset = cfg[3]
-        return (stac + offset) * gain
+
+    cfg = _mission_cfg(mission)
+    gain = cfg[2]
+    offset = cfg[3]
+    # CDSE serves the raw Collection-1 L2A archive where the -1000 BOA offset is
+    # NOT pre-applied (element84/PC L2A is harmonized -> offset 0). Apply it as a
+    # fixed, archive-wide constant (not a per-scene baseline lookup) so CDSE L2A
+    # reflectance matches the other providers. Cast first to avoid uint16
+    # underflow for dark pixels (DN < 1000).
+    if mission == "sentinel_2_l2a" and source == "cdse":
+        return (stac.astype("float32") + (-1000)) * gain
+
+    return (stac + offset) * gain
 
 
 def _mission_cfg(mission):

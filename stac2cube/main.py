@@ -169,7 +169,7 @@ def get_stac_layers(
         stac = cloud_mask(stac, mission)
 
     # Scale factor
-    stac = scale_factor(stac, mission, baselines)
+    stac = scale_factor(stac, mission, baselines, source=source or "element84")
     # stac.rio.write_crs(crs, inplace=True)
 
     # Transform zeros to nan
