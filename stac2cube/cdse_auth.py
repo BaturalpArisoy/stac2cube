@@ -176,10 +176,19 @@ def configure_cdse_environment(keyfile=None):
     # HTTP/2 multiplexing against CDSE is a known source of corrupt/empty reads.
     os.environ.setdefault("GDAL_HTTP_MULTIPLEX", "NO")
     os.environ.setdefault("VSI_CACHE", "TRUE")
-    # CDSE serves the original JPEG2000 (.jp2) products, not COGs. Unlike the COG
-    # sources (element84/PC/terrabyte), the per-scene cost at COMPUTE time is the
-    # CPU-bound wavelet decode, not the network. Let the JP2OpenJPEG driver
-    # multithread that decode across all cores. setdefault: stays overridable.
-    os.environ.setdefault("GDAL_NUM_THREADS", "ALL_CPUS")
+    # Benchmarked against CDSE, the per-scene cost is NOT CPU-bound wavelet decode
+    # but NETWORK round-trip latency: each .jp2 open costs several high-latency
+    # requests to eodata S3, and that dominates (e.g. ~5 s/scene even for a tiny
+    # AOI). So keep GDAL single-threaded per read -- extra decode threads only
+    # MULTIPLY concurrent requests and trip CDSE's rate limit (HTTP 429). With
+    # threads=1, total in-flight requests == the caller's dask worker count (not
+    # workers x cores), which stays 429-free at ANY machine size. This is the
+    # single most important CDSE knob -- do NOT raise it.
+    os.environ.setdefault("GDAL_NUM_THREADS", "1")
+    # Latency reducers: pull the JP2 codestream header in one shot instead of
+    # several tiny range reads, and coalesce adjacent ranges -- fewer (expensive)
+    # round-trips per file open.
+    os.environ.setdefault("GDAL_INGESTED_BYTES_AT_OPEN", "65536")
+    os.environ.setdefault("GDAL_HTTP_MERGE_CONSECUTIVE_RANGES", "YES")
 
     return endpoint
