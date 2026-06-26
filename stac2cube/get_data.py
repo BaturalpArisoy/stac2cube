@@ -258,6 +258,12 @@ def get_stac(
         chunks={},
         groupby="solar_day",
         bbox=bbox,
+        # Don't abort the whole (potentially terabyte-scale) load when a single
+        # granule is missing/unreadable on the archive. Such reads are skipped
+        # and filled with the band's nodata value instead, so the remaining
+        # dates and bands still load. This guards against terrabyte STAC index
+        # being out of sync with the physical .jp2 files on DSS.
+        fail_on_error=False,
     )
 
     if band_map is not None:
