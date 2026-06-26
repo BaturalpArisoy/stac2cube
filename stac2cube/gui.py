@@ -330,6 +330,7 @@ def datacube_builder(missions_func=missions):
     source_w = widgets.Dropdown(
         options=[
             ("Element84 (Earth Search)", "element84"),
+            ("Copernicus Data Space Ecosystem (Copernicus)", "cdse"),
             ("terrabyte (DLR)", "terrabyte"),
             ("Planetary Computer (Microsoft)", "planetary_computer"),
         ],
@@ -1936,8 +1937,16 @@ def datacube_builder(missions_func=missions):
         if m_name == "sentinel_2_l2a":
             source_w.options = [
                 ("Element84 (Earth Search)", "element84"),
+                ("Copernicus Data Space Ecosystem (Copernicus)", "cdse"),
                 ("terrabyte (DLR)", "terrabyte"),
                 ("Planetary Computer (Microsoft)", "planetary_computer"),
+            ]
+            source_w.value = "element84"
+            source_w.disabled = False
+        elif m_name == "sentinel_2_l1c":
+            source_w.options = [
+                ("Element84 (Earth Search)", "element84"),
+                ("Copernicus Data Space Ecosystem (Copernicus)", "cdse"),
             ]
             source_w.value = "element84"
             source_w.disabled = False

@@ -176,5 +176,10 @@ def configure_cdse_environment(keyfile=None):
     # HTTP/2 multiplexing against CDSE is a known source of corrupt/empty reads.
     os.environ.setdefault("GDAL_HTTP_MULTIPLEX", "NO")
     os.environ.setdefault("VSI_CACHE", "TRUE")
+    # CDSE serves the original JPEG2000 (.jp2) products, not COGs. Unlike the COG
+    # sources (element84/PC/terrabyte), the per-scene cost at COMPUTE time is the
+    # CPU-bound wavelet decode, not the network. Let the JP2OpenJPEG driver
+    # multithread that decode across all cores. setdefault: stays overridable.
+    os.environ.setdefault("GDAL_NUM_THREADS", "ALL_CPUS")
 
     return endpoint
