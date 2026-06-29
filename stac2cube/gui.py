@@ -2360,7 +2360,7 @@ def datacube_builder(missions_func=missions):
 
     subtitle = widgets.HTML(
         "<div style='font-size:13px; color:#6b7280; margin:0 0 4px 0;'>"
-        "Select Basic Parameters -> optional: select advanced parameters -> build data cube -> inspect the result -> export current result."
+        "Basic Parameters -> Advanced Parameters -> Data Source -> Build data cube -> inspect the result -> Export Options -> Export current result."
         "</div>"
     )
 
