@@ -117,7 +117,7 @@ For a quick and beginner-friendly workflow, use the 3 interactive GUI tools avai
 2) Data Cube Editor (see example below) 
 3) Analysis Ready Data Cube Tools (Probabilistic Cloud Masking, Co-registration and Super-resolution)<br><br>
 
-<img src="assets/data_cube_editor_GUI.png" alt="gui_editor">
+<img src="assets/data_cube_builder_GUI.png" alt="gui_editor">
 
 ### Step-by-step Interactive Notebooks
 For a more detailed walkthrough of stac2cube features, including background, processing steps, and storage, see the well-documented notebooks in the [interactive folder](https://github.com/BaturalpArisoy/stac2cube/tree/main/interactive).
