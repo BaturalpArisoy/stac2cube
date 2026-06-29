@@ -2621,6 +2621,7 @@ def datacube_builder(missions_func=missions):
                 except Exception:
                     out_dir = Path(tempfile.gettempdir())
                 out_path = out_dir / f"drawn_{_datetime.now().strftime('%Y%m%d_%H%M%S')}.geojson"
+                out_path = out_path.resolve()  # store an absolute path, not relative
                 with open(out_path, "w", encoding="utf-8") as f:
                     json.dump(fc, f)
             except Exception as e:
