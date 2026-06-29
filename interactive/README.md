@@ -1,19 +1,19 @@
 # Interactive Folder
 
-You have two options to run stac2cube **interactively**:
+You have two ways to run stac2cube **interactively**:
 
-**1.** *0_User_Interface_Tools*  
-Easy configuration with given user interface for
+**1.** *User_Interface_Tools.ipynb*  
+Easy configuration through a graphical user interface. **Recommended** for most users, it covers everything below in one place:
 
 - Building data cube
 - Editing data cube
 - ARD Tools: probability cloud-masking, co-registration, super-resolution
 
-**2.** *Further Notebooks*  
-Detailed examples of each tools provided by stac2cube with detailed explanations  
+**2.** *tutorials/*  
+Detailed, step-by-step notebooks explaining each tool provided by stac2cube.  
 Follow in order:
 
-- 1_Initial_Data_Cube.ipynb
-- 2_Cloudmask_Data_Cube.ipynb
-- 3_Coregister_Data_Cube.ipynb
-- 4_Superresolve_Data_Cube.ipynb
+- tutorials/1_Initial_Data_Cube.ipynb
+- tutorials/2_Cloudmask_Data_Cube.ipynb
+- tutorials/3_Coregister_Data_Cube.ipynb
+- tutorials/4_Superresolve_Data_Cube.ipynb

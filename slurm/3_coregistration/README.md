@@ -7,7 +7,7 @@ Coregisters the scenes of a data cube to a common reference geometry.
 The easiest and safest way to produce a valid config is the
 **Co-register Data Cube** tool:
 
-1. Open `interactive/0_User_Interface_Tools.ipynb`.
+1. Open `interactive/User_Interface_Tools.ipynb`.
 2. Run **Analysis Ready Data Cube Tools** and open **2) Co-register Data Cube**.
 3. Set your parameters interactively.
 4. Click the **Copy JSON** button.

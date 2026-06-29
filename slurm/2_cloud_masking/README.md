@@ -7,7 +7,7 @@ Computes Sentinel-2 cloud **probability maps**, optional **mask layers**, and ca
 > expensive step (runs `s2cloudless` per scene - this is why it goes to SLURM).
 > Creating mask layers from a probability map, and masking an existing cube, are
 > lightweight - you can do those interactively in the GUI
-> (`interactive/0_User_Interface_Tools.ipynb` -> `ard_cube_tools` -> **1) Cloud Masking Data Cube**).
+> (`interactive/User_Interface_Tools.ipynb` -> `ard_cube_tools` -> **1) Cloud Masking Data Cube**).
 
 ---
 

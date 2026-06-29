@@ -110,8 +110,8 @@ If you have [Claude Code](https://claude.ai/code) available, the entire installa
 ---
 
 ## How to run
-### Friendly Interactive User Interface on Jupyter Notebook:
-For user friendly workflow, use the 3 interactive GUI tools available in the [User Interface Tools](https://github.com/BaturalpArisoy/stac2cube/tree/main/interactive/0_User_Interface_Tools.ipynb). <br>
+### Friendly Interactive User Interface on Jupyter Notebook (recommended):
+The **recommended** way to run stac2cube is through the interactive GUI tools in the [User Interface Tools](https://github.com/BaturalpArisoy/stac2cube/tree/main/interactive/User_Interface_Tools.ipynb) notebook. It bundles the full workflow in one place, requires no manual coding. <br> Just set the parameters and enjoy your coffee while your data cube is being built :) <br>
 
 1) Data Cube Builder (see example below)
 2) Data Cube Editor
@@ -120,7 +120,7 @@ For user friendly workflow, use the 3 interactive GUI tools available in the [Us
 <img src="assets/data_cube_builder_GUI.png" alt="gui_editor">
 
 ### Step-by-step Interactive Notebooks
-For a more detailed walkthrough of stac2cube features, including background, processing steps, and storage, see the well-documented notebooks in the [interactive folder](https://github.com/BaturalpArisoy/stac2cube/tree/main/interactive).
+For a more detailed walkthrough of stac2cube features, including background, processing steps, and storage, see the well-documented notebooks in the [tutorials folder](https://github.com/BaturalpArisoy/stac2cube/tree/main/interactive/tutorials).
 
 Each step is documented by the numbers and the general explanation is given below:
 
