@@ -110,11 +110,11 @@ If you have [Claude Code](https://claude.ai/code) available, the entire installa
 ---
 
 ## How to run
-### Interactive User Interface on Jupyter Notebook:
-For a quick and beginner-friendly workflow, use the 3 interactive GUI tools available in the [User Interface Tools](https://github.com/BaturalpArisoy/stac2cube/tree/main/interactive/0_User_Interface_Tools.ipynb). <br>
+### Friendly Interactive User Interface on Jupyter Notebook:
+For user friendly workflow, use the 3 interactive GUI tools available in the [User Interface Tools](https://github.com/BaturalpArisoy/stac2cube/tree/main/interactive/0_User_Interface_Tools.ipynb). <br>
 
-1) Data Cube Builder 
-2) Data Cube Editor (see example below) 
+1) Data Cube Builder (see example below)
+2) Data Cube Editor
 3) Analysis Ready Data Cube Tools (Probabilistic Cloud Masking, Co-registration and Super-resolution)<br><br>
 
 <img src="assets/data_cube_builder_GUI.png" alt="gui_editor">
@@ -154,11 +154,12 @@ A documentation file on how to use stac2cube features on terrabyte's HPC for com
 
 ### STAC Catalog Licenses
 
-| Provider   | Service           | STAC API                                        | License                                                                                      | Open-Access | Open-Source |
-|------------|-------------------|-------------------------------------------------|----------------------------------------------------------------------------------------------|-------------|-------------|
-| DLR        | terrabyte         | https://stac.terrabyte.lrz.de/public/api/       | MIT License Copyright (c) 2024 Deutsches Zentrum für Luft- und Raumfahrt e.V.                | No          | No          |
-| Element 84 | Earth Search      | https://earth-search.aws.element84.com/v1/      | Apache License 2.0                                                                           | Yes         | Yes         |
-| Microsoft  | Planetary Computer| https://planetarycomputer.microsoft.com/api/stac/v1    | MIT License Copyright (c) Microsoft Corporation.                                             | Yes         | No          |
+| Provider   | Service           | STAC API                                        | License                                                                                      | Open-Access | Requires Credentials |
+|------------|-------------------|-------------------------------------------------|----------------------------------------------------------------------------------------------|-------------|----------------------|
+| DLR        | terrabyte         | https://stac.terrabyte.lrz.de/public/api/       | MIT License Copyright (c) 2024 Deutsches Zentrum für Luft- und Raumfahrt e.V.                | No          | Yes                  |
+| Element 84 | Earth Search      | https://earth-search.aws.element84.com/v1/      | Apache License 2.0                                                                           | Yes         | No                   |
+| Microsoft  | Planetary Computer| https://planetarycomputer.microsoft.com/api/stac/v1    | MIT License Copyright (c) Microsoft Corporation.                                             | Yes         | No                   |
+| ESA        | Copernicus Data Space Ecosystem | https://stac.dataspace.copernicus.eu/v1               | Copernicus data - free, full and open access (Legal notice on the use of Copernicus data)   | Yes         | Yes                  |
 
 
 ## Method References
