@@ -1015,6 +1015,10 @@ def datacube_builder(missions_func=missions):
                 value=False,
                 description="Details for Xarray-Nerds",
                 indent=False,
+                # Shrink to content and push to the far right of the row.
+                # justify_content alone won't move a Checkbox reliably, so we
+                # constrain the width and use margin-left:auto.
+                layout=widgets.Layout(width="max-content", margin="0 0 0 auto"),
             )
             nerd_w.add_class("stac2cube-nerd-toggle")
             body = widgets.Output()
