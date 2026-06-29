@@ -2844,18 +2844,16 @@ def datacube_builder(missions_func=missions):
         layout=widgets.Layout(width="100%", gap="6px"),
     )
 
-    # Blue guidance bar: the right source is study-area dependent, so point users
-    # to the explanation and the availability check before they pick one.
+    # Slim guidance line shown under the selector: the right source is study-area
+    # and cloud-masking dependent, so nudge unsure users to the helper tools
+    # below, and note the one fact that isn't obvious from the widgets
+    # (cross-source spectral harmonization).
     source_info_bar = widgets.HTML(
-        "<div style='font-size:12px; color:#1e3a8a; background:#eff6ff; "
-        "border:1px solid #bfdbfe; border-radius:6px; padding:8px 10px;'>"
-        "The data source depends on your study area and preferences. Before "
-        "selecting the data, please check <b>About Data Sources</b> below.<br>"
-        "You can also check the availability of data, based on your selected "
-        "parameters.<br>"
-        "<span style='color:#475569;'><b>Note:</b> All spectral values for each "
-        "data source are harmonized and matching with Google's "
-        "\"Harmonized Sentinel-2 L2A SR\".</span>"
+        "<div style='font-size:12px; color:#475569; margin:0;'>"
+        "The right source depends on your study area and cloud-masking "
+        "preference. Not sure? Use the tools below.<br>"
+        "<b>Note:</b> All data sources are harmonized and matching Google's "
+        "\"Harmonized Sentinel-2 L2A SR\"."
         "</div>"
     )
 
@@ -2872,7 +2870,7 @@ def datacube_builder(missions_func=missions):
         "<b>2) Planetary Computer (ready-to-use)</b><br>"
         "Great for long time-series, usually with the full archive. It is free "
         "and needs no credentials or login. Selected dates cannot be masked by "
-        "s2cloudless, since Planetary Computer does not offer an L1C "
+        "s2cloudless, since Planetary Computer does not offer L1C "
         "collection.<br>"
         "<b>s2cloudless masking:</b> Not Available<br><br>"
         "<b>3) terrabyte (only at terrabyte portal)</b><br>"
@@ -3027,12 +3025,14 @@ def datacube_builder(missions_func=missions):
 
     source_box = widgets.VBox(
         [
+            # Lead with the actual choice, then the slim hint and the optional
+            # "help me choose" tools (explainer + availability check) below it.
+            _field_group("Data Source", [_boxed(source_w), terrabyte_warning_html, cdse_warning_html],
+                         subtitle="Catalog to download from. The default is open-source and does not require any credentials :)"),
             source_info_bar,
             about_sources_acc,
             widgets.HBox([check_avail_btn], layout=widgets.Layout(margin="2px 0")),
             avail_result_acc,
-            _field_group("Data Source", [_boxed(source_w), terrabyte_warning_html, cdse_warning_html],
-                         subtitle="Catalog to download from. The default is open-source and does not require any credentials :)"),
             _collapse_row(source_collapse_btn),
         ],
         layout=widgets.Layout(width="100%", gap="6px"),
