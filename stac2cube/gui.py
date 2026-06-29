@@ -32,7 +32,8 @@ from stac2cube import (
     get_stac_parameters,
     mask_from_probability,
     mask_stac_clouds,
-    super_resolve_cube
+    super_resolve_cube,
+    check_scene_availability,
 )
 
 from .gui_common import (
@@ -110,14 +111,13 @@ PARAM_HELP_HTML = {
         <li><code>mean_monthly</code> -> mean of each month</li>
         <li><code>mean_annual</code> -> mean of each year</li>
     </ul>
-    Disabled when <code>aggregator</code> is not None.
     """,
     "aggregator": """
-    <b>aggregator</b><br>
+    <b>Temporal Composite</b><br>
     Generates a single aggregated scene along time for each selected band/index.<br>
     Typically <code>mean</code> or <code>median</code>.<br><br>
-    If <b>None</b>: no aggregation.<br>
-    Setting an aggregator disables <code>stats</code>.
+    If <b>None</b>: no temporal composite.<br>
+    Setting a temporal composite disables <code>stats</code>.
     """,
     "output": """
     <b>Output</b><br>
@@ -330,9 +330,9 @@ def datacube_builder(missions_func=missions):
     source_w = widgets.Dropdown(
         options=[
             ("Element84 (Earth Search)", "element84"),
-            ("Copernicus Data Space Ecosystem (Copernicus)", "cdse"),
-            ("terrabyte (DLR)", "terrabyte"),
             ("Planetary Computer (Microsoft)", "planetary_computer"),
+            ("terrabyte (DLR)", "terrabyte"),
+            ("Copernicus Data Space Ecosystem (Copernicus)", "cdse"),
         ],
         value="element84",
         description="Data Source:",
@@ -466,10 +466,13 @@ def datacube_builder(missions_func=missions):
     aggregator_w = widgets.Dropdown(
         options=[("None", None)],
         value=None,
-        description="Aggregator:",
+        description="Temporal Composite:",
         layout=widgets.Layout(width="100%"),
-        style={"description_width": "120px"},
+        style={"description_width": "150px"},
     )
+    # ipywidgets shows a BLANK label for value=None even when a ("None", None)
+    # option exists, so set the label explicitly to display "None".
+    aggregator_w.label = "None"
 
     # -------------------------------------------------------------------------
     # Widgets (Export)
@@ -1937,9 +1940,9 @@ def datacube_builder(missions_func=missions):
         if m_name == "sentinel_2_l2a":
             source_w.options = [
                 ("Element84 (Earth Search)", "element84"),
-                ("Copernicus Data Space Ecosystem (Copernicus)", "cdse"),
-                ("terrabyte (DLR)", "terrabyte"),
                 ("Planetary Computer (Microsoft)", "planetary_computer"),
+                ("terrabyte (DLR)", "terrabyte"),
+                ("Copernicus Data Space Ecosystem (Copernicus)", "cdse"),
             ]
             source_w.value = "element84"
             source_w.disabled = False
@@ -1954,6 +1957,12 @@ def datacube_builder(missions_func=missions):
             source_w.options = [("Not applicable", None)]
             source_w.value = None
             source_w.disabled = True
+
+        # The "Check data availability" button compares catalogues, which only
+        # makes sense for the multi-catalogue Sentinel-2 missions.
+        check_avail_btn.disabled = m_name not in (
+            "sentinel_2_l2a", "sentinel_2_l1c"
+        )
 
         # Resolution
         if _is_supported(meta.get("default_resolution")):
@@ -2039,6 +2048,7 @@ def datacube_builder(missions_func=missions):
         agg_options = [("None", None)] + [(str(x), x) for x in agg_list]
         aggregator_w.options = agg_options
         aggregator_w.value = None
+        aggregator_w.label = "None"  # show "None", not a blank label (see widget def)
         aggregator_w.disabled = len(agg_list) == 0
 
         _apply_export_mode_defaults()
@@ -2415,7 +2425,7 @@ def datacube_builder(missions_func=missions):
                 [stats_all_btn, stats_none_btn], layout=widgets.Layout(gap="6px")
             ),
         ],
-        subtitle="Add over-time summary layers.",
+        subtitle="Keep the time series and add summary layers over all dates, or grouped by month/year. Disabled while a Temporal Composite is set.",
         help_html=PARAM_HELP_HTML.get("stats", ""),
         collapsible=True,
         open=False,
@@ -2481,7 +2491,7 @@ def datacube_builder(missions_func=missions):
     # --- Optional: draw the area of interest on an interactive map ---
     draw_polygon_w = widgets.Checkbox(
         value=False,
-        description="Draw the area on a map (exact polygon outline)",
+        description="Draw the area on a map",
         indent=False,
     )
     use_drawn_btn = widgets.Button(
@@ -2617,10 +2627,9 @@ def datacube_builder(missions_func=missions):
                 return
 
             polygon_w.value = out_path.as_posix()  # overwrites any path/bbox set above
-            # A drawing is an exact request, so clip to precisely what was drawn.
-            # (Draw a rectangle for a bbox-shaped cube; draw a polygon for that outline.)
-            if not clip_raster_w.disabled:
-                clip_raster_w.value = True
+            # Clipping is left to the user (the "Output shape" section): a drawn
+            # area defaults to its bounding box like any other input, and the user
+            # can tick "Clip to exact polygon outline" if they want the exact shape.
             print(
                 f'✅ Area from your drawing is saved to "{out_path.as_posix()}" and will be '
                 "used as the new polygon of the data cube. Easy, right mate?"
@@ -2637,7 +2646,7 @@ def datacube_builder(missions_func=missions):
         "rectangle). This is intentional: a rectangle gives the best results for "
         "<b>co-registration</b> and <b>super-resolution</b>. Tick the box above only if you "
         "want the cube clipped to the <b>exact polygon outline</b> (pixels outside the shape "
-        "become NaN)."
+        "become NaN and reduces the data size)."
         "</div>"
     )
 
@@ -2662,6 +2671,29 @@ def datacube_builder(missions_func=missions):
     )
     _update_terrabyte_warning()
 
+    # Warning shown only when the Copernicus (CDSE) STAC API is the chosen Data
+    # Source: its pixels live on s3://eodata and need the user's S3 keys, so the
+    # cube cannot be built/exported/visualized until those are set.
+    cdse_warning_html = widgets.HTML(
+        "<div style='font-size:12px; color:#92400e; background:#fffbeb; "
+        "border:1px solid #fde68a; border-radius:6px; padding:6px 8px;'>"
+        "⚠️ The <b>Copernicus</b> (CDSE) data cube <b>cannot</b> be built, "
+        "exported nor visualized without credentials. They are <b>free</b> and "
+        "take about <b>5 minutes</b> to set up - see "
+        "<code>credentials/README.md</code> for the step-by-step instructions. This option is bad idea for long time-series!"
+        "</div>",
+        layout=widgets.Layout(display="none"),
+    )
+
+    def _update_cdse_warning(*_):
+        show = (source_w.value == "cdse") and (not source_w.disabled)
+        cdse_warning_html.layout.display = "" if show else "none"
+
+    source_w.observe(
+        lambda change: _update_cdse_warning(), names=["value", "disabled"]
+    )
+    _update_cdse_warning()
+
     # Bottom-of-section "collapse" buttons so a long, scrolled accordion can be
     # folded back up without scrolling to its title bar. Wired to the accordions
     # below (which don't exist yet at this point).
@@ -2683,14 +2715,13 @@ def datacube_builder(missions_func=missions):
 
     basic_collapse_btn = _collapse_button("Collapse Basic Parameters")
     advanced_collapse_btn = _collapse_button("Collapse Advanced Parameters")
+    source_collapse_btn = _collapse_button("Collapse Data Source")
     viz_collapse_btn = _collapse_button("Collapse Visualization")
 
     basic_box = widgets.VBox(
         [
             _field_group("Mission", [_boxed(mission_dd)],
                          subtitle="Satellite mission to use."),
-            _field_group("Data Source", [_boxed(source_w), terrabyte_warning_html],
-                         subtitle="Catalog to download from. The default is open-source and does not require any credentials :)"),
             _field_group(
                         "Resolution",
                         [_boxed(resolution_w)],
@@ -2702,6 +2733,12 @@ def datacube_builder(missions_func=missions):
             _field_group(
                 "Polygon",
                 [
+                    # --- Option 1: provide a file or bbox ---
+                    widgets.HTML(
+                        "<div style='font-size:13px; font-weight:600; color:#374151; "
+                        "margin:2px 0 2px 0;'>Option 1 - Polygon file or bounding box</div>"
+                    ),
+                    _boxed(polygon_input_box),
                     widgets.HTML(
                         "<div style='font-size:12px; color:#1e3a8a; background:#eff6ff; "
                         "border:1px solid #bfdbfe; border-radius:6px; padding:6px 8px;'>"
@@ -2711,12 +2748,22 @@ def datacube_builder(missions_func=missions):
                         "<b>NOT</b> accepted."
                         "</div>"
                     ),
-                    _boxed(polygon_input_box),
-                    clip_raster_w,
-                    clip_warning_html,
                     _or_divider(),
+                    # --- Option 2: draw on a map ---
+                    widgets.HTML(
+                        "<div style='font-size:13px; font-weight:600; color:#374151; "
+                        "margin:2px 0 2px 0;'>Option 2 - Draw on a map</div>"
+                    ),
                     draw_polygon_w,
                     draw_box,
+                    # --- Output shape: clipping applies to whichever option above ---
+                    widgets.HTML(
+                        "<div style='border-top:2px solid #cbd5e1; margin:16px 0 8px 0;'></div>"
+                        "<div style='font-size:13px; font-weight:600; color:#374151; "
+                        "margin:0 0 2px 0;'>Output shape</div>"
+                    ),
+                    clip_raster_w,
+                    clip_warning_html,
                 ],
                 subtitle="The area to cover. Pick a polygon file or bounding box, or draw it on a map.",
                 help_html=PARAM_HELP_HTML.get("polygon", ""),
@@ -2733,21 +2780,215 @@ def datacube_builder(missions_func=missions):
 
     basic_acc = widgets.Accordion(children=[basic_box], selected_index=None)
     basic_acc.set_title(0, "Basic Parameters")
-    basic_acc.layout = widgets.Layout(width="100%")
+    basic_acc.layout = widgets.Layout(width="99%")
 
     advanced_box = widgets.VBox(
         [
+            _field_group("Cloud Masking", [_boxed(cloud_masking_w)],
+                         subtitle="Mask out clouds using the scene classification layer. (fast but not dynamic, keep it False for s2cloudless later)",
+                         help_html=PARAM_HELP_HTML.get("cloud_masking", "")),
             _field_group("Max CC", [_boxed(max_cc_w)],
                          subtitle="Maximum scene cloud cover to allow (%), but based on the entire Sentinel-2 tile, not the area of interest!",
                          help_html=PARAM_HELP_HTML.get("max_cc", "")),
-            _field_group("Cloud masking", [_boxed(cloud_masking_w)],
-                         subtitle="Mask out clouds using the scene classification layer. (fast but not dynamic, keep it False for s2cloudless later)",
-                         help_html=PARAM_HELP_HTML.get("cloud_masking", "")),
             stats_box,
-            _field_group("Aggregator", [_boxed(aggregator_w)],
-                         subtitle="Combine all dates into one image (mean or median instead of time series)",
+            _field_group("Temporal Composite", [_boxed(aggregator_w)],
+                         subtitle="Collapse the whole time series into one image (mean or median). Individual dates are lost and this replaces the time series.",
                          help_html=PARAM_HELP_HTML.get("aggregator", "")),
             _collapse_row(advanced_collapse_btn),
+        ],
+        layout=widgets.Layout(width="100%", gap="6px"),
+    )
+
+    # Blue guidance bar: the right source is study-area dependent, so point users
+    # to the explanation and the availability check before they pick one.
+    source_info_bar = widgets.HTML(
+        "<div style='font-size:12px; color:#1e3a8a; background:#eff6ff; "
+        "border:1px solid #bfdbfe; border-radius:6px; padding:8px 10px;'>"
+        "The data source depends on your study area and preferences. Before "
+        "selecting the data, please check <b>About Data Sources</b> below.<br>"
+        "You can also check the availability of data, based on your selected "
+        "parameters.<br>"
+        "<span style='color:#475569;'><b>Note:</b> All spectral values for each "
+        "data source are harmonized and matching with Google's "
+        "\"Harmonized Sentinel-2 L2A SR\".</span>"
+        "</div>"
+    )
+
+    # "About Data Sources": collapsed-by-default explanation of when to use each
+    # catalogue. Plain hyphens only (project style), corrected spelling.
+    about_sources_html = widgets.HTML(
+        "<div style='font-size:12px; color:#374151; line-height:1.5;'>"
+        "<b>1) Element84 (ready-to-use)</b><br>"
+        "Good for long time-series, with some missing dates from the earlier "
+        "years of the mission and some missing dates in 2023. It is free and "
+        "needs no credentials or login. Selected dates can also be masked by "
+        "s2cloudless.<br>"
+        "<b>s2cloudless masking:</b> Available<br><br>"
+        "<b>2) Planetary Computer (ready-to-use)</b><br>"
+        "Great for long time-series, usually with the full archive. It is free "
+        "and needs no credentials or login. Selected dates cannot be masked by "
+        "s2cloudless, since Planetary Computer does not offer an L1C "
+        "collection.<br>"
+        "<b>s2cloudless masking:</b> Not Available<br><br>"
+        "<b>3) terrabyte (only at terrabyte portal)</b><br>"
+        "Best for terrabyte users collecting long time-series. However, data "
+        "availability is limited if the study area is outside Europe. Requires "
+        "a terrabyte account. For s2cloudless masking, the user should request "
+        "L1C data from DLR.<br>"
+        "<b>s2cloudless masking:</b> Request L1C data @ "
+        "<a href='https://forum.terrabyte.lrz.de/c/data-requests' target='_blank' "
+        "rel='noopener noreferrer'>https://forum.terrabyte.lrz.de/c/data-requests</a>"
+        "<br><br>"
+        "<b>4) Copernicus Data Space Ecosystem (credentials/README.md)</b><br>"
+        "Copernicus' original data catalogue, with an always fully available "
+        "archive including L1C that can be used for s2cloudless masking. "
+        "HOWEVER, the data is not served as cloud-optimized files. Therefore "
+        "CDSE is good for a single date or a very short time-series, but very "
+        "bad for long time-series (you will hit data-reading issues). It also "
+        "requires access keys (5-minute instructions in "
+        "<code>credentials/README.md</code>).<br>"
+        "<b>s2cloudless masking:</b> Available"
+        "</div>"
+    )
+    about_sources_acc = widgets.Accordion(
+        children=[about_sources_html], selected_index=None
+    )
+    about_sources_acc.set_title(0, "About Data Sources")
+    # 99% (not 100%) leaves the same slack the top-level accordions use, so a
+    # nested accordion can't overflow source_box and push a stray 1px horizontal
+    # scrollbar onto the whole Data Source section.
+    about_sources_acc.layout = widgets.Layout(width="99%")
+
+    # "Check data availability": queries each catalogue (for the current mission)
+    # over the chosen area + date range and tabulates scenes per acquisition day.
+    check_avail_btn = widgets.Button(
+        description="Check data availability",
+        button_style="info",
+        icon="search",
+        layout=widgets.Layout(width="220px"),
+    )
+    check_avail_out = widgets.Output()
+
+    # The result lives in its own accordion so it can be collapsed once generated.
+    # Hidden until the first run, then revealed and opened by the click handler.
+    avail_result_acc = widgets.Accordion(
+        children=[check_avail_out], selected_index=None
+    )
+    avail_result_acc.set_title(0, "Availability Result")
+    avail_result_acc.layout = widgets.Layout(width="99%", display="none")
+
+    def _on_check_availability(_btn):
+        # Reveal + open the result accordion so the progress message and the
+        # results below are visible (the user can collapse it afterwards).
+        avail_result_acc.layout.display = ""
+        avail_result_acc.selected_index = 0
+        with check_avail_out:
+            clear_output()
+            mission = mission_dd.value
+            if mission not in ("sentinel_2_l2a", "sentinel_2_l1c"):
+                print(
+                    "ℹ️ Data availability comparison is only available for "
+                    "Sentinel-2 L2A and Sentinel-2 L1C."
+                )
+                return
+            try:
+                polygon = _parse_polygon_input(polygon_w.value)
+                daterange = _resolve_daterange()
+            except Exception as e:
+                print("⚠️ " + _friendly_error(e, "Reading the parameters"))
+                return
+
+            print(
+                "Querying catalogues for your area and date range ... "
+                "(this can take a while for long or seasonal ranges)."
+            )
+            try:
+                df, errors = check_scene_availability(mission, polygon, daterange)
+            except Exception as e:
+                clear_output()
+                print("⚠️ " + _friendly_error(e, "Checking data availability"))
+                return
+
+            clear_output()
+            if df.empty:
+                print(
+                    "No scenes found in any working catalogue for this area and "
+                    "date range."
+                )
+            else:
+                # The cube loads with groupby="solar_day", so the number of time
+                # steps equals the number of available dates, NOT the number of
+                # scenes (one date can span several MGRS tiles). We therefore
+                # report and show available DATES only.
+                _check = ("<span style='color:#16a34a; font-weight:bold;'>"
+                          "&#10003;</span>")   # green check = available
+                _cross = ("<span style='color:#dc2626; font-weight:bold;'>"
+                          "&#10007;</span>")   # red cross = not available
+
+                # Explanation up top (NaN = a catalogue that could not be queried).
+                display(HTML(
+                    "<div style='font-size:12px; color:#374151; margin-bottom:6px;'>"
+                    "<b>NaN</b> = catalogue query failed (e.g. credentials or "
+                    "API issue)."
+                    "</div>"
+                ))
+
+                # Table 1: available dates per catalogue (a fully-NaN column =
+                # query failed, reported as NaN rather than 0).
+                summary_rows = {
+                    col: (
+                        None
+                        if df[col].isna().all()
+                        else int((df[col].fillna(0) > 0).sum())
+                    )
+                    for col in df.columns
+                }
+                summary_df = pd.DataFrame(
+                    {"Available Scenes": list(summary_rows.values())},
+                    index=list(summary_rows.keys()),
+                )
+                summary_df.index.name = "Mission"
+                display(HTML(
+                    summary_df.to_html(border=0, na_rep="NaN")
+                ))
+
+                # Table 2: per-date availability as icons (green check / red
+                # cross), with failed catalogues left as NaN.
+                def _icon(v):
+                    if pd.isna(v):
+                        return "NaN"
+                    return _check if v > 0 else _cross
+
+                icon_df = df.map(_icon)
+                display(HTML(
+                    "<div style='max-height:420px; overflow:auto; "
+                    "border:1px solid #e5e7eb; border-radius:6px; margin-top:8px;'>"
+                    + icon_df.to_html(border=0, escape=False)
+                    + "</div>"
+                ))
+
+            if errors:
+                lines = "<br>".join(
+                    f"<b>{src}:</b> {msg}" for src, msg in errors.items()
+                )
+                display(HTML(
+                    "<div style='font-size:12px; color:#9a3412; background:#fff7ed; "
+                    "border:1px solid #fed7aa; border-radius:6px; padding:6px 8px; "
+                    "margin-top:6px;'>Some catalogues could not be queried "
+                    "(shown as NaN above):<br>" + lines + "</div>"
+                ))
+
+    check_avail_btn.on_click(_on_check_availability)
+
+    source_box = widgets.VBox(
+        [
+            source_info_bar,
+            about_sources_acc,
+            widgets.HBox([check_avail_btn], layout=widgets.Layout(margin="2px 0")),
+            avail_result_acc,
+            _field_group("Data Source", [_boxed(source_w), terrabyte_warning_html, cdse_warning_html],
+                         subtitle="Catalog to download from. The default is open-source and does not require any credentials :)"),
+            _collapse_row(source_collapse_btn),
         ],
         layout=widgets.Layout(width="100%", gap="6px"),
     )
@@ -2809,10 +3050,17 @@ def datacube_builder(missions_func=missions):
     advanced_acc.set_title(0, "Advanced Parameters")
     advanced_acc.layout = widgets.Layout(width="99%")
 
+    source_acc = widgets.Accordion(children=[source_box], selected_index=None)
+    source_acc.set_title(0, "Data Source")
+    source_acc.layout = widgets.Layout(width="99%")
+
     # Now that both accordions exist, wire the bottom collapse buttons to fold them.
     basic_collapse_btn.on_click(lambda _: setattr(basic_acc, "selected_index", None))
     advanced_collapse_btn.on_click(
         lambda _: setattr(advanced_acc, "selected_index", None)
+    )
+    source_collapse_btn.on_click(
+        lambda _: setattr(source_acc, "selected_index", None)
     )
 
     export_acc = widgets.Accordion(children=[export_box], selected_index=None)
@@ -2842,7 +3090,7 @@ def datacube_builder(missions_func=missions):
     spacer_between_cards = widgets.HTML("<div style='height:12px;'></div>")
 
     builder_panel = widgets.VBox(
-        [basic_acc, advanced_acc, export_acc, spacer_after_export, action_row],
+        [basic_acc, advanced_acc, source_acc, export_acc, spacer_after_export, action_row],
         layout=widgets.Layout(width="100%", gap="8px"),
     )
     builder_panel.add_class("stac2cube-card")
