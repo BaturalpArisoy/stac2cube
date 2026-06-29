@@ -54,6 +54,43 @@ from .gui_common import (
 )
 
 
+# Shown when the user tries to export while Export mode is still "Quick Result"
+# (lazy). Used both as the early-return guard message in the export buttons and
+# as the ValueError raised deeper in the export helpers.
+_EXPORT_MODE_REMINDER = (
+    "ʕ•ᴥ•ʔ Mr. Bear would like to remind you to change Export mode to NetCDF "
+    "or COGs before exporting, thanks."
+)
+
+
+def _busy_bear_html(lead, tail=""):
+    """Hopping-Mr.-Bear progress indicator with animated dots.
+
+    Browser-side CSS, so it keeps moving even while the kernel is blocked on a
+    slow STAC call - shows the user it isn't stuck. `lead` is the main message;
+    optional `tail` is shown after the dots (e.g. a parenthetical note).
+    """
+    tail_span = f"<span style='font-size:13px;'> {tail}</span>" if tail else ""
+    return (
+        "<style>"
+        "@keyframes s2cBounce{0%,100%{opacity:0.3;transform:translateY(0);}"
+        "50%{opacity:1;transform:translateY(-3px);}}"
+        "@keyframes s2cHop{0%,100%{transform:translateY(0);}"
+        "30%{transform:translateY(-7px);}60%{transform:translateY(0);}}"
+        ".s2c-gen-dots span{display:inline-block;font-weight:700;"
+        "animation:s2cBounce 1.2s infinite;}"
+        ".s2c-gen-dots span:nth-child(2){animation-delay:0.2s;}"
+        ".s2c-gen-dots span:nth-child(3){animation-delay:0.4s;}"
+        ".s2c-bunny{display:inline-block;animation:s2cHop 0.9s infinite ease-in-out;}"
+        "</style>"
+        "<span class='s2c-bunny' style='font-size:13px;'>ʕ•ᴥ•ʔ</span>"
+        f"<span style='font-size:13px;'> {lead}</span>"
+        "<span class='s2c-gen-dots' style='font-size:13px;'>"
+        "<span>.</span><span>.</span><span>.</span></span>"
+        + tail_span
+    )
+
+
 # -------------------------------------------------------------------------
 # Parameter help
 # -------------------------------------------------------------------------
@@ -911,7 +948,7 @@ def datacube_builder(missions_func=missions):
         )
         return (
             "<div style='font-size:13px; width:100%;'>"
-            "<b>✅ Your data cube is ready.</b>"
+            "<b>(っ◕‿◕)っ Your data cube is ready!</b>"
             "<div style='display:flex; flex-wrap:wrap; gap:10px 36px; margin-top:8px; "
             "align-items:flex-start;'>"
             f"<div style='flex:1 1 340px; min-width:280px;'>{info_table}</div>"
@@ -960,7 +997,7 @@ def datacube_builder(missions_func=missions):
                 display(HTML(
                     "<div style='font-size:13px; color:#991b1b; background:#fef2f2; "
                     "border:1px solid #fecaca; border-radius:6px; padding:8px 10px;'>"
-                    "⚠️ No data cube to show - the build did not produce any data. "
+                    "(╥﹏╥) No data cube to show - the build did not produce any data. "
                     "See the <b>Status</b> panel for the reason.</div>"
                 ))
                 return
@@ -1000,7 +1037,10 @@ def datacube_builder(missions_func=missions):
                 [nerd_w],
                 layout=widgets.Layout(width="100%", justify_content="flex-end"),
             )
-            display(widgets.VBox([toggle_row, body], layout=widgets.Layout(gap="4px")))
+            display(widgets.VBox(
+                [toggle_row, body],
+                layout=widgets.Layout(width="100%", gap="4px"),
+            ))
 
     def _show_multi_feature_summary(cubes):
         """Compact, readable summary for a multi-feature batch result (a list of
@@ -1112,7 +1152,7 @@ def datacube_builder(missions_func=missions):
             fail_note = (
                 "<div style='font-size:12px; color:#991b1b; background:#fef2f2; "
                 "border:1px solid #fecaca; border-radius:6px; padding:6px 8px; "
-                f"margin-top:6px;'>❌ {len(failed)} of {n} feature(s) could not be "
+                f"margin-top:6px;'>(╥﹏╥) {len(failed)} of {n} feature(s) could not be "
                 f"generated ({failed_nums}). They are listed as <b>failed</b> below "
                 "and are skipped on export/visualization. See the table for the reason.</div>"
             )
@@ -1379,6 +1419,15 @@ def datacube_builder(missions_func=missions):
         max_cc = None if max_cc_w.disabled else int(max_cc_w.value)
 
         bands = list(bands_w.value) if len(bands_w.value) > 0 else None
+        # Catch an empty band selection here with a friendly message instead of
+        # letting None crash deep inside get_stac() ("'NoneType' object is not
+        # iterable"). Only required when bands are actually offered for the
+        # mission (widget enabled and has options).
+        if bands is None and not bands_w.disabled and len(bands_w.options) > 0:
+            raise ValueError(
+                "ʕ•ᴥ•ʔ Mr. Bear noticed that you haven't selected any band and "
+                "strongly asking you to select at least one band to continue."
+            )
         indices = list(indices_w.value) if len(indices_w.value) > 0 else None
         stats = list(stats_w.value) if len(stats_w.value) > 0 else None
 
@@ -1496,9 +1545,7 @@ def datacube_builder(missions_func=missions):
             raise ValueError("No generated result is available to export yet.")
 
         if export_mode == "lazy":
-            raise ValueError(
-                "Please change Export mode to NetCDF or COGs before exporting."
-            )
+            raise ValueError(_EXPORT_MODE_REMINDER)
 
         if not export_target:
             raise ValueError("Please provide Output file / folder before exporting.")
@@ -2166,23 +2213,10 @@ def datacube_builder(missions_func=missions):
             with status_out:
                 clear_output()
                 # Browser-side CSS animation so the dots keep moving even while the
-                # kernel is blocked on a slow STAC build — shows the user it isn't
+                # kernel is blocked on a slow STAC build - shows the user it isn't
                 # stuck. It's removed by clear_output(wait=True) once the build
                 # returns, just before the final status message is printed.
-                generating_html = (
-                    "<style>"
-                    "@keyframes s2cBounce{0%,100%{opacity:0.3;transform:translateY(0);}"
-                    "50%{opacity:1;transform:translateY(-3px);}}"
-                    ".s2c-gen-dots span{display:inline-block;font-weight:700;"
-                    "animation:s2cBounce 1.2s infinite;}"
-                    ".s2c-gen-dots span:nth-child(2){animation-delay:0.2s;}"
-                    ".s2c-gen-dots span:nth-child(3){animation-delay:0.4s;}"
-                    "</style>"
-                    "<span style='font-size:13px;'>Generating data cube</span>"
-                    "<span class='s2c-gen-dots' style='font-size:13px;'>"
-                    "<span>.</span><span>.</span><span>.</span></span>"
-                )
-                display(HTML(generating_html))
+                display(HTML(_busy_bear_html("Generating data cube")))
 
                 # Ensure parent directory exists for direct NetCDF export
                 if params["output"] is not None:
@@ -2285,6 +2319,11 @@ def datacube_builder(missions_func=missions):
             _show_status(_friendly_error(e, "Building"))
 
     def _on_export_result_clicked(_):
+        # Quick Result (lazy) can never be exported - skip the work and just
+        # remind the user instead of attempting and failing.
+        if export_mode_w.value == "lazy":
+            _show_status(_EXPORT_MODE_REMINDER)
+            return
         try:
             export_mode = export_mode_w.value
             export_target = (
@@ -2634,7 +2673,7 @@ def datacube_builder(missions_func=missions):
             # can tick "Clip to exact polygon outline" if they want the exact shape.
             print(
                 f'✅ Area from your drawing is saved to "{out_path.as_posix()}" and will be '
-                "used as the new polygon of the data cube. Easy, right mate?"
+                "used as the new polygon of the data cube (◡ ‿ ◡ ✿)"
             )
 
     draw_polygon_w.observe(lambda c: _update_draw_visibility(), names="value")
@@ -2729,7 +2768,7 @@ def datacube_builder(missions_func=missions):
                         [_boxed(resolution_w)],
                         subtitle=(
                             "Output pixel size, in metres.\n"
-                            "Changing it to 2.5 metres DOES NOT super-resolve the data, it just resamples it."
+                            "Changing it to 2.5 metres DOES NOT super-resolve the data :) It just resamples it."
                         ),
                     ),
             _field_group(
@@ -2900,10 +2939,10 @@ def datacube_builder(missions_func=missions):
                 print("⚠️ " + _friendly_error(e, "Reading the parameters"))
                 return
 
-            print(
-                "Querying catalogues for your area and date range ... "
-                "(this can take a while for long or seasonal ranges)."
-            )
+            display(HTML(_busy_bear_html(
+                "Querying catalogues for your area and date range",
+                "(this can take a while for long or seasonal ranges)",
+            )))
             try:
                 df, errors = check_scene_availability(mission, polygon, daterange)
             except Exception as e:
@@ -3689,7 +3728,7 @@ def datacube_editor():
         target = None if export_target_w.disabled else ((export_target_w.value or "").strip() or None)
 
         if mode == "lazy":
-            raise ValueError("Please change Export mode to NetCDF or COGs before exporting.")
+            raise ValueError(_EXPORT_MODE_REMINDER)
         if not target:
             raise ValueError("Please provide an export file/folder path.")
 
@@ -4979,6 +5018,12 @@ def datacube_editor():
     def _on_export_current_clicked(_):
         if state["current"] is None:
             _show_status("❌ No current result available. Load and/or edit a cube first.")
+            return
+
+        # Quick Result (lazy) can never be exported - skip the work and just
+        # remind the user instead of attempting and failing.
+        if export_mode_w.value == "lazy":
+            _show_status(_EXPORT_MODE_REMINDER)
             return
 
         try:

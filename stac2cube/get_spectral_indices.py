@@ -204,6 +204,8 @@ def _require_band(stac, mission_name, required, alternatives=None):
                 return stac.sel(band=orig, drop=True)
 
     raise KeyError(
+        "ʕ•ᴥ•ʔ Mr. Bear would like to remind you that indices cannot be "
+        "calculated without required bands. "
         f'Missing band. For "{mission_name}", please include "{required_l}". '
         f"Available: {avail_l}"
     )

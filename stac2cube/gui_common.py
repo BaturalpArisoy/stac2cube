@@ -272,11 +272,21 @@ def friendly_error(e, action="The operation"):
             "higher Max CC, or double-check the polygon's location."
         )
 
-    # The package's own validation messages are already human sentences — show
-    # them as-is, just without the 'ValueError:' jargon (drop a leading 'Error:').
+    # A spectral index needs a band that wasn't selected/loaded. Show a friendly
+    # reminder, then keep the original message so the user sees which band.
+    if "missing band" in low:
+        return (
+            "ʕ•ᴥ•ʔ Mr. Bear would like to remind you that indices cannot be "
+            "calculated without required bands.\n" + msg
+        )
+
+    # The package's own validation messages are already complete human
+    # sentences (some carry their own friendly kaomoji). Show them exactly as
+    # written - no 'ValueError:' jargon and no '<action> failed -' decoration -
+    # so the user just reads the plain reminder.
     if isinstance(e, ValueError):
         clean = re.sub(r"^error:\s*", "", msg, flags=re.IGNORECASE).strip()
-        return out(clean if clean else "the input values are not valid.")
+        return clean if clean else out("the input values are not valid.")
 
     # Unknown: generic sentence + one technical line (no traceback).
     detail = msg if len(msg) <= 300 else msg[:300] + "…"
