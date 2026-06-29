@@ -24,6 +24,7 @@ from stac2cube import (
     interactive_time_view,
     save_timeseries_gif,
     calculate_statistics,
+    calculate_spectral_index,
     clip_stac,
     cloud_filter,
     get_stac_layers,
@@ -3231,6 +3232,15 @@ def datacube_editor():
         <b>2) List of BBOX</b><br>
         Can also be a WGS84 bbox list: <code>[xmin, ymin, xmax, ymax]</code> (not projected coords). Useful tool: <code>http://bboxfinder.com/</code>
         """,
+        "spectral_indices": """
+        <b>calculate spectral indices</b><br>
+        Computes the selected spectral indices from the spectral bands already present in
+        the loaded data cube and appends them as new bands.<br><br>
+        The available indices depend on the cube's mission. Each index needs specific bands
+        (e.g. <code>ndvi</code> needs <code>red</code> and <code>nir</code>). If a required band
+        is missing from the cube, the Status box will report which band(s) are missing.<br><br>
+        Indices that are already present in the cube are skipped (not recomputed).
+        """,
         "stats": """
         <b>stats</b><br>
         If empty/None: no stats cubes.<br>
@@ -3487,6 +3497,11 @@ def datacube_editor():
         clip_geom_w.disabled = not enabled
         browse_clip_btn.disabled = (not enabled) or (not filechooser_available)
 
+        # Spectral indices widgets
+        indices_select_w.disabled = not enabled
+        indices_all_btn.disabled = not enabled
+        indices_clear_btn.disabled = not enabled
+
         # Stats widgets
         stats_select_w.disabled = not enabled
         stats_all_btn.disabled = not enabled
@@ -3592,6 +3607,66 @@ def datacube_editor():
             slice_band_w.value = ()
 
         _update_slice_widget_enabled_state(True)
+
+    # ---------------------------------------------------------------------
+    # Spectral indices helpers
+    # ---------------------------------------------------------------------
+    _INDEX_FULLNAMES = {
+        "ndvi": "Normalized Difference Vegetation Index",
+        "ndwi": "Normalized Difference Water Index",
+        "savi": "Soil Adjusted Vegetation Index",
+        "ndmi": "Normalized Difference Moisture Index",
+        "nbr": "Normalized Burn Ratio",
+        "mndwi": "Modified Normalized Difference Water Index",
+        "ndbi": "Normalized Difference Built-up Index",
+        "evi": "Enhanced Vegetation Index",
+        "ndre1": "Normalized Difference Red Edge Index",
+        "ndsi": "Normalized Difference Snow Index",
+        "vh/vv": "VH/VV Ratio",
+        "vv/vh": "VV/VH Ratio",
+        "rvi": "Radar Vegetation Index",
+    }
+
+    def _current_mission():
+        """Best-effort mission name for the loaded cube (from xarray attrs)."""
+        for obj in (state.get("current"), state.get("loaded_original")):
+            try:
+                m = obj.attrs.get("mission") if obj is not None else None
+            except Exception:
+                m = None
+            if m:
+                return str(m)
+        return None
+
+    def _allowed_indices_for_mission(mission_name):
+        """Indices offered by missions() for this mission ([] if none/unknown)."""
+        if not mission_name:
+            return []
+        try:
+            df = missions()
+            row = df.loc[df["name"] == mission_name]
+            if row.empty:
+                return []
+            vals = row.iloc[0]["indices"]
+        except Exception:
+            return []
+        if not vals:  # False or None
+            return []
+        return [str(v) for v in vals]
+
+    def _index_options_with_fullname(index_list):
+        options = []
+        for idx in index_list:
+            full = _INDEX_FULLNAMES.get(str(idx))
+            label = f"{idx} ({full})" if full else str(idx)
+            options.append((label, str(idx)))
+        return options
+
+    def _populate_indices_widget_from_current():
+        mission_name = _current_mission()
+        allowed = _allowed_indices_for_mission(mission_name)
+        indices_select_w.options = _index_options_with_fullname(allowed)
+        indices_select_w.value = ()
 
     def _update_gif_output_suggestion(force=False):
         new_suggestion = _auto_gif_output_suggestion()
@@ -3937,6 +4012,22 @@ def datacube_editor():
         disabled=True,
     )
     browse_clip_btn.style.button_color = "#f3f4f6"
+
+    # Spectral indices (applied via Edit button). Options are populated from the
+    # loaded cube's mission once a cube is loaded.
+    indices_select_w = widgets.SelectMultiple(
+        options=[],
+        value=(),
+        rows=8,
+        layout=widgets.Layout(width="100%", height="210px"),
+        disabled=True,
+    )
+    indices_all_btn = widgets.Button(
+        description="All indices", layout=widgets.Layout(width="110px"), disabled=True
+    )
+    indices_clear_btn = widgets.Button(
+        description="Clear", layout=widgets.Layout(width="70px"), disabled=True
+    )
 
     # Temporal composites (stats) -- applied via Edit button
     stats_select_w = widgets.SelectMultiple(
@@ -4553,6 +4644,106 @@ def datacube_editor():
 
         raise TypeError(f"Unsupported object type for clipping: {type(obj)}")
 
+    def _apply_indices_feature(obj):
+        """
+        Calculate spectral indices via stac2cube.calculate_spectral_index() and
+        append them as new bands.
+
+        Behavior:
+        - If nothing selected -> no change.
+        - Indices already present in the cube are skipped (not recomputed).
+        - Each requested index is computed on its own so that, if bands are
+          missing, every missing band can be reported instead of only the first.
+        - If any selected index is missing a required band, NOTHING is applied and
+          a clear error is raised naming the missing band(s).
+        """
+        selected = list(indices_select_w.value)
+        if not selected:
+            return obj, False, []
+
+        # Pick the spectral DataArray to compute from.
+        if isinstance(obj, xr.Dataset):
+            if "Spectral_Temporal_Stack" not in obj.data_vars:
+                raise ValueError(
+                    "Spectral indices require the 'Spectral_Temporal_Stack' cube. "
+                    "Calculate indices before generating temporal composites (stats)."
+                )
+            da = obj["Spectral_Temporal_Stack"]
+        elif isinstance(obj, xr.DataArray):
+            da = obj
+        else:
+            raise TypeError(f"Unsupported object type for spectral indices: {type(obj)}")
+
+        mission_name = _current_mission()
+        if not mission_name:
+            raise ValueError(
+                "Cannot determine this cube's mission (missing 'mission' attribute), "
+                "so spectral indices cannot be computed."
+            )
+
+        existing_bands = (
+            [str(b) for b in da.coords["band"].values] if "band" in da.coords else []
+        )
+        existing_lower = {b.lower() for b in existing_bands}
+
+        # Skip indices that are already present as bands.
+        already_present = [i for i in selected if i.lower() in existing_lower]
+        to_compute = [i for i in selected if i.lower() not in existing_lower]
+
+        if not to_compute:
+            return obj, False, [
+                "calculate spectral indices: nothing to do "
+                f"(already present: {', '.join(already_present)})"
+            ]
+
+        # Compute each index individually so we can collect ALL missing bands.
+        computed = []
+        missing = []  # list of (index, missing_band)
+        for idx in to_compute:
+            try:
+                computed.append(calculate_spectral_index(da, mission_name, [idx]))
+            except KeyError as e:
+                band = _extract_missing_band(str(e))
+                missing.append((idx, band))
+
+        if missing:
+            parts = []
+            for idx, band in missing:
+                parts.append(f"'{idx}' needs band '{band}'" if band else f"'{idx}'")
+            avail = ", ".join(existing_bands) if existing_bands else "none"
+            raise ValueError(
+                "Cannot calculate spectral indices because required band(s) are "
+                f"missing from this cube: {'; '.join(parts)}. "
+                f"Available bands: {avail}."
+            )
+
+        indices_da = computed[0] if len(computed) == 1 else xr.concat(computed, dim="band")
+
+        # Append the new index bands to the existing cube (mirrors the builder).
+        combined = xr.concat([da, indices_da], dim="band")
+        if "time" in combined.dims:
+            combined = combined.transpose("time", "band", "y", "x")
+        combined = combined.rename(da.name) if da.name is not None else combined
+        combined.attrs = dict(da.attrs)
+        prev_idx = [str(i) for i in (da.attrs.get("indices") or [])]
+        combined.attrs["indices"] = prev_idx + list(to_compute)
+
+        msgs = [f"spectral indices calculated: {', '.join(to_compute)}"]
+        if already_present:
+            msgs.append(f"skipped (already present): {', '.join(already_present)}")
+
+        if isinstance(obj, xr.Dataset):
+            new_ds = obj.copy()
+            new_ds["Spectral_Temporal_Stack"] = combined
+            return new_ds, True, msgs
+
+        return combined, True, msgs
+
+    def _extract_missing_band(error_text):
+        """Pull the band name out of _require_band's 'please include "x"' message."""
+        m = re.search(r'please include "([^"]+)"', error_text)
+        return m.group(1) if m else None
+
     def _apply_stats_feature(obj):
         """
         Apply temporal composites using stac2cube.calculate_statistics().
@@ -4644,6 +4835,7 @@ def datacube_editor():
                 _show_preview(result_out, state["current"])
 
                 _populate_slice_widgets_from_current(select_all=True)
+                _populate_indices_widget_from_current()
                 _set_editor_enabled(True)
                 _update_gif_output_suggestion(force=True)
                 _update_update_daterange_example(force=True)
@@ -4728,7 +4920,12 @@ def datacube_editor():
                     changed_any = changed_any or changed_clip
                     messages.extend(clip_msgs)
 
-                    # 4) Temporal composites (stats)
+                    # 4) Calculate Spectral Indices
+                    current_obj, changed_idx, idx_msgs = _apply_indices_feature(current_obj)
+                    changed_any = changed_any or changed_idx
+                    messages.extend(idx_msgs)
+
+                    # 5) Temporal composites (stats)
                     current_obj, changed_stats, stats_msgs = _apply_stats_feature(current_obj)
                     changed_any = changed_any or changed_stats
                     messages.extend(stats_msgs)
@@ -4889,6 +5086,12 @@ def datacube_editor():
     def _clear_stats(_):
         stats_select_w.value = ()
 
+    def _select_all_indices(_):
+        indices_select_w.value = tuple(v for _, v in indices_select_w.options)
+
+    def _clear_indices(_):
+        indices_select_w.value = ()
+
     # ---------------------------------------------------------------------
     # Observe / wire
     # ---------------------------------------------------------------------
@@ -4909,6 +5112,9 @@ def datacube_editor():
 
     stats_all_btn.on_click(_select_all_stats)
     stats_clear_btn.on_click(_clear_stats)
+
+    indices_all_btn.on_click(_select_all_indices)
+    indices_clear_btn.on_click(_clear_indices)
 
     viz_dropdown_btn.on_click(_on_viz_dropdown_clicked)
     viz_make_gif_btn.on_click(_on_make_gif_clicked)
@@ -5057,6 +5263,32 @@ def datacube_editor():
     clip_acc.set_title(0, "Clip Raster")
     clip_acc.layout = widgets.Layout(width="99%")
 
+    # Spectral indices feature
+    indices_inner_widget = widgets.VBox(
+        [
+            indices_select_w,
+            widgets.HBox([indices_all_btn, indices_clear_btn], layout=widgets.Layout(gap="6px")),
+        ],
+        layout=widgets.Layout(width="100%", gap="6px"),
+    )
+
+    indices_feature_box = widgets.VBox(
+        [
+            widgets.HTML(
+                "<div style='font-size:12px; color:#666;'>"
+                "Calculate spectral indices from the cube's spectral bands and append them as new bands. "
+                "Available indices depend on the cube's mission; missing required bands are reported in Status."
+                "</div>"
+            ),
+            _stacked_field_with_help(indices_inner_widget, "Indices", "spectral_indices"),
+        ],
+        layout=widgets.Layout(width="100%", gap="8px"),
+    )
+
+    indices_acc = widgets.Accordion(children=[indices_feature_box], selected_index=None)
+    indices_acc.set_title(0, "Calculate Spectral Indices")
+    indices_acc.layout = widgets.Layout(width="99%")
+
     # Temporal Composites (stats) feature
     stats_inner_widget = widgets.VBox(
         [
@@ -5149,6 +5381,7 @@ def datacube_editor():
             slice_acc,
             cloud_filter_acc,
             clip_acc,
+            indices_acc,
             stats_acc,
             update_acc,
             export_acc,
@@ -5305,6 +5538,7 @@ def datacube_editor():
             "cloud_max": cloud_max_w,
             "enable_clip": enable_clip_w,
             "clip_geom": clip_geom_w,
+            "indices_select": indices_select_w,
             "stats_select": stats_select_w,
             "edit_btn": edit_btn,
             "enable_update": enable_update_w,
