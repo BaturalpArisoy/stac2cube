@@ -485,6 +485,36 @@ def datacube_builder(missions_func=missions):
         style={"description_width": "120px"},
     )
 
+    # Result-panel filter: keep only scenes with cloud_percentage <= this value.
+    # Lives under the Result date/cloud table (placed into result_box later) and
+    # drives the table, visualization, and export at once. Pure coord selection
+    # on the existing cloud_percentage coord - no recompute, instantly reversible
+    # by raising the value back up. Enabled only after a build that carries a
+    # cloud_percentage coord (i.e. cloud masking was on); greyed out otherwise.
+    result_cloud_max_w = widgets.BoundedIntText(
+        value=100,
+        min=0,
+        max=100,
+        step=1,
+        description="Max cloud %:",
+        layout=widgets.Layout(width="190px"),
+        style={"description_width": "78px"},
+        disabled=True,
+    )
+
+    # The "now you can visualize / export" note lives BELOW the Max cloud box
+    # (placed into result_box later), so it reads as the last step after the user
+    # has optionally filtered. Filled in only when a ready cube is shown; cleared
+    # to empty (renders nothing) otherwise.
+    _RESULT_VIZ_NOTE_HTML = (
+        "<div style='font-size:12px; color:#1e3a8a; background:#eff6ff; "
+        "border:1px solid #bfdbfe; border-radius:6px; padding:6px 8px;'>"
+        "ℹ️ Now you can <b>visualize</b> the data cube in the <b>Visualization</b> "
+        "section below - or save it via <b>Export Options</b>."
+        "</div>"
+    )
+    result_viz_note_w = widgets.HTML(value="")
+
     stats_w = widgets.SelectMultiple(
         options=[],
         value=(),
@@ -696,6 +726,11 @@ def datacube_builder(missions_func=missions):
         "draw_map": None,        # leafmap map, created lazily on first use
         "draw_box_built": False,
     }
+
+    # Re-entrancy guard so programmatic resets of result_cloud_max_w.value
+    # (e.g. snapping back to 100 on a fresh build) don't trigger the filter
+    # change handler and re-render mid-build.
+    _cloud_filter_guard = {"busy": False}
 
     # -------------------------------------------------------------------------
     # File choosers (ipyfilechooser; optional)
@@ -938,14 +973,8 @@ def datacube_builder(missions_func=missions):
             if dates_html
             else ""
         )
-        viz_note = (
-            "<div style='font-size:12px; color:#1e3a8a; background:#eff6ff; "
-            "border:1px solid #bfdbfe; border-radius:6px; padding:6px 8px; "
-            "margin-top:10px;'>"
-            "ℹ️ Now you can <b>visualize</b> the data cube in the <b>Visualization</b> "
-            "section below - or save it via <b>Export Options</b>."
-            "</div>"
-        )
+        # The visualize/export note is rendered as a separate widget below the
+        # Max cloud box (result_viz_note_w), not inline here.
         return (
             "<div style='font-size:13px; width:100%;'>"
             "<b>(っ◕‿◕)っ Your data cube is ready!</b>"
@@ -954,7 +983,6 @@ def datacube_builder(missions_func=missions):
             f"<div style='flex:1 1 340px; min-width:280px;'>{info_table}</div>"
             + dates_col
             + "</div>"
-            + viz_note
             + "</div>"
         )
 
@@ -987,6 +1015,9 @@ def datacube_builder(missions_func=missions):
         return _cube_is_empty(obj)
 
     def _show_result_summary(obj):
+        # The visualize/export note (a sibling widget below the Max cloud box) only
+        # makes sense next to a ready cube - hide it for empty/failed results.
+        result_viz_note_w.value = "" if _result_is_empty(obj) else _RESULT_VIZ_NOTE_HTML
         with result_out:
             clear_output()
 
@@ -1337,9 +1368,105 @@ def datacube_builder(missions_func=missions):
                 and 0 <= idx < len(obj)
                 and isinstance(obj[idx], (xr.DataArray, xr.Dataset))
             ):
-                return obj[idx]
-            return cubes[0]
-        return obj
+                return _apply_cloud_threshold(obj[idx])
+            return _apply_cloud_threshold(cubes[0])
+        return _apply_cloud_threshold(obj)
+
+    # -------------------------------------------------------------------------
+    # Result-panel cloud filter (drives table + visualization + export at once)
+    # -------------------------------------------------------------------------
+    def _result_cloud_pct(obj):
+        """The cloud_percentage coordinate of a single cube, or None if it has
+        none. Structural lookup only - nothing is computed."""
+        da = obj
+        if isinstance(obj, xr.Dataset):
+            da = obj.get("Spectral_Temporal_Stack")
+            if da is None and len(obj.data_vars):
+                da = obj[list(obj.data_vars)[0]]
+        if da is None:
+            return None
+        if "cloud_percentage" not in getattr(da, "coords", {}):
+            return None
+        return da.coords["cloud_percentage"]
+
+    def _result_has_cloud_pct(obj):
+        """True when obj (cube or list of cubes) carries a cloud_percentage
+        coord, i.e. it was built with cloud masking and is filterable."""
+        if obj is None:
+            return False
+        if isinstance(obj, list):
+            return any(
+                _result_has_cloud_pct(c)
+                for c in obj
+                if isinstance(c, (xr.DataArray, xr.Dataset))
+            )
+        return _result_cloud_pct(obj) is not None
+
+    def _apply_cloud_threshold(obj, thr=None):
+        """Return a view of obj keeping only timesteps with
+        cloud_percentage <= thr. Pure coord selection on the existing
+        cloud_percentage coord - no recompute, fully reversible by raising thr.
+
+        thr defaults to the Result panel's Max cloud % box. thr >= 100 (or a
+        cube with no cloud_percentage / no time dim) passes through unchanged,
+        so non-masked builds are never altered."""
+        if obj is None:
+            return None
+        if thr is None:
+            thr = int(result_cloud_max_w.value)
+        if thr >= 100:
+            return obj
+        if isinstance(obj, list):
+            return [
+                _apply_cloud_threshold(c, thr)
+                if isinstance(c, (xr.DataArray, xr.Dataset))
+                else c
+                for c in obj
+            ]
+        cp = _result_cloud_pct(obj)
+        if cp is None or "time" not in getattr(obj, "dims", {}):
+            return obj
+        keep = np.asarray((cp <= int(thr)).values)
+        if keep.all():
+            return obj
+        return obj.isel(time=np.flatnonzero(keep))
+
+    def _sync_cloud_filter_enabled(change=None):
+        """The Result filter only makes sense when cloud masking is on AND the
+        current build actually carries a cloud_percentage coord. Grey it out
+        otherwise (incl. before any build)."""
+        masking_on = bool(cloud_masking_w.value)
+        has_pct = _result_has_cloud_pct(state["result"])
+        result_cloud_max_w.disabled = not (masking_on and has_pct)
+
+    def _on_result_cloud_max_change(change=None):
+        """Re-render the Result panel for the new Max cloud %. Visualization and
+        export read the same threshold (via _apply_cloud_threshold), so the
+        three stay in sync without storing a second copy of the cube."""
+        if _cloud_filter_guard["busy"]:
+            return
+        if state["result"] is None:
+            return
+        filtered = _apply_cloud_threshold(state["result"])
+        # Threshold excludes every scene: the build succeeded, so don't show the
+        # generic 'no data' failure - tell the user to raise the value instead.
+        if _result_is_empty(filtered) and not _result_is_empty(state["result"]):
+            result_viz_note_w.value = ""
+            with result_out:
+                clear_output()
+                display(HTML(
+                    "<div style='font-size:13px; color:#92400e; background:#fffbeb; "
+                    "border:1px solid #fde68a; border-radius:6px; padding:10px 12px;'>"
+                    f"No scenes at or below <b>{int(result_cloud_max_w.value)}%</b> "
+                    "cloud cover. Raise <b>Max cloud %</b> to bring dates back."
+                    "</div>"
+                ))
+            return
+        _show_result_summary(filtered)
+        _update_gif_output_suggestion()
+
+    result_cloud_max_w.observe(_on_result_cloud_max_change, names="value")
+    cloud_masking_w.observe(_sync_cloud_filter_enabled, names="value")
 
     def _refresh_viz_feature_options():
         """Show + populate the feature picker only when the result is a list of
@@ -1554,7 +1681,9 @@ def datacube_builder(missions_func=missions):
         if not export_target:
             raise ValueError("Please provide Output file / folder before exporting.")
 
-        obj = state["result"]
+        # Export exactly what the Result panel shows: if the Max cloud % filter is
+        # active, write the filtered cube, not the full build.
+        obj = _apply_cloud_threshold(state["result"])
 
         # Multi-feature batch result: a list of cubes -> one output per feature.
         if isinstance(obj, list):
@@ -2251,6 +2380,16 @@ def datacube_builder(missions_func=missions):
                 _refresh_viz_feature_options()
                 _update_gif_output_suggestion()
 
+                # Fresh build shows everything; enable the Max cloud % filter only
+                # when this build carries cloud_percentage (cloud masking was on).
+                # Guard the reset so it doesn't re-trigger the change handler here.
+                _cloud_filter_guard["busy"] = True
+                try:
+                    result_cloud_max_w.value = 100
+                finally:
+                    _cloud_filter_guard["busy"] = False
+                _sync_cloud_filter_enabled()
+
                 # For a multi-feature batch, some features may have failed (kept in
                 # the list as markers). Count real cubes so messages don't claim a
                 # failed feature was produced/exported.
@@ -2301,7 +2440,7 @@ def datacube_builder(missions_func=missions):
                     )
 
             # Show preview in Result panel (not in Status)
-            _show_result_summary(state["result"])
+            _show_result_summary(_apply_cloud_threshold(state["result"]))
 
             # Auto-open Result accordion after generation
             try:
@@ -2317,6 +2456,7 @@ def datacube_builder(missions_func=missions):
             try:
                 export_result_btn.disabled = True
                 _set_visualization_enabled(False)
+                result_cloud_max_w.disabled = True
             except Exception:
                 pass
             _show_result_summary(None)
@@ -3117,8 +3257,19 @@ def datacube_builder(missions_func=missions):
     viz_acc.layout = widgets.Layout(width="99%")
     viz_collapse_btn.on_click(lambda _: setattr(viz_acc, "selected_index", None))
 
+    # Max cloud % filter sits right under the date/cloud table, pushed to the
+    # right so it lines up beneath the 'cloud %' column. Greyed out until a
+    # cloud-masked build exists; changing it re-filters the table, visualization
+    # and export together.
+    result_cloud_filter_row = widgets.HBox(
+        [result_cloud_max_w],
+        layout=widgets.Layout(
+            width="100%", justify_content="flex-end", padding="0 6px 2px 0"
+        ),
+    )
     result_box = widgets.VBox(
-        [result_out], layout=widgets.Layout(width="99%", gap="6px")
+        [result_out, result_cloud_filter_row, result_viz_note_w],
+        layout=widgets.Layout(width="99%", gap="6px"),
     )
     result_acc = widgets.Accordion(children=[result_box], selected_index=None)
     result_acc.set_title(0, "Result")

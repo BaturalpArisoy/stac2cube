@@ -65,11 +65,14 @@ def compute_cloud_percentage(stac, aoi_mask=None):
         return xr.zeros_like(stac["time"], dtype="int16")
 
     nan_in = (isnull & footprint).sum(dim=reduce_dims)  # per-time NaN count in AOI
-    # Integer percent, rounded UP: any cloud at all -> at least 1%, so that 0%
-    # reliably means a cloud-free scene when filtering. The 1e-9 guard keeps an
-    # exact integer percentage from being bumped up by floating-point noise.
+    # Integer percent, rounded to NEAREST (round half up): removes the systematic
+    # +1 bias of ceiling, where a sub-1% masked sliver (present in almost every
+    # scene because the SCL mask drops a few scattered pixels) wrongly read 1%.
+    # Now 0% means "< 0.5% of the observable AOI masked" and 100% means
+    # ">= 99.5% masked". floor(frac + 0.5) is deterministic regardless of float
+    # noise, so exact integer percentages are never nudged off.
     frac = (nan_in / denom) * 100.0
-    pct = np.ceil(frac - 1e-9).astype("int16")
+    pct = np.floor(frac + 0.5).astype("int16")
     if getattr(pct, "chunks", None) is not None:
         pct = pct.compute()
     return pct
