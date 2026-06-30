@@ -497,7 +497,8 @@ def datacube_builder(missions_func=missions):
         max=100,
         step=1,
         description="Max cloud %:",
-        layout=widgets.Layout(width="190px"),
+        # ~25% narrower than the original 190px.
+        layout=widgets.Layout(width="143px"),
         style={"description_width": "78px"},
         disabled=True,
     )
@@ -510,7 +511,8 @@ def datacube_builder(missions_func=missions):
         "<div style='font-size:12px; color:#1e3a8a; background:#eff6ff; "
         "border:1px solid #bfdbfe; border-radius:6px; padding:6px 8px;'>"
         "ℹ️ Now you can <b>visualize</b> the data cube in the <b>Visualization</b> "
-        "section below - or save it via <b>Export Options</b>."
+        "section below or save it via <b>Export Options</b>. If available filter "
+        "by <b>max cloud %</b>."
         "</div>"
     )
     result_viz_note_w = widgets.HTML(value="")

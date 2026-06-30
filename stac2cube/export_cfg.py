@@ -82,6 +82,43 @@ def export_to_cogs(
     # -----------------------------
     # Helpers
     # -----------------------------
+    def _reorder_rgb_first(da: xr.DataArray) -> xr.DataArray:
+        """
+        GeoTIFF/QGIS interpret band 1->Red, 2->Green, 3->Blue by default.
+        Our cube stores bands in wavelength order (e.g. blue, green, red, nir),
+        which makes QGIS swap red and blue. So for GeoTIFF export only, if all
+        three RGB bands are present, move them to the front as red, green, blue
+        and keep every other band after them in its original order.
+        The NetCDF path (export_stac) keeps the wavelength order untouched.
+        """
+        if "band" not in da.dims or "band" not in da.coords:
+            return da
+
+        bands = list(da.coords["band"].values)
+        lookup = {str(b).lower(): b for b in bands}
+
+        aliases = {
+            "red": ("red", "r", "b04"),
+            "green": ("green", "g", "b03"),
+            "blue": ("blue", "b", "b02"),
+        }
+
+        def _find(names):
+            for n in names:
+                if n in lookup:
+                    return lookup[n]
+            return None
+
+        rgb = [_find(aliases[c]) for c in ("red", "green", "blue")]
+        if any(b is None for b in rgb):
+            return da  # not a full RGB set -> leave order as is
+
+        rest = [b for b in bands if b not in rgb]
+        new_order = rgb + rest
+        if new_order == bands:
+            return da
+        return da.sel(band=new_order)
+
     def _safe_name(s):
         s = str(s)
         s = s.strip()
@@ -136,6 +173,9 @@ def export_to_cogs(
 
         if "y" not in da.dims or "x" not in da.dims:
             raise ValueError(f"Expected spatial dims 'y' and 'x'. Found dims: {da.dims}")
+
+        # GeoTIFF-only: present RGB bands as red, green, blue (see helper).
+        da = _reorder_rgb_first(da)
 
         # Dimensions to iterate over (keep 'band' together as multiband)
         iter_dims = [d for d in da.dims if d not in ("y", "x", "band")]
