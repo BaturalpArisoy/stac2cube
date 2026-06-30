@@ -69,16 +69,34 @@ def compute_cloud_percentage(stac, aoi_mask=None, cloud_mask=None):
         footprint = footprint & aoi_mask.astype(bool)
 
     if cloud_mask is not None:
-        # Keep-clouds: cloud pixels are valid (not NaN), so count them from the
-        # SCL/QA boolean instead. Align it to the cube grid (clip may have dropped
-        # rows/cols); time is 1:1 in order, so re-stamp the cube's (floored) time.
+        # Count clouds from the SCL/QA boolean rather than from NaN holes. This is
+        # what keeps a *partial* scene honest: when a polygon straddles a swath /
+        # tile edge, the satellite images only part of the AOI on a given date and
+        # the rest is genuine NO_DATA (NaN here for sources that fill gaps with
+        # NaN, e.g. Planetary Computer). Those gap pixels are NOT clouds - SCL tags
+        # them class 0 - so counting NaN would wrongly read a half-empty scene as
+        # ~50% cloud. Align cm to the cube grid (clip may have dropped rows/cols);
+        # time is 1:1 in order, so re-stamp the cube's (floored) time.
         cm = cloud_mask.sel(y=stac["y"], x=stac["x"])
         cm = cm.assign_coords(time=stac["time"]).astype(bool)
-        denom = int(footprint.sum())
-        if denom == 0:
-            return xr.zeros_like(stac["time"], dtype="int16")
         sp_dims = [d for d in ("y", "x") if d in cm.dims]
-        nan_in = (cm & footprint).sum(dim=sp_dims)  # per-time cloud pixel count
+
+        # Per-date genuine no-data: NaN in the cube but NOT flagged as cloud by cm.
+        # (In remove-clouds mode a cloud pixel is also NaN, but cm marks it, so cm
+        # and `missing` stay disjoint.) Exclude it from BOTH numerator and
+        # denominator so the percentage reflects only the pixels actually imaged
+        # that date.
+        null_t = isnull.any(dim="band") if "band" in isnull.dims else isnull
+        missing = null_t & (~cm)              # (time, y, x): unimaged this date
+        observed = footprint & (~missing)     # per-time observable AOI footprint
+        denom_t = observed.sum(dim=sp_dims)    # per-time denominator
+        nan_in = (cm & observed).sum(dim=sp_dims)  # per-time cloud pixel count
+
+        frac = xr.where(denom_t > 0, (nan_in / denom_t) * 100.0, 0.0)
+        pct = np.floor(frac + 0.5).astype("int16")
+        if getattr(pct, "chunks", None) is not None:
+            pct = pct.compute()
+        return pct
     else:
         denom = int(footprint.sum()) * nbands
         if denom == 0:

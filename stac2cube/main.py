@@ -267,11 +267,11 @@ def get_stac_layers(
             # Cloud % is measured against the observable AOI footprint: pixels
             # missing in every scene (incl. anything outside a non-rectangular
             # clip) are excluded from both numerator and denominator, so only
-            # real clouds count. In keep-clouds mode the pixels are NOT NaN'd, so
-            # the count comes from the SCL/QA cloud boolean instead of from NaN.
-            pct = compute_cloud_percentage(
-                stac, cloud_mask=cloud_bool if keep_clouds else None
-            )
+            # real clouds count. The count always comes from the SCL/QA cloud
+            # boolean (not from NaN holes) so that per-date swath/tile gaps -
+            # genuine NO_DATA, not cloud - are never miscounted as cloud. This
+            # holds in both remove-clouds and keep-clouds mode.
+            pct = compute_cloud_percentage(stac, cloud_mask=cloud_bool)
             if pct is not None:
                 stac = stac.assign_coords(
                     cloud_percentage=("time", np.asarray(pct.data))
