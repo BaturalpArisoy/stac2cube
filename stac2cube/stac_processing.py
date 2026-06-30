@@ -2,14 +2,31 @@ import numpy as np
 import xarray as xr
 
 
-def cloud_mask(stac, mission):
+def cloud_mask(stac, mission, keep_clouds=False):
+    """Build the per-pixel cloud boolean from the scene-classification / QA layer
+    and either remove the cloudy pixels (default) or leave the imagery untouched.
+
+    Returns ``(cube, cloud_bool)``:
+      * ``cube``       - cloudy pixels set to NaN (default), OR, when
+                         ``keep_clouds`` is True, the cube with pixels intact and
+                         only the auxiliary cloud layer dropped.
+      * ``cloud_bool`` - the per-pixel cloud mask (time, y, x). It is what lets
+                         the caller compute a cloud percentage even in keep-clouds
+                         mode (where there are no NaN holes to count). ``None`` for
+                         missions without a configured cloud layer.
+
+    ``keep_clouds`` exists for users (e.g. artists) who want the clouds visible
+    but still want a per-scene cloud percentage to filter the fully-clouded
+    scenes out. The percentage uses the SAME cloud classes as the masking, so the
+    number means the same thing whether the clouds were removed or kept.
+    """
     cfg = _mission_cfg(mission)
     layer_name = cfg[0]
     classes = cfg[1]
 
     if mission == "sentinel_2_l2a":
         # For Sentinel-2, use the classification directly with isin().
-        cloud_mask = getattr(stac, layer_name).isin(classes)
+        cloud_bool = getattr(stac, layer_name).isin(classes)
     elif mission == "landsat_c2_l2":
         # For Landsat, qa_pixel is bit-packed. Extract three flags:
         #   dilated_cloud is in bit offset 1,
@@ -19,18 +36,52 @@ def cloud_mask(stac, mission):
         mask_cirrus = ((stac.qa_pixel >> 2) & 1).astype(bool)
         mask_cloud = ((stac.qa_pixel >> 3) & 1).astype(bool)
         # Combine the three flags: a pixel is cloud if any of the flags are True.
-        cloud_mask = mask_dilated | mask_cirrus | mask_cloud
+        cloud_bool = mask_dilated | mask_cirrus | mask_cloud
     else:
         # If no cloud masking is implemented for the mission, do nothing.
         print(f"No cloud masking configured for mission {mission}")
-        return stac
+        return stac, None
 
-    stac_masked = stac.where(~cloud_mask)
-    # Optionally drop the cloud band if it exists.
-    if layer_name is not None and layer_name in stac_masked:
-        stac_masked = stac_masked.drop_vars(layer_name)
+    if keep_clouds:
+        # Keep the imagery exactly as observed (no NaN holes); only the auxiliary
+        # cloud layer is dropped below. The percentage is derived from cloud_bool.
+        out = stac
+    else:
+        out = stac.where(~cloud_bool)
 
-    return stac_masked
+    # Drop the cloud/classification band if it exists (it is not spectral data).
+    if layer_name is not None and layer_name in out:
+        out = out.drop_vars(layer_name)
+
+    return out, cloud_bool
+
+
+def build_scl_mask_cube(stac, cloud_bool):
+    """Binary SCL cloud-mask time series aligned to the (final) cube grid.
+
+    1 = cloud (the SCL/QA cloud classes), 0 = clear / other. Returned as a
+    DataArray named ``Cloud_Stack`` with a single band ``cloud_mask_scl`` so it
+    follows the package's Cloud_Stack convention and can be fed to
+    ``mask_stac_clouds`` or the cloud / co-registration tools later. This is what
+    lets a *keep-clouds* cube (clouds left visible) still be masked or filtered
+    after the fact.
+
+    ``cloud_bool`` is the per-pixel boolean returned by :func:`cloud_mask`. It is
+    aligned to ``stac`` by label (a clip may have dropped rows/cols) and its time
+    is re-stamped to the cube's (floored) time - exactly like
+    ``compute_cloud_percentage`` - so the mask lines up pixel-for-pixel and
+    date-for-date with the data cube. The cube's ``cloud_percentage`` coord is
+    carried over when present.
+    """
+    cm = cloud_bool.sel(y=stac["y"], x=stac["x"]).assign_coords(time=stac["time"])
+    cm = cm.astype("uint8")
+    cm = cm.expand_dims(band=["cloud_mask_scl"]).transpose("time", "band", "y", "x")
+    cm.name = "Cloud_Stack"
+    if "cloud_percentage" in stac.coords:
+        cm = cm.assign_coords(
+            cloud_percentage=("time", np.asarray(stac["cloud_percentage"].data))
+        )
+    return cm
 
 
 def scale_factor(stac, mission, baselines, source=None):

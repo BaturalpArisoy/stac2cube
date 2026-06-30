@@ -99,7 +99,10 @@ def read_polygon_file(polygon) -> gpd.GeoDataFrame:
         gdf = gpd.read_file(polygon)
 
     elif geo_format == ".geojson":
-        gdf = gpd.read_file(polygon, driver="GeoJSON")
+        # No explicit driver= here: geopandas auto-detects GeoJSON from the
+        # extension, and the newer pyogrio engine (now the default) warns/errors
+        # on a 'driver' open option that the GeoJSON GDAL driver doesn't support.
+        gdf = gpd.read_file(polygon)
 
     elif geo_format == ".gml":
         gdf = gpd.read_file(polygon, driver="GML")

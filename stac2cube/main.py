@@ -7,7 +7,7 @@ from .vector_refiner import (
     read_polygon_file,
     polygon_2_features,
 )
-from .stac_processing import scale_factor, cloud_mask
+from .stac_processing import scale_factor, cloud_mask, build_scl_mask_cube
 from .get_spectral_indices import calculate_spectral_index
 from .export_cfg import export_stac
 
@@ -42,6 +42,8 @@ def get_stac_layers(
     max_cc=None,
     clip_raster=None,
     cloud_masking=None,
+    keep_clouds=None,
+    cloud_mask_output=None,
     indices=None,
     output=None,
     aggregator=None,
@@ -81,6 +83,13 @@ def get_stac_layers(
                 if not q:
                     print(f"\n=== Feature {idx}/{n} ===", flush=True)
 
+                # One binary cloud-mask file per feature (<stem>_<idx><ext>),
+                # mirroring how the main cube is split per feature.
+                cmo_i = None
+                if cloud_mask_output:
+                    _cstem, _cext = os.path.splitext(cloud_mask_output)
+                    cmo_i = f"{_cstem}_{idx}{_cext}"
+
                 # Build this feature LAZILY (output=None) so nothing is computed yet.
                 res = get_stac_layers(
                     mission=mission,
@@ -93,6 +102,8 @@ def get_stac_layers(
                     max_cc=max_cc,
                     clip_raster=clip_raster,
                     cloud_masking=cloud_masking,
+                    keep_clouds=keep_clouds,
+                    cloud_mask_output=cmo_i,
                     indices=list(indices) if indices else indices,
                     output=None,  # export below, per feature, so RAM frees each time
                     aggregator=aggregator,
@@ -165,8 +176,11 @@ def get_stac_layers(
     transform = stac.rio.transform()
 
     # Cloud masking
+    cloud_bool = None
     if cloud_masking is True:
-        stac = cloud_mask(stac, mission)
+        # keep_clouds=True -> pixels stay intact, only the cloud % is derived from
+        # the returned per-pixel cloud boolean (cloud_bool). Default removes them.
+        stac, cloud_bool = cloud_mask(stac, mission, keep_clouds=bool(keep_clouds))
 
     # Scale factor
     stac = scale_factor(stac, mission, baselines, source=source or "element84")
@@ -253,12 +267,31 @@ def get_stac_layers(
             # Cloud % is measured against the observable AOI footprint: pixels
             # missing in every scene (incl. anything outside a non-rectangular
             # clip) are excluded from both numerator and denominator, so only
-            # real clouds count.
-            pct = compute_cloud_percentage(stac)
+            # real clouds count. In keep-clouds mode the pixels are NOT NaN'd, so
+            # the count comes from the SCL/QA cloud boolean instead of from NaN.
+            pct = compute_cloud_percentage(
+                stac, cloud_mask=cloud_bool if keep_clouds else None
+            )
             if pct is not None:
                 stac = stac.assign_coords(
                     cloud_percentage=("time", np.asarray(pct.data))
                 )
+
+            # On-demand: export the binary SCL cloud-mask time series (1=cloud,
+            # 0=clear) as its own NetCDF. This is what lets a kept-clouds cube be
+            # masked / filtered / co-registered later, even though the imagery
+            # itself kept its clouds. Off by default (cloud_mask_output=None).
+            if cloud_mask_output and cloud_bool is not None:
+                mask_cube = build_scl_mask_cube(stac, cloud_bool)
+                _cmo_dir = os.path.dirname(cloud_mask_output)
+                if _cmo_dir:
+                    os.makedirs(_cmo_dir, exist_ok=True)
+                export_stac(
+                    mask_cube, cloud_mask_output, crs=crs,
+                    transform=stac.rio.transform(), var_name="Cloud_Stack",
+                )
+                if not q:
+                    print(f"Binary cloud mask exported: {cloud_mask_output}", flush=True)
 
     stac.attrs["crs"] = crs
     stac.attrs["transform"] = transform

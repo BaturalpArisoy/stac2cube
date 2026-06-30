@@ -23,7 +23,7 @@ def _aoi_mask_from_geometries(stac, geometries):
     )
 
 
-def compute_cloud_percentage(stac, aoi_mask=None):
+def compute_cloud_percentage(stac, aoi_mask=None, cloud_mask=None):
     """
     Per-time cloud percentage computed against the AOI footprint.
 
@@ -31,7 +31,15 @@ def compute_cloud_percentage(stac, aoi_mask=None):
       * AOI footprint = pixels inside ``aoi_mask`` (whole extent if None).
       * Genuine-missing pixels -- NaN in *every* time step inside the AOI -- are
         treated as no-data and excluded from BOTH numerator and denominator.
-      * Numerator(t) = observable AOI pixels that are NaN at time t (clouds).
+      * Numerator(t) = observable AOI pixels that are clouds at time t.
+
+    Two ways to count clouds:
+      * ``cloud_mask=None`` (default, masked cubes): clouds are the NaN pixels
+        left behind by masking. Counted per band, denominator scaled by nbands.
+      * ``cloud_mask`` given (keep-clouds cubes): clouds are not NaN'd into the
+        cube, so the per-pixel cloud boolean (time, y, x) is supplied directly.
+        It is aligned to the (possibly clipped) cube grid by label; the cube's
+        observable footprint is still used as the denominator.
 
     For single-time cubes cloud and missing cannot be separated temporally, so
     all in-AOI NaN are counted as cloud (missing pixels assumed negligible).
@@ -60,11 +68,23 @@ def compute_cloud_percentage(stac, aoi_mask=None):
     if aoi_mask is not None:
         footprint = footprint & aoi_mask.astype(bool)
 
-    denom = int(footprint.sum()) * nbands
-    if denom == 0:
-        return xr.zeros_like(stac["time"], dtype="int16")
+    if cloud_mask is not None:
+        # Keep-clouds: cloud pixels are valid (not NaN), so count them from the
+        # SCL/QA boolean instead. Align it to the cube grid (clip may have dropped
+        # rows/cols); time is 1:1 in order, so re-stamp the cube's (floored) time.
+        cm = cloud_mask.sel(y=stac["y"], x=stac["x"])
+        cm = cm.assign_coords(time=stac["time"]).astype(bool)
+        denom = int(footprint.sum())
+        if denom == 0:
+            return xr.zeros_like(stac["time"], dtype="int16")
+        sp_dims = [d for d in ("y", "x") if d in cm.dims]
+        nan_in = (cm & footprint).sum(dim=sp_dims)  # per-time cloud pixel count
+    else:
+        denom = int(footprint.sum()) * nbands
+        if denom == 0:
+            return xr.zeros_like(stac["time"], dtype="int16")
 
-    nan_in = (isnull & footprint).sum(dim=reduce_dims)  # per-time NaN count in AOI
+        nan_in = (isnull & footprint).sum(dim=reduce_dims)  # per-time NaN count in AOI
     # Integer percent, rounded to NEAREST (round half up): removes the systematic
     # +1 bias of ceiling, where a sub-1% masked sliver (present in almost every
     # scene because the SCL mask drops a few scattered pixels) wrongly read 1%.

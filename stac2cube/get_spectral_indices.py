@@ -215,7 +215,12 @@ def _require_band(stac, mission_name, required, alternatives=None):
 # Math helpers (Dask-friendly)
 # -----------------------------------------------------------------------------
 def _safe_div(num: xr.DataArray, den: xr.DataArray) -> xr.DataArray:
-    return xr.where(den != 0, num / den, np.nan)
+    # Divide by a denominator that is NaN where it was 0, so the zero-division is
+    # never actually executed. xr.where(den != 0, num / den, nan) would compute
+    # num / den for *every* pixel first (raising a 'divide by zero' RuntimeWarning
+    # on no-data gaps) and only then mask it. The result is identical - NaN where
+    # den == 0 - but this form stays quiet because x / NaN is silent NaN.
+    return num / den.where(den != 0)
 
 
 def _nd(a: xr.DataArray, b: xr.DataArray) -> xr.DataArray:

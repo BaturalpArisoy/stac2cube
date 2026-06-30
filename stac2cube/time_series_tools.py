@@ -599,6 +599,52 @@ def make_frame(
 
 
 # ---------------- GIF SAVER ----------------
+def _bands_needed_for_mode(display_mode):
+    """Band names required to render a single frame in the given display mode."""
+    mode = str(display_mode).lower().strip()
+    return {
+        "rgb": ["red", "green", "blue"],
+        "false_color": ["nir", "red", "green"],
+        "ndvi": ["nir", "red"],
+        "ndwi": ["green", "nir"],
+    }.get(mode, [])
+
+
+def _materialize_for_gif(da: xr.DataArray, display_mode):
+    """
+    Load the bands needed for the animation into memory ONCE.
+
+    When the cube has been edited in the data-cube editor (cloud filter or a
+    time/band slice), the working array carries a lazy dask graph whose time
+    axis was selected with a non-contiguous (fancy) index. Pulling a single
+    time slice out of that graph forces dask to re-read and re-evaluate the
+    whole source time-chunk from disk, so building a GIF frame-by-frame
+    re-reads the cube hundreds of times and appears to hang. A freshly loaded
+    cube has a plain "read one slice" graph and stays fast, which is why the
+    problem only shows up after editing.
+
+    Computing the needed bands a single time reads each on-disk chunk once and
+    leaves an in-memory array that make_frame can slice instantly.
+    """
+    is_lazy = getattr(da, "chunks", None) is not None
+    if not is_lazy:
+        return da
+
+    sub = da
+    if "band" in da.dims:
+        wanted = _bands_needed_for_mode(display_mode)
+        keys = []
+        for name in wanted:
+            try:
+                keys.append(_band_key(da, name))
+            except KeyError:
+                # Let make_frame raise the precise, user-facing band error.
+                return da.load()
+        if keys:
+            sub = da.sel(band=keys)
+    return sub.load()
+
+
 def save_timeseries_gif(
     da: xr.DataArray,
     out_path="timeseries.gif",
@@ -607,6 +653,7 @@ def save_timeseries_gif(
     max_width=None,
     label=True,
 ):
+    da = _materialize_for_gif(da, display_mode)
     times = list(da.coords["time"].values)
     frames = [
         make_frame(da, t, display_mode=display_mode, max_width=max_width, label=label)

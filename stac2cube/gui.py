@@ -139,6 +139,17 @@ PARAM_HELP_HTML = {
     Keep <b>False</b> if you want to generate a cloud mask cube and choose your own threshold later.<br>
     Set <b>True</b> for quick/rough masking (e.g., large areas).
     """,
+    "keep_clouds": """
+    <b>keep_clouds</b> (depends on <b>cloud_masking</b>)<br>
+    Only selectable when <b>cloud_masking</b> is True (it needs the Scene
+    Classification Layer).<br><br>
+    <b>False</b> (default): cloudy pixels are removed (set to no-data).<br>
+    <b>True</b>: the imagery is left untouched - clouds stay visible - but each
+    scene is still tagged with a <code>cloud_percentage</code> (computed from the
+    SCL, exactly like the masking would). So you keep the visual integrity of the
+    scenes and can still filter out the fully-clouded dates by cloud %.<br><br>
+    Currently SCL-only (Sentinel-2 L2A).
+    """,
     "stats": """
     <b>stats</b><br>
     If empty/None: no stats cubes.<br>
@@ -484,6 +495,155 @@ def datacube_builder(missions_func=missions):
         layout=widgets.Layout(width="100%"),
         style={"description_width": "120px"},
     )
+
+    # Action selector once Cloud masking is on: either mask out the cloudy pixels
+    # (default) OR keep them visible but still tag each scene with a cloud % (for
+    # artists / filtering). Framing it as "Mask or Keep" avoids the confusing
+    # "enable masking in order to keep clouds" of a separate Keep-Clouds toggle.
+    # Only meaningful when Cloud masking is on; greyed to "Mask clouds" otherwise.
+    keep_clouds_w = widgets.Dropdown(
+        options=[("Mask clouds", "mask"), ("Keep clouds", "keep")],
+        value="mask",
+        description="Mask or keep:",
+        layout=widgets.Layout(width="100%"),
+        style={"description_width": "120px"},
+        disabled=True,
+    )
+
+    def _sync_keep_clouds_enabled(change=None):
+        """The Mask-or-Keep action only applies when Cloud masking is on (it needs
+        the SCL layer). Otherwise force it back to the default 'Mask clouds' and
+        grey it out."""
+        on = (cloud_masking_w.value is True)
+        if not on and keep_clouds_w.value != "mask":
+            keep_clouds_w.value = "mask"
+        keep_clouds_w.disabled = not on
+
+    cloud_masking_w.observe(_sync_keep_clouds_enabled, names="value")
+
+    # -------------------------------------------------------------------------
+    # Guided cloud presets: four plain-language choices that drive the three raw
+    # cloud parameters for the user, so most people never have to touch the raw
+    # widgets. Selecting 1-3 sets the parameters AND greys them out (so it feels
+    # "taken care of"); option 4 unlocks them for manual editing. Mutually
+    # exclusive - one is always selected - rendered as checkboxes per design.
+    # -------------------------------------------------------------------------
+    def _make_preset_row(text_html):
+        cb = widgets.Checkbox(
+            value=False, indent=False,
+            layout=widgets.Layout(width="auto", flex="0 0 auto"),
+        )
+        cb.style.description_width = "0px"
+        # The checkbox square sits a few px below the top of its widget, so a
+        # top-aligned label reads as floating above the box. Nudge the first text
+        # line down to meet the square (keeps the box by the first line for
+        # wrapped multi-line options).
+        lbl = widgets.HTML(
+            f"<div style='font-size:12px; color:#374151; line-height:1.4; "
+            f"margin-top:3px;'>{text_html}</div>"
+        )
+        row = widgets.HBox(
+            [cb, lbl],
+            layout=widgets.Layout(width="100%", align_items="flex-start", gap="4px"),
+        )
+        return cb, row
+
+    cloud_preset1_cb, _cp1_row = _make_preset_row(
+        "I want to mask the scenes with my own custom thresholds using "
+        "<b>s2cloudless</b> later, or I am not even interested in masking clouds "
+        "at all."
+    )
+    cloud_preset2_cb, _cp2_row = _make_preset_row(
+        "I just wanna get my clouds masked as fast as possible and don't really "
+        "care about custom thresholds!"
+    )
+    cloud_preset3_cb, _cp3_row = _make_preset_row(
+        "I would love to generate natural time-series animations, so I wanna "
+        "calculate the cloud percentage of the scenes to filter the data later "
+        "but keep the beautiful clouds!"
+    )
+    cloud_preset4_cb, _cp4_row = _make_preset_row(
+        "Dude, I know what I am doing, let me change the parameters..."
+    )
+
+    _cloud_preset_cbs = [
+        cloud_preset1_cb, cloud_preset2_cb, cloud_preset3_cb, cloud_preset4_cb,
+    ]
+    _cloud_preset_label = widgets.HTML(
+        "<div style='font-weight:600; font-size:13px; color:#374151;'>"
+        "Select one of the options below:</div>"
+    )
+    _cloud_preset_box = widgets.VBox(
+        [_cloud_preset_label, _cp1_row, _cp2_row, _cp3_row, _cp4_row],
+        layout=widgets.Layout(width="100%", gap="6px"),
+    )
+
+    _cloud_preset_guard = {"busy": False}
+    # The active preset (1-4) and what the current mission actually supports. The
+    # mission gate is the hard limit; the preset's greying applies on top, so a
+    # mission that can't do SCL masking stays disabled even under the manual
+    # preset, and re-selecting a mission re-applies the active preset.
+    _cloud_preset_state = {"n": 1}
+    _cloud_caps = {"masking": True, "max_cc": True}
+
+    def _set_cloud_params_disabled(disabled):
+        """Grey (or free) the three raw cloud widgets together. Mission
+        capability is a hard gate: an unsupported control stays disabled even
+        when a preset would otherwise free it."""
+        cloud_masking_w.disabled = disabled or (not _cloud_caps["masking"])
+        max_cc_w.disabled = disabled or (not _cloud_caps["max_cc"])
+        if disabled or (not _cloud_caps["masking"]):
+            keep_clouds_w.disabled = True
+        else:
+            # Manual mode: the Mask-or-Keep box still follows its dependency on
+            # Cloud Detection.
+            _sync_keep_clouds_enabled()
+
+    def _apply_cloud_preset(n):
+        if n == 4:
+            _set_cloud_params_disabled(False)  # unlock; keep current values
+            return
+        # Set Cloud Detection, clamped to what the mission offers (only None when
+        # masking is unavailable -> leave it; presets 2/3 then simply don't mask).
+        valid = [v for _, v in cloud_masking_w.options]
+        want_mask = n in (2, 3)
+        if want_mask and (True in valid):
+            cloud_masking_w.value = True
+        elif False in valid:
+            cloud_masking_w.value = False
+        keep_clouds_w.value = "keep" if n == 3 else "mask"
+        max_cc_w.value = 100
+        _set_cloud_params_disabled(True)
+
+    def _select_cloud_preset(n, apply=True):
+        _cloud_preset_state["n"] = n
+        _cloud_preset_guard["busy"] = True
+        try:
+            for i, cb in enumerate(_cloud_preset_cbs, start=1):
+                cb.value = (i == n)
+        finally:
+            _cloud_preset_guard["busy"] = False
+        if apply:
+            _apply_cloud_preset(n)
+
+    def _on_cloud_preset_toggle(n):
+        def _handler(change):
+            if _cloud_preset_guard["busy"]:
+                return
+            if change["new"]:
+                _select_cloud_preset(n)            # uncheck the others + apply
+            else:
+                # one option must always stay selected: re-check the active one
+                _cloud_preset_guard["busy"] = True
+                change["owner"].value = True
+                _cloud_preset_guard["busy"] = False
+        return _handler
+
+    for _i, _cb in enumerate(_cloud_preset_cbs, start=1):
+        _cb.observe(_on_cloud_preset_toggle(_i), names="value")
+
+    # Default: option 1 (no masking, parameters greyed) - same baseline as before.
+    _select_cloud_preset(1)
 
     # Result-panel filter: keep only scenes with cloud_percentage <= this value.
     # Lives under the Result date/cloud table (placed into result_box later) and
@@ -1566,6 +1726,8 @@ def datacube_builder(missions_func=missions):
 
         clip_raster = bool(clip_raster_w.value)
         cloud_masking = cloud_masking_w.value
+        # Keep clouds only applies when cloud masking is on (needs the SCL layer).
+        keep_clouds = (cloud_masking is True) and (keep_clouds_w.value == "keep")
         aggregator = aggregator_w.value
         source = source_w.value  # None for non-S2 missions
 
@@ -1586,6 +1748,7 @@ def datacube_builder(missions_func=missions):
             "max_cc": max_cc,
             "clip_raster": clip_raster,
             "cloud_masking": cloud_masking,
+            "keep_clouds": keep_clouds,
             "indices": indices,
             "output": output_for_get_stac,
             "aggregator": aggregator,
@@ -1782,6 +1945,7 @@ def datacube_builder(missions_func=missions):
 
         clip_raster = bool(clip_raster_w.value)
         cloud_masking = cloud_masking_w.value
+        keep_clouds = (cloud_masking is True) and (keep_clouds_w.value == "keep")
         aggregator = aggregator_w.value
 
         export_mode = export_mode_w.value
@@ -1810,6 +1974,7 @@ def datacube_builder(missions_func=missions):
                 "indices": indices,
                 "max_cc": max_cc,
                 "cloud_masking": cloud_masking,
+                "keep_clouds": keep_clouds,
                 "output": output_for_json,
                 "clip_raster": clip_raster,
                 "aggregator": aggregator,
@@ -2187,29 +2352,35 @@ def datacube_builder(missions_func=missions):
             clip_raster_w.value = False
             clip_raster_w.disabled = True
 
-        # Cloud masking
+        # Cloud masking availability (mission capability). The disabled/greyed
+        # state and values are governed by the active cloud preset, re-applied at
+        # the end of this block - here we only set the options and the capability.
         cm_meta = meta.get("cloud_masking")
         if cm_meta is False:
             cloud_masking_w.options = [("Not available", None)]
             cloud_masking_w.value = None
-            cloud_masking_w.disabled = True
+            _cloud_caps["masking"] = False
         else:
             cm_cfg = _bool_dropdown_from_metadata(cm_meta, default=False)
             cloud_masking_w.options = cm_cfg["options"]
             cloud_masking_w.value = cm_cfg["value"]
-            cloud_masking_w.disabled = cm_cfg["disabled"]
+            _cloud_caps["masking"] = True
 
-        # Max CC
+        # Max CC availability
         max_cc_meta = meta.get("max_cc")
         if max_cc_meta is False:
             max_cc_w.value = 0
-            max_cc_w.disabled = True
+            _cloud_caps["max_cc"] = False
         else:
             try:
                 max_cc_w.value = int(max_cc_meta)
             except Exception:
                 max_cc_w.value = 100
-            max_cc_w.disabled = False
+            _cloud_caps["max_cc"] = True
+
+        # Re-apply the active cloud preset so its values + greying survive the
+        # mission switch, clamped to what this mission actually supports.
+        _apply_cloud_preset(_cloud_preset_state["n"])
 
         # Stats
         stats_list = _to_list_or_empty(meta.get("stats"))
@@ -2969,14 +3140,82 @@ def datacube_builder(missions_func=missions):
     basic_acc.set_title(0, "Basic Parameters")
     basic_acc.layout = widgets.Layout(width="99%")
 
+    # -------------------------------------------------------------------------
+    # Cloud Masking section: collapsed by default, gathers ALL cloud-related
+    # parameters (SCL masking, keep-clouds, tile max cloud cover) plus a plain
+    # intro and a foldable comparison of the two masking methods. Most users
+    # don't know the SCL-vs-s2cloudless distinction; this keeps it out of the way
+    # but explained for the ones who care.
+    # -------------------------------------------------------------------------
+    _cm_about_html = widgets.HTML(
+        "<div style='font-size:12px; color:#374151; line-height:1.5;'>"
+        "stac2cube offers two different cloud masking methods.<br><br>"
+        "<b>a) Scene Classification Layer (this one)</b><br>"
+        "<u>Advantages</u>:"
+        "<ul style='margin:2px 0 6px 18px; padding:0;'>"
+        "<li>Super fast and lightweight</li>"
+        "<li>Masks the clouds immediately when building the data cube</li>"
+        "</ul>"
+        "<u>Disadvantages</u>:"
+        "<ul style='margin:2px 0 12px 18px; padding:0;'>"
+        "<li>Result is static, the user cannot change cloud probability</li>"
+        "<li>False positive possibilities (e.g. bright gravels)</li>"
+        "</ul>"
+        "<b>b) Probabilistic - s2cloudless (not here, in 'Analysis Ready Data Cube Tools')</b><br>"
+        "<u>Advantages</u>:"
+        "<ul style='margin:2px 0 6px 18px; padding:0;'>"
+        "<li>Dynamic: generates probability maps (same result as Google's "
+        "Sentinel-2: Cloud Probability)</li>"
+        "<li>The user can select sensitivity thresholds</li>"
+        "<li>The user can generate multiple binary cloud masks</li>"
+        "</ul>"
+        "<u>Disadvantages</u>:"
+        "<ul style='margin:2px 0 2px 18px; padding:0;'>"
+        "<li>Requires computation power and takes a long time to process</li>"
+        "<li>Has to be applied in Analysis Ready Data Cube Tools after generating "
+        "the initial data cube</li>"
+        "</ul>"
+        "</div>"
+    )
+    # Match the "About Data Sources" design: a real collapsed-by-default
+    # Accordion (not the custom field_group collapse), 99% wide to avoid the
+    # stray 1px horizontal scrollbar a nested accordion can otherwise push.
+    _cm_about = widgets.Accordion(
+        children=[_cm_about_html], selected_index=None
+    )
+    _cm_about.set_title(0, "About Cloud Masking Methods")
+    # Match the .stac2cube-group spacing so it doesn't sit flush against the
+    # Cloud Masking box below it.
+    _cm_about.layout = widgets.Layout(width="99%", margin="0 0 10px 0")
+
+    # Outer = a real Accordion (like "About Data Sources"). Starts with the
+    # methods comparison, then the four guided presets, then the raw parameter
+    # boxes (greyed unless the manual preset is chosen). Each control is wrapped
+    # in its own titled olive box (field_group) so it reads as a proper field.
+    cloud_masking_inner = widgets.VBox(
+        [
+            _cm_about,
+            _cloud_preset_box,
+            _field_group("Cloud Detection with SCL", [_boxed(cloud_masking_w)]),
+            _field_group("Mask or Keep Clouds", [_boxed(keep_clouds_w)]),
+            _field_group(
+                "Sentinel 2 Tile Max Cloud Coverage", [_boxed(max_cc_w)],
+                help_html=PARAM_HELP_HTML.get("max_cc", ""),
+            ),
+        ],
+        layout=widgets.Layout(width="100%", gap="8px"),
+    )
+    cloud_masking_group = widgets.Accordion(
+        children=[cloud_masking_inner], selected_index=None
+    )
+    cloud_masking_group.set_title(0, "Cloud Detection & Masking")
+    # A plain Accordion lacks the 10px bottom margin the .stac2cube-group field
+    # boxes carry, so it would sit too close to Stats below. Match that spacing.
+    cloud_masking_group.layout = widgets.Layout(width="99%", margin="0 0 10px 0")
+
     advanced_box = widgets.VBox(
         [
-            _field_group("Cloud Masking", [_boxed(cloud_masking_w)],
-                         subtitle="Mask out clouds using the scene classification layer. (fast but not dynamic, keep it False for s2cloudless later)",
-                         help_html=PARAM_HELP_HTML.get("cloud_masking", "")),
-            _field_group("Max CC", [_boxed(max_cc_w)],
-                         subtitle="Maximum scene cloud cover to allow (%), but based on the entire Sentinel-2 tile, not the area of interest!",
-                         help_html=PARAM_HELP_HTML.get("max_cc", "")),
+            cloud_masking_group,
             stats_box,
             _field_group("Temporal Composite", [_boxed(aggregator_w)],
                          subtitle="Collapse the whole time series into one image (mean or median). Individual dates are lost and this replaces the time series.",
@@ -2994,7 +3233,7 @@ def datacube_builder(missions_func=missions):
         "<div style='font-size:12px; color:#475569; margin:0;'>"
         "The right source depends on your study area and cloud-masking "
         "preference. Not sure? Use the tools below.<br>"
-        "<b>Note:</b> All data sources are harmonized and matching Google's "
+        "<b>Note:</b> All data sources are scaled accordingly and matching Google's "
         "\"Harmonized Sentinel-2 L2A SR\"."
         "</div>"
     )
@@ -3365,6 +3604,11 @@ def datacube_builder(missions_func=missions):
             "clip_raster": clip_raster_w,
             "max_cc": max_cc_w,
             "cloud_masking": cloud_masking_w,
+            "keep_clouds": keep_clouds_w,
+            "cloud_preset1": cloud_preset1_cb,
+            "cloud_preset2": cloud_preset2_cb,
+            "cloud_preset3": cloud_preset3_cb,
+            "cloud_preset4": cloud_preset4_cb,
             "stats": stats_w,
             "aggregator": aggregator_w,
             "export_mode": export_mode_w,
