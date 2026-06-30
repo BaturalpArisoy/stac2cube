@@ -2886,7 +2886,7 @@ def datacube_builder(missions_func=missions):
         "Copernicus' original data catalogue, with an always fully available "
         "archive including L1C that can be used for s2cloudless masking. "
         "HOWEVER, the data is not served as cloud-optimized files. Therefore "
-        "CDSE is good for a single date or a very short time-series, but very "
+        "this source is good for a single date or a very short time-series, but quite "
         "bad for long time-series (you will hit data-reading issues). It also "
         "requires access keys (5-minute instructions in "
         "<code>credentials/README.md</code>).<br>"
@@ -3028,7 +3028,7 @@ def datacube_builder(missions_func=missions):
             # Lead with the actual choice, then the slim hint and the optional
             # "help me choose" tools (explainer + availability check) below it.
             _field_group("Data Source", [_boxed(source_w), terrabyte_warning_html, cdse_warning_html],
-                         subtitle="Catalog to download from. The default is open-source and does not require any credentials :)"),
+                         subtitle="Catalog to download from. The default is free, publicly available and does not require any login & credentials :)"),
             source_info_bar,
             about_sources_acc,
             widgets.HBox([check_avail_btn], layout=widgets.Layout(margin="2px 0")),
@@ -5793,7 +5793,7 @@ def ard_cube_tools():
         "border-radius:6px; padding:10px 12px; margin:0 0 8px 0;'>"
         "<b>ℹ️ Note:</b> The 3 tools provided below are not chained. For each feature, load a "
         "separate data cube in NetCDF format with the loader below, then run a "
-        "single tool on it."
+        "one of the 3 tools"
         "</div>"
     )
 
