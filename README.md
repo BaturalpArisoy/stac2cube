@@ -68,13 +68,13 @@ Choose one of the two methods below:
 
 #### Step 1: Clone the repository to your current working directory
 
-    $ git clone https://github.com/BaturalpArisoy/stac2cube.git
+    git clone https://github.com/BaturalpArisoy/stac2cube.git
 
 If git is not available for you, download and unzip the file: https://github.com/BaturalpArisoy/stac2cube/archive/refs/heads/main.zip
 
 #### Step 2: Change directory to cloned stac2cube folder
 
-    $ cd "path/to/stac2cube/"
+    cd "path/to/stac2cube/"
 
 *environment.yml* file should be present in this path, please double check.
 
@@ -82,15 +82,15 @@ If git is not available for you, download and unzip the file: https://github.com
 
 ##### a) LINUX
 
-    $ micromamba env create -n stac2cube -f environment.yml
+    micromamba env create -n stac2cube -f environment.yml
 
 ##### b1) WINDOWS Micromamba
 
-    $ micromamba env create -n stac2cube -f environment.yml; micromamba install -n stac2cube -c conda-forge vs2015_runtime
+    micromamba env create -n stac2cube -f environment.yml; micromamba install -n stac2cube -c conda-forge vs2015_runtime
 
 ##### b2) WINDOWS Anaconda Prompt
 
-    $ conda env create -n stac2cube -f environment.yml && conda activate stac2cube && conda install -c conda-forge vs2015_runtime
+    conda env create -n stac2cube -f environment.yml && conda activate stac2cube && conda install -c conda-forge vs2015_runtime
 
 ---
 
