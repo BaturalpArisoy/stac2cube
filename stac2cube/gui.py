@@ -510,16 +510,63 @@ def datacube_builder(missions_func=missions):
         disabled=True,
     )
 
+    # Export the binary SCL cloud mask (cloud_mask_output) as its own NetCDF, so a
+    # kept-clouds cube can still be masked / filtered / co-registered later. Only
+    # meaningful when cloud detection is on. When True, a path field appears
+    # (auto-filled <polygon>_mask_binary.nc); when False the path box is hidden.
+    export_mask_w = widgets.Dropdown(
+        options=[("False", False), ("True", True)],
+        value=False,
+        description="Export mask:",
+        layout=widgets.Layout(width="100%"),
+        style={"description_width": "120px"},
+        disabled=True,
+    )
+    cloud_mask_output_w = widgets.Text(
+        value="",
+        placeholder="./results/<polygon>_mask_binary.nc",
+        layout=widgets.Layout(width="100%"),
+        disabled=True,
+    )
+    export_mask_path_box = widgets.VBox(
+        [_stacked_field(cloud_mask_output_w, "Binary mask output (.nc)")],
+        layout=widgets.Layout(width="100%", display="none"),  # shown only when True
+    )
+
+    def _sync_export_mask_visibility(change=None):
+        """Path box shows only when Export mask is True."""
+        export_mask_path_box.layout.display = (
+            "" if export_mask_w.value is True else "none"
+        )
+
+    def _sync_export_mask_path_enabled():
+        """Path field is editable only in Free Settings (manual) mode with export
+        on; presets keep it greyed. Auto-fill it when it becomes relevant."""
+        manual = (_cloud_preset_state["n"] == 4)
+        on = (export_mask_w.value is True) and (cloud_masking_w.value is True)
+        if on and not (cloud_mask_output_w.value or "").strip():
+            cloud_mask_output_w.value = _auto_mask_binary_suggestion()
+        cloud_mask_output_w.disabled = not (manual and on)
+
     def _sync_keep_clouds_enabled(change=None):
-        """The Mask-or-Keep action only applies when Cloud masking is on (it needs
-        the SCL layer). Otherwise force it back to the default 'Mask clouds' and
-        grey it out."""
+        """Mask-or-Keep AND Export-mask both need cloud detection on (they use the
+        SCL layer). When it's off, force them back to their defaults and grey them
+        out. Governs the manual (Free Settings) interactions; presets set states
+        directly and override afterwards."""
         on = (cloud_masking_w.value is True)
         if not on and keep_clouds_w.value != "mask":
             keep_clouds_w.value = "mask"
         keep_clouds_w.disabled = not on
+        if not on and export_mask_w.value is not False:
+            export_mask_w.value = False
+        export_mask_w.disabled = not on
+        _sync_export_mask_path_enabled()
 
     cloud_masking_w.observe(_sync_keep_clouds_enabled, names="value")
+    export_mask_w.observe(
+        lambda c: (_sync_export_mask_visibility(), _sync_export_mask_path_enabled()),
+        names="value",
+    )
 
     # -------------------------------------------------------------------------
     # Guided cloud presets: four plain-language choices that drive the three raw
@@ -549,20 +596,24 @@ def datacube_builder(missions_func=missions):
         return cb, row
 
     cloud_preset1_cb, _cp1_row = _make_preset_row(
+        "<b>No masking</b><br>"
         "I want to mask the scenes with my own custom thresholds using "
         "<b>s2cloudless</b> later, or I am not even interested in masking clouds "
         "at all."
     )
     cloud_preset2_cb, _cp2_row = _make_preset_row(
+        "<b>Mask clouds</b><br>"
         "I just wanna get my clouds masked as fast as possible and don't really "
         "care about custom thresholds!"
     )
     cloud_preset3_cb, _cp3_row = _make_preset_row(
-        "I would love to generate natural time-series animations, so I wanna "
-        "calculate the cloud percentage of the scenes to filter the data later "
-        "but keep the beautiful clouds!"
+        "<b>Just cloud percentage, no masking</b><br>"
+        "I would love to generate natural time-series animation by keeping the clouds but, I wanna "
+        "calculate the cloud percentage of the scenes to at least filter the data. "
+        "I can also use the exported binary mask file to mask the clouds later in Data Cube Editor."
     )
     cloud_preset4_cb, _cp4_row = _make_preset_row(
+        "<b>Free Settings</b><br>"
         "Dude, I know what I am doing, let me change the parameters..."
     )
 
@@ -587,17 +638,21 @@ def datacube_builder(missions_func=missions):
     _cloud_caps = {"masking": True, "max_cc": True}
 
     def _set_cloud_params_disabled(disabled):
-        """Grey (or free) the three raw cloud widgets together. Mission
-        capability is a hard gate: an unsupported control stays disabled even
-        when a preset would otherwise free it."""
-        cloud_masking_w.disabled = disabled or (not _cloud_caps["masking"])
+        """Grey (or free) the raw cloud widgets together. Mission capability is a
+        hard gate: an unsupported control stays disabled even when a preset would
+        otherwise free it."""
+        hard_no_mask = not _cloud_caps["masking"]
+        cloud_masking_w.disabled = disabled or hard_no_mask
         max_cc_w.disabled = disabled or (not _cloud_caps["max_cc"])
-        if disabled or (not _cloud_caps["masking"]):
+        export_mask_w.disabled = disabled or hard_no_mask
+        if disabled or hard_no_mask:
             keep_clouds_w.disabled = True
+            cloud_mask_output_w.disabled = True
         else:
-            # Manual mode: the Mask-or-Keep box still follows its dependency on
-            # Cloud Detection.
+            # Manual mode: Mask-or-Keep and Export-mask follow their dependency on
+            # Cloud Detection (this also handles the path field + auto-fill).
             _sync_keep_clouds_enabled()
+        _sync_export_mask_visibility()
 
     def _apply_cloud_preset(n):
         if n == 4:
@@ -613,6 +668,11 @@ def datacube_builder(missions_func=missions):
             cloud_masking_w.value = False
         keep_clouds_w.value = "keep" if n == 3 else "mask"
         max_cc_w.value = 100
+        # Binary mask export: on only for "just cloud percentage" (preset 3),
+        # where clouds are kept and a mask is what lets you filter/mask later.
+        export_mask_w.value = (n == 3)
+        if n == 3:
+            cloud_mask_output_w.value = _auto_mask_binary_suggestion()
         _set_cloud_params_disabled(True)
 
     def _select_cloud_preset(n, apply=True):
@@ -882,6 +942,8 @@ def datacube_builder(missions_func=missions):
         "last_call_params": None,
         "last_export_info": None,
         "last_auto_netcdf_suggestion": None,
+        "last_auto_mask_binary_suggestion": None,
+        "cloud_mask_result": None,   # in-memory binary mask held from the build
         "last_auto_daterange_example": None,
         "last_auto_gif_suggestion": None,
         "last_json_syntax": None,
@@ -1452,6 +1514,30 @@ def datacube_builder(missions_func=missions):
 
         state["last_auto_netcdf_suggestion"] = new_suggestion
 
+    def _auto_mask_binary_suggestion():
+        """Binary-mask output path: the main NetCDF suggestion with a
+        '_mask_binary' stem suffix (<polygon>_mask_binary.nc), so it sits right
+        next to the cube."""
+        base = _auto_netcdf_suggestion_from_polygon()  # ./results/<stem>.nc
+        stem, ext = os.path.splitext(base)
+        return f"{stem}_mask_binary{ext or '.nc'}"
+
+    def _update_mask_binary_suggestion(force=False):
+        """Keep the binary-mask path following the polygon, exactly like the main
+        output field. Only acts while Export mask is on; leaves a user-typed path
+        alone (only replaces empty / previously-auto values)."""
+        if export_mask_w.value is not True:
+            return
+        new_suggestion = _auto_mask_binary_suggestion()
+        current = (cloud_mask_output_w.value or "").strip()
+        prev_auto = state.get("last_auto_mask_binary_suggestion")
+        should_replace = (
+            force or (current == "") or (prev_auto is not None and current == prev_auto)
+        )
+        if should_replace:
+            cloud_mask_output_w.value = new_suggestion
+        state["last_auto_mask_binary_suggestion"] = new_suggestion
+
     # -------------------------------------------------------------------------
     # Daterange auto-fill examples
     # -------------------------------------------------------------------------
@@ -1739,6 +1825,13 @@ def datacube_builder(missions_func=missions):
             export_target if (export_mode == "netcdf" and export_target) else None
         )
 
+        # The GUI never writes the mask *during* the build. Instead it asks
+        # get_stac_layers to hand back the mask in memory (return_cloud_mask) and
+        # writes it itself at export time. That way a lazy/preview build writes
+        # nothing, but a later "Export current results" (or a NetCDF build) still
+        # produces the mask file. SLURM keeps using cloud_mask_output directly.
+        return_cloud_mask = (cloud_masking is True) and (export_mask_w.value is True)
+
         params = {
             "mission": mission,
             "polygon": polygon,
@@ -1749,6 +1842,7 @@ def datacube_builder(missions_func=missions):
             "clip_raster": clip_raster,
             "cloud_masking": cloud_masking,
             "keep_clouds": keep_clouds,
+            "return_cloud_mask": return_cloud_mask,
             "indices": indices,
             "output": output_for_get_stac,
             "aggregator": aggregator,
@@ -1835,6 +1929,45 @@ def datacube_builder(missions_func=missions):
             return {"mode": "cogs", "target": str(base), "folders": written, "count": n}
 
         raise ValueError(f"Unsupported export mode: {export_mode}")
+
+    def _write_held_cloud_mask():
+        """Write the in-memory binary mask held from the build to its path, if the
+        mask export is enabled. Mirrors the main NetCDF write; skipped for COG (by
+        design). Returns the path(s) written, or None. Cheap no-op when disabled.
+
+        A batch build holds a list of masks -> one file per feature
+        (<stem>_<i>.nc), matching how the cubes are split.
+        """
+        if export_mask_w.value is not True:
+            return None
+        if export_mode_w.value == "cogs":
+            return None  # COG builds don't get a mask (by design)
+        mask = state.get("cloud_mask_result")
+        if mask is None:
+            return None
+        path = (cloud_mask_output_w.value or "").strip()
+        if not path:
+            return None
+        if not path.lower().endswith(".nc"):
+            path = path + ".nc"
+
+        if isinstance(mask, list):
+            stem, ext = os.path.splitext(path)
+            written = []
+            i = 0
+            for m in mask:
+                if not isinstance(m, (xr.DataArray, xr.Dataset)):
+                    continue
+                i += 1
+                out_i = f"{stem}_{i}{ext}"
+                Path(out_i).parent.mkdir(parents=True, exist_ok=True)
+                export_stac(m, out_i, var_name="Cloud_Stack")
+                written.append(out_i)
+            return written or None
+
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        export_stac(mask, path, var_name="Cloud_Stack")
+        return path
 
     def _export_current_result(export_mode: str, export_target: str):
         if state["result"] is None:
@@ -1946,6 +2079,9 @@ def datacube_builder(missions_func=missions):
         clip_raster = bool(clip_raster_w.value)
         cloud_masking = cloud_masking_w.value
         keep_clouds = (cloud_masking is True) and (keep_clouds_w.value == "keep")
+        cloud_mask_output = None
+        if (cloud_masking is True) and (export_mask_w.value is True):
+            cloud_mask_output = (cloud_mask_output_w.value or "").strip() or None
         aggregator = aggregator_w.value
 
         export_mode = export_mode_w.value
@@ -1975,6 +2111,7 @@ def datacube_builder(missions_func=missions):
                 "max_cc": max_cc,
                 "cloud_masking": cloud_masking,
                 "keep_clouds": keep_clouds,
+                "cloud_mask_output": cloud_mask_output,
                 "output": output_for_json,
                 "clip_raster": clip_raster,
                 "aggregator": aggregator,
@@ -2532,6 +2669,15 @@ def datacube_builder(missions_func=missions):
                 # Dask ProgressBar output will print inside this status box.
                 result = get_stac_layers(**params)
 
+                # When the binary mask was requested, get_stac_layers returns
+                # (cube, mask); hold the mask in memory so we can write it at
+                # export time (never during a lazy preview).
+                if params.get("return_cloud_mask"):
+                    result, _mask_result = result
+                    state["cloud_mask_result"] = _mask_result
+                else:
+                    state["cloud_mask_result"] = None
+
                 # Build done — clear the animated indicator (and any transient
                 # progress) right before the final status is printed. wait=True
                 # swaps the content in without a flash of empty space.
@@ -2601,6 +2747,12 @@ def datacube_builder(missions_func=missions):
                     else:
                         print(f"✅ Data cube generation finished. Exported to: {export_target}")
 
+                    # The cube was written during the build; write the held binary
+                    # mask alongside it now.
+                    _mask_written = _write_held_cloud_mask()
+                    if _mask_written:
+                        print(f"✅ Binary cloud mask exported: {_mask_written}")
+
                 else:
                     print("✅ Data cube generation finished. Result stored in memory.")
                     #print("")
@@ -2626,6 +2778,7 @@ def datacube_builder(missions_func=missions):
             # panel. Reset the result/state and overwrite the panel with a clear
             # 'no data' message, then show the error in Status.
             state["result"] = None
+            state["cloud_mask_result"] = None
             try:
                 export_result_btn.disabled = True
                 _set_visualization_enabled(False)
@@ -2661,6 +2814,11 @@ def datacube_builder(missions_func=missions):
                 if info.get("mode") != "netcdf":
                     print(f"✅ Export finished: {info['target']}")
 
+                # Write the held binary mask alongside the cube (skipped for COG).
+                _mask_written = _write_held_cloud_mask()
+                if _mask_written:
+                    print(f"✅ Binary cloud mask exported: {_mask_written}")
+
         except Exception as e:
             _show_status(_friendly_error(e, "Export"))
 
@@ -2694,6 +2852,7 @@ def datacube_builder(missions_func=missions):
     polygon_w.observe(
         lambda change: (
             _update_netcdf_output_suggestion(),
+            _update_mask_binary_suggestion(),
             _update_gif_output_suggestion(),
         ),
         names="value",
@@ -3199,6 +3358,10 @@ def datacube_builder(missions_func=missions):
             _field_group("Cloud Detection with SCL", [_boxed(cloud_masking_w)]),
             _field_group("Mask or Keep Clouds", [_boxed(keep_clouds_w)]),
             _field_group(
+                "Export Mask as Binary File",
+                [_boxed(export_mask_w), export_mask_path_box],
+            ),
+            _field_group(
                 "Sentinel 2 Tile Max Cloud Coverage", [_boxed(max_cc_w)],
                 help_html=PARAM_HELP_HTML.get("max_cc", ""),
             ),
@@ -3605,6 +3768,8 @@ def datacube_builder(missions_func=missions):
             "max_cc": max_cc_w,
             "cloud_masking": cloud_masking_w,
             "keep_clouds": keep_clouds_w,
+            "export_mask": export_mask_w,
+            "cloud_mask_output": cloud_mask_output_w,
             "cloud_preset1": cloud_preset1_cb,
             "cloud_preset2": cloud_preset2_cb,
             "cloud_preset3": cloud_preset3_cb,

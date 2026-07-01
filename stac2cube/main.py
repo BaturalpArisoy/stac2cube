@@ -44,6 +44,7 @@ def get_stac_layers(
     cloud_masking=None,
     keep_clouds=None,
     cloud_mask_output=None,
+    return_cloud_mask=False,
     indices=None,
     output=None,
     aggregator=None,
@@ -78,6 +79,7 @@ def get_stac_layers(
         if len(features) > 1:
             n = len(features)
             results = []
+            masks = []  # per-feature in-memory binary masks (return_cloud_mask)
             for pos, feature_gdf in enumerate(features):
                 idx = pos + 1  # human-friendly: count features from 1, not 0
                 if not q:
@@ -104,6 +106,7 @@ def get_stac_layers(
                     cloud_masking=cloud_masking,
                     keep_clouds=keep_clouds,
                     cloud_mask_output=cmo_i,
+                    return_cloud_mask=return_cloud_mask,
                     indices=list(indices) if indices else indices,
                     output=None,  # export below, per feature, so RAM frees each time
                     aggregator=aggregator,
@@ -114,6 +117,12 @@ def get_stac_layers(
                     source=source,
                     q=q,
                 )
+
+                # When asked for the in-memory mask, each feature returns
+                # (cube, mask); split them out and collect the masks.
+                if return_cloud_mask:
+                    res, _mask_i = res
+                    masks.append(_mask_i)
 
                 # Export this feature now. The heavy compute happens INSIDE
                 # export_stac and is released when this iteration ends, while `res`
@@ -136,6 +145,8 @@ def get_stac_layers(
 
                 results.append(res)
 
+            if return_cloud_mask:
+                return results, masks
             return results
 
     if update:
@@ -177,6 +188,7 @@ def get_stac_layers(
 
     # Cloud masking
     cloud_bool = None
+    mask_cube = None  # in-memory binary SCL mask (built lazily when requested)
     if cloud_masking is True:
         # keep_clouds=True -> pixels stay intact, only the cloud % is derived from
         # the returned per-pixel cloud boolean (cloud_bool). Default removes them.
@@ -277,21 +289,26 @@ def get_stac_layers(
                     cloud_percentage=("time", np.asarray(pct.data))
                 )
 
-            # On-demand: export the binary SCL cloud-mask time series (1=cloud,
-            # 0=clear) as its own NetCDF. This is what lets a kept-clouds cube be
-            # masked / filtered / co-registered later, even though the imagery
-            # itself kept its clouds. Off by default (cloud_mask_output=None).
-            if cloud_mask_output and cloud_bool is not None:
+            # Binary SCL cloud-mask time series (1=cloud, 0=clear). Built when
+            # either a path is given (write it now - SLURM / NetCDF-during-build)
+            # or the caller wants it in memory (return_cloud_mask - the GUI holds
+            # it and writes it on export). This is what lets a kept-clouds cube be
+            # masked / filtered / co-registered later.
+            if cloud_bool is not None and (cloud_mask_output or return_cloud_mask):
                 mask_cube = build_scl_mask_cube(stac, cloud_bool)
-                _cmo_dir = os.path.dirname(cloud_mask_output)
-                if _cmo_dir:
-                    os.makedirs(_cmo_dir, exist_ok=True)
-                export_stac(
-                    mask_cube, cloud_mask_output, crs=crs,
-                    transform=stac.rio.transform(), var_name="Cloud_Stack",
-                )
-                if not q:
-                    print(f"Binary cloud mask exported: {cloud_mask_output}", flush=True)
+                # Self-contained georeferencing so it can be exported later.
+                mask_cube.attrs["crs"] = crs
+                mask_cube.attrs["transform"] = stac.rio.transform()
+                if cloud_mask_output:
+                    _cmo_dir = os.path.dirname(cloud_mask_output)
+                    if _cmo_dir:
+                        os.makedirs(_cmo_dir, exist_ok=True)
+                    export_stac(
+                        mask_cube, cloud_mask_output, crs=crs,
+                        transform=stac.rio.transform(), var_name="Cloud_Stack",
+                    )
+                    if not q:
+                        print(f"Binary cloud mask exported: {cloud_mask_output}", flush=True)
 
     stac.attrs["crs"] = crs
     stac.attrs["transform"] = transform
@@ -337,6 +354,8 @@ def get_stac_layers(
 
         if not q:
             print(stac, flush=True)
+        if return_cloud_mask:
+            return stac, mask_cube
         return stac  # returns lazy (update mode may compute missing slices internally)
 
     else:
@@ -360,4 +379,6 @@ def get_stac_layers(
             print(stac, flush=True)
 
         img = export_stac(stac, output, crs, transform)
+        if return_cloud_mask:
+            return img, mask_cube
         return img
