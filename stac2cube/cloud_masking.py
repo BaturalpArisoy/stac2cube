@@ -274,38 +274,66 @@ def get_cloud_layers(
 
 
 def mask_stac_clouds(stac, cloud, mask_layer, output=None):
-    if isinstance(stac, (str, os.PathLike)):
-        stac = xr.open_dataset(stac)
-        stac = stac.Spectral_Temporal_Stack
+    # Track datasets we open here so we can close them before returning.
+    # Leaving these handles open makes each repeated call stack another open
+    # handle onto the same netCDF/HDF5 files, which on Windows can crash the
+    # kernel (native segfault, not a catchable Python exception).
+    _opened = []
+    try:
+        if isinstance(stac, (str, os.PathLike)):
+            _ds = xr.open_dataset(stac)
+            _opened.append(_ds)
+            stac = _ds.Spectral_Temporal_Stack
 
-    if isinstance(cloud, (str, os.PathLike)):
-        cloud = xr.open_dataset(cloud)
-        cloud = cloud.Cloud_Stack
+        if isinstance(cloud, (str, os.PathLike)):
+            _ds = xr.open_dataset(cloud)
+            _opened.append(_ds)
+            cloud = _ds.Cloud_Stack
 
-    if isinstance(stac, xr.Dataset):
-        stac = stac.Spectral_Temporal_Stack
+        if isinstance(stac, xr.Dataset):
+            stac = stac.Spectral_Temporal_Stack
 
-    if isinstance(cloud, xr.Dataset):
-        cloud = cloud.Cloud_Stack
+        if isinstance(cloud, xr.Dataset):
+            cloud = cloud.Cloud_Stack
 
-    cloud_mask = cloud.sel(band=mask_layer)
-    masked_stac = stac.where(cloud_mask == 0)
+        cloud_mask = cloud.sel(band=mask_layer)
+        masked_stac = stac.where(cloud_mask == 0)
 
-    # Cloud percentage per time slice, measured against the observable AOI
-    # footprint: pixels missing in every scene (incl. anything outside a
-    # non-rectangular clip) are excluded from numerator and denominator.
-    pct = compute_cloud_percentage(masked_stac)
-    if pct is not None:
-        masked_stac = masked_stac.assign_coords(
-            cloud_percentage=("time", np.asarray(pct.data))
-        )
+        # Cloud percentage per time slice, measured against the observable AOI
+        # footprint: pixels missing in every scene (incl. anything outside a
+        # non-rectangular clip) are excluded from numerator and denominator.
+        pct = compute_cloud_percentage(masked_stac)
+        if pct is not None:
+            masked_stac = masked_stac.assign_coords(
+                cloud_percentage=("time", np.asarray(pct.data))
+            )
 
-    #export_stac(masked_stac, output)
-    if output is not None:
-        export_stac(masked_stac, output)
-        return output  # return path (old code returned None anyway)
-    else:
-        return masked_stac  # return in-memory masked cube
+        if output is not None:
+            # export_stac reads through the still-open source handles here,
+            # then we close them below. Nothing is force-loaded into memory:
+            # to_netcdf streams straight from the source file to the output.
+            export_stac(masked_stac, output)
+            for _ds in _opened:
+                try:
+                    _ds.close()
+                except Exception:
+                    pass
+            _opened.clear()
+            return output  # return path (old code returned None anyway)
+        else:
+            # In-memory return path (NOT used by the GUI, which always passes an
+            # output). The returned array is lazy and still reads from the source
+            # handles, so we must NOT close them here; clear _opened so the
+            # finally below leaves them open (matches the original behavior).
+            _opened.clear()
+            return masked_stac
+    finally:
+        # Safety net: if export raised, don't leak the handles we opened.
+        for _ds in _opened:
+            try:
+                _ds.close()
+            except Exception:
+                pass
 
 
 def mask_from_probability(

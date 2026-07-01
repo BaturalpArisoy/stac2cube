@@ -7550,6 +7550,29 @@ def ard_cube_tools():
 
     b3_mask_band_w.observe(_on_mask_band_change, names="value")
 
+    def _reopen_loaded_cube_handle():
+        """Reopen the persistent (lazy) handle on the loaded cube from
+        state['loaded_path'] and rebuild state['loaded_obj'].
+
+        Used to restore the session handle after an operation that needs
+        exclusive file access to the loaded cube (see the masking handler):
+        two concurrent netCDF/HDF5 handles to one file crash the kernel on
+        Windows, so we close ours during the op and reopen here. The reopen
+        stays lazy (chunks='auto'), so nothing is force-loaded into RAM."""
+        lp = state.get("loaded_path")
+        if not lp:
+            return
+        ds_open = xr.open_dataset(lp, chunks="auto")
+        ds = ds_open.assign_coords(
+            {name: coord.compute() for name, coord in ds_open.coords.items()}
+        )
+        state["loaded_ds"] = ds_open
+        state["loaded_obj"] = (
+            ds["Spectral_Temporal_Stack"]
+            if "Spectral_Temporal_Stack" in ds.data_vars
+            else ds
+        )
+
     def _on_b3_mask_export_clicked(_):
         if state.get("loaded_path") is None:
             _status("❌ Load the main data cube first.")
@@ -7584,6 +7607,18 @@ def ard_cube_tools():
             f"mask_layer = {mask_layer}",
             f"output = {out_path}",
         )
+
+        # Release our persistent handle on the loaded cube so mask_stac_clouds is
+        # the ONLY handle to that file while it reads + exports. Two concurrent
+        # netCDF/HDF5 handles to a single file crash the kernel on Windows; that
+        # is why masking worked once from a fresh load but crashed on the repeat.
+        _prev_loaded_ds = state.get("loaded_ds")
+        if _prev_loaded_ds is not None:
+            try:
+                _prev_loaded_ds.close()
+            except Exception:
+                pass
+            state["loaded_ds"] = None
 
         try:
             with status_out:
@@ -7628,6 +7663,13 @@ def ard_cube_tools():
 
         except Exception as e:
             _status(f"❌ {type(e).__name__}: {e}")
+        finally:
+            # Restore the session handle so the rest of the UI keeps working
+            # and a subsequent Mask and Export can run again.
+            try:
+                _reopen_loaded_cube_handle()
+            except Exception:
+                pass
 
     b3_mask_btn.on_click(_on_b3_mask_export_clicked)
 
