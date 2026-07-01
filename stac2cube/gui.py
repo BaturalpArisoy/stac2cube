@@ -51,6 +51,7 @@ from .gui_common import (
     stacked_field_with_help as _field_with_help,
     field_group as _field_group,
     boxed_control as _boxed,
+    help_button as _help_button,
 )
 
 
@@ -378,12 +379,12 @@ def datacube_builder(missions_func=missions):
 
     source_w = widgets.Dropdown(
         options=[
-            ("Element84 (Earth Search)", "element84"),
             ("Planetary Computer (Microsoft)", "planetary_computer"),
+            ("Element84 (Earth Search)", "element84"),
             ("terrabyte (DLR)", "terrabyte"),
             ("Copernicus Data Space Ecosystem (Copernicus)", "cdse"),
         ],
-        value="element84",
+        value="planetary_computer",
         description="Data Source:",
         layout=widgets.Layout(width="100%"),
         style={"description_width": "120px"},
@@ -2424,13 +2425,15 @@ def datacube_builder(missions_func=missions):
         # Data Source (only applicable for Sentinel-2 L2A)
         if m_name == "sentinel_2_l2a":
             source_w.options = [
-                ("Element84 (Earth Search)", "element84"),
                 ("Planetary Computer (Microsoft)", "planetary_computer"),
+                ("Element84 (Earth Search)", "element84"),
                 ("terrabyte (DLR)", "terrabyte"),
                 ("Copernicus Data Space Ecosystem (Copernicus)", "cdse"),
             ]
-            source_w.value = "element84"
             source_w.disabled = False
+            # Set the catalogue from the active source suggestion (defined below;
+            # exists by the time this runs). Default preset 1 -> Planetary Computer.
+            _apply_source_preset(_source_preset_state["n"])
         elif m_name == "sentinel_2_l1c":
             source_w.options = [
                 ("Element84 (Earth Search)", "element84"),
@@ -2947,6 +2950,52 @@ def datacube_builder(missions_func=missions):
         open=False,
     )
 
+    # Wrap a set of widgets in a lighter, boxed sub-panel (see the
+    # .stac2cube-subpanel CSS). ``accent`` picks the coloured left bar:
+    # "blue", "green" or "amber".
+    def _subpanel(children, accent=None):
+        box = widgets.VBox(
+            list(children),
+            layout=widgets.Layout(width="100%", gap="6px"),
+        )
+        box.add_class("stac2cube-subpanel")
+        if accent:
+            box.add_class(f"stac2cube-subpanel-{accent}")
+        return box
+
+    # A single titled parameter rendered as a sub-panel: a bold title, an
+    # optional "?" help toggle, and the control below. Same look as the Polygon
+    # option panels; used for the four raw cloud parameters.
+    def _param_panel(title, control, accent=None, help_html=None):
+        title_html = widgets.HTML(
+            f"<div style='font-weight:600; font-size:13px; color:#374151; "
+            f"margin:0 0 2px 0;'>{title}</div>"
+        )
+        if help_html:
+            btn = _help_button()
+            help_box = widgets.HTML(
+                value=help_html,
+                layout=widgets.Layout(
+                    display="none", border="1px solid #dbeafe", padding="8px",
+                    border_radius="8px", margin="2px 0 2px 0", width="100%",
+                ),
+            )
+
+            def _toggle(_):
+                help_box.layout.display = (
+                    "" if help_box.layout.display == "none" else "none"
+                )
+
+            btn.on_click(_toggle)
+            header = widgets.HBox(
+                [title_html, btn],
+                layout=widgets.Layout(align_items="center", gap="6px"),
+            )
+            kids = [header, help_box, control]
+        else:
+            kids = [title_html, control]
+        return _subpanel(kids, accent=accent)
+
     # A prominent "OR" separator, reused in the Polygon group and here.
     def _or_divider():
         return widgets.HTML(
@@ -2956,6 +3005,14 @@ def datacube_builder(missions_func=missions):
             "letter-spacing:2px;'>OR</span>"
             "<span style='flex:1; height:2px; background:#cbd5e1;'></span>"
             "</div>"
+        )
+
+    # A plain horizontal separator (no "OR"), with generous vertical spacing so the
+    # panels above and below don't touch.
+    def _line_divider():
+        return widgets.HTML(
+            "<div style='height:2px; background:#cbd5e1; border-radius:1px; "
+            "margin:18px 0 16px 0;'></div>"
         )
 
     # --- Time period: simple From/To pickers, with advanced modes tucked away ---
@@ -3031,7 +3088,7 @@ def datacube_builder(missions_func=missions):
             return None
         # Default view: Istanbul across the Bosphorus, framing both the European
         # and Asian sides ([lat, lon]).
-        m = leafmap.Map(center=[41.05, 29.00], zoom=10)
+        m = leafmap.Map(center=[41.1032, 29.0550], zoom=10.6)
         m.layout.height = "60vh"
         m.layout.min_height = "320px"
         m.layout.max_height = "640px"
@@ -3250,37 +3307,52 @@ def datacube_builder(missions_func=missions):
             _field_group(
                 "Polygon",
                 [
-                    # --- Option 1: provide a file or bbox ---
-                    widgets.HTML(
-                        "<div style='font-size:13px; font-weight:600; color:#374151; "
-                        "margin:2px 0 2px 0;'>Option 1 - Polygon file or bounding box</div>"
-                    ),
-                    _boxed(polygon_input_box),
-                    widgets.HTML(
-                        "<div style='font-size:12px; color:#1e3a8a; background:#eff6ff; "
-                        "border:1px solid #bfdbfe; border-radius:6px; padding:6px 8px;'>"
-                        "<b>NOTE:</b> a polygon vector file with <b>multiple features</b> is "
-                        "accepted and automatically activates <b>BATCH PROCESSING</b> (one "
-                        "data cube per feature). A <i>multi-polygon</i>-type vector file is "
-                        "<b>NOT</b> accepted."
-                        "</div>"
+                    # --- Option 1: provide a file or bbox (boxed sub-panel) ---
+                    _subpanel(
+                        [
+                            widgets.HTML(
+                                "<div style='font-size:13px; font-weight:600; color:#374151; "
+                                "margin:0 0 2px 0;'>Option 1 - Polygon file or bounding box</div>"
+                            ),
+                            _boxed(polygon_input_box),
+                            widgets.HTML(
+                                "<div style='font-size:12px; color:#1e3a8a; background:#eff6ff; "
+                                "border:1px solid #bfdbfe; border-radius:6px; padding:6px 8px;'>"
+                                "<b>NOTE:</b> a polygon vector file with <b>multiple features</b> is "
+                                "accepted and automatically activates <b>BATCH PROCESSING</b> (one "
+                                "data cube per feature). A <i>multi-polygon</i>-type vector file is "
+                                "<b>NOT</b> accepted."
+                                "</div>"
+                            ),
+                        ],
+                        accent="blue",
                     ),
                     _or_divider(),
-                    # --- Option 2: draw on a map ---
-                    widgets.HTML(
-                        "<div style='font-size:13px; font-weight:600; color:#374151; "
-                        "margin:2px 0 2px 0;'>Option 2 - Draw on a map</div>"
+                    # --- Option 2: draw on a map (boxed sub-panel) ---
+                    _subpanel(
+                        [
+                            widgets.HTML(
+                                "<div style='font-size:13px; font-weight:600; color:#374151; "
+                                "margin:0 0 2px 0;'>Option 2 - Draw on a map</div>"
+                            ),
+                            draw_polygon_w,
+                            draw_box,
+                        ],
+                        accent="green",
                     ),
-                    draw_polygon_w,
-                    draw_box,
+                    _line_divider(),
                     # --- Output shape: clipping applies to whichever option above ---
-                    widgets.HTML(
-                        "<div style='border-top:2px solid #cbd5e1; margin:16px 0 8px 0;'></div>"
-                        "<div style='font-size:13px; font-weight:600; color:#374151; "
-                        "margin:0 0 2px 0;'>Output shape</div>"
+                    _subpanel(
+                        [
+                            widgets.HTML(
+                                "<div style='font-size:13px; font-weight:600; color:#374151; "
+                                "margin:0 0 2px 0;'>Output shape</div>"
+                            ),
+                            clip_raster_w,
+                            clip_warning_html,
+                        ],
+                        accent="amber",
                     ),
-                    clip_raster_w,
-                    clip_warning_html,
                 ],
                 subtitle="The area to cover. Pick a polygon file or bounding box, or draw it on a map.",
                 help_html=PARAM_HELP_HTML.get("polygon", ""),
@@ -3343,38 +3415,44 @@ def datacube_builder(missions_func=missions):
         children=[_cm_about_html], selected_index=None
     )
     _cm_about.set_title(0, "About Cloud Masking Methods")
-    # Match the .stac2cube-group spacing so it doesn't sit flush against the
-    # Cloud Masking box below it.
-    _cm_about.layout = widgets.Layout(width="99%", margin="0 0 10px 0")
+    # Top margin pushes the About box down from the "Cloud Detection & Masking"
+    # title (otherwise it sits flush against it and is easy to miss); the bottom
+    # margin keeps it off the preset sub-panel below.
+    _cm_about.layout = widgets.Layout(width="99%", margin="10px 0 10px 0")
 
-    # Outer = a real Accordion (like "About Data Sources"). Starts with the
-    # methods comparison, then the four guided presets, then the raw parameter
-    # boxes (greyed unless the manual preset is chosen). Each control is wrapped
-    # in its own titled olive box (field_group) so it reads as a proper field.
-    cloud_masking_inner = widgets.VBox(
-        [
-            _cm_about,
-            _cloud_preset_box,
-            _field_group("Cloud Detection with SCL", [_boxed(cloud_masking_w)]),
-            _field_group("Mask or Keep Clouds", [_boxed(keep_clouds_w)]),
-            _field_group(
-                "Export Mask as Binary File",
+    # Content of the Cloud Detection & Masking group. Starts with the methods
+    # comparison (unchanged), then the guided presets inside one accented
+    # sub-panel, a gap, and finally the four raw parameters - each in its own
+    # sub-panel so they read as separate fields on the olive group background.
+    cloud_masking_children = [
+        _cm_about,
+        # "Select one of the options" + the four presets, in one boxed sub-panel.
+        _subpanel([_cloud_preset_box], accent="blue"),
+        # Breathing room between the preset selector and the raw parameters.
+        widgets.HTML("<div style='height:8px;'></div>"),
+        _param_panel("Cloud Detection with SCL", _boxed(cloud_masking_w)),
+        _param_panel("Mask or Keep Clouds", _boxed(keep_clouds_w)),
+        _param_panel(
+            "Export Mask as Binary File",
+            widgets.VBox(
                 [_boxed(export_mask_w), export_mask_path_box],
+                layout=widgets.Layout(width="100%", gap="6px"),
             ),
-            _field_group(
-                "Sentinel 2 Tile Max Cloud Coverage", [_boxed(max_cc_w)],
-                help_html=PARAM_HELP_HTML.get("max_cc", ""),
-            ),
-        ],
-        layout=widgets.Layout(width="100%", gap="8px"),
+        ),
+        _param_panel(
+            "Sentinel 2 Tile Max Cloud Coverage",
+            _boxed(max_cc_w),
+            help_html=PARAM_HELP_HTML.get("max_cc", ""),
+        ),
+    ]
+    # Olive collapsible group, matching the Polygon / Stats / Temporal Composite
+    # sections (previously this was a plain white Accordion).
+    cloud_masking_group = _field_group(
+        "Cloud Detection & Masking",
+        cloud_masking_children,
+        collapsible=True,
+        open=False,
     )
-    cloud_masking_group = widgets.Accordion(
-        children=[cloud_masking_inner], selected_index=None
-    )
-    cloud_masking_group.set_title(0, "Cloud Detection & Masking")
-    # A plain Accordion lacks the 10px bottom margin the .stac2cube-group field
-    # boxes carry, so it would sit too close to Stats below. Match that spacing.
-    cloud_masking_group.layout = widgets.Layout(width="99%", margin="0 0 10px 0")
 
     advanced_box = widgets.VBox(
         [
@@ -3395,7 +3473,7 @@ def datacube_builder(missions_func=missions):
     source_info_bar = widgets.HTML(
         "<div style='font-size:12px; color:#475569; margin:0;'>"
         "The right source depends on your study area and cloud-masking "
-        "preference. Not sure? Use the tools below.<br>"
+        "preference.<br>"
         "<b>Note:</b> All data sources are scaled accordingly and matching Google's "
         "\"Harmonized Sentinel-2 L2A SR\"."
         "</div>"
@@ -3409,7 +3487,7 @@ def datacube_builder(missions_func=missions):
         "Good for long time-series, with some missing dates from the earlier "
         "years of the mission and some missing dates in 2023. It is free and "
         "needs no credentials or login. Selected dates can also be masked by "
-        "s2cloudless.<br>"
+        "s2cloudless. Note that Scene Classification Layer masking result is significantly poor comparing the other data sources.<br>"
         "<b>s2cloudless masking:</b> Available<br><br>"
         "<b>2) Planetary Computer (ready-to-use)</b><br>"
         "Great for long time-series, usually with the full archive. It is free "
@@ -3567,13 +3645,116 @@ def datacube_builder(missions_func=missions):
 
     check_avail_btn.on_click(_on_check_availability)
 
+    # -------------------------------------------------------------------------
+    # Guided data-source suggestions: two plain-language choices that pick the
+    # catalogue for the user, mirroring the cloud-masking presets. Unlike the
+    # cloud presets these DO NOT grey out the dropdown - it stays fully editable,
+    # so the suggestions are just a quick starting point. Mutually exclusive;
+    # picking a non-suggested catalogue (terrabyte / cdse) leaves both unchecked.
+    # -------------------------------------------------------------------------
+    _SOURCE_PRESET_VALUE = {1: "planetary_computer", 2: "element84"}
+
+    source_preset1_cb, _sp1_row = _make_preset_row(
+        "<b>Excellent time-series but no probabilistic cloud masking</b><br>"
+        "I need full time-series without credentials &amp; login but I am not "
+        "interested in s2cloudless cloud masking but only Scene Classification "
+        "Layer masking or no masking."
+    )
+    source_preset2_cb, _sp2_row = _make_preset_row(
+        "<b>Good time-series that can be used for probabilistic cloud masking</b><br>"
+        "I need to use s2cloudless later with my own custom thresholds but I am "
+        "aware that some dates are missing, let's 'Check data availability' below."
+    )
+    _source_preset_cbs = [source_preset1_cb, source_preset2_cb]
+    _source_preset_label = widgets.HTML(
+        "<div style='font-weight:600; font-size:13px; color:#374151;'>"
+        "Select one of the options below or check 'About Data Sources' for "
+        "details:</div>"
+    )
+    _source_preset_box = widgets.VBox(
+        [_source_preset_label, _sp1_row, _sp2_row],
+        layout=widgets.Layout(width="100%", gap="6px"),
+    )
+
+    _source_preset_guard = {"busy": False}
+    _source_preset_state = {"n": 1}
+
+    def _apply_source_preset(n):
+        """Point the dropdown at the suggested catalogue, clamped to what the
+        current mission offers. Never disables the dropdown."""
+        want = _SOURCE_PRESET_VALUE.get(n)
+        valid = [v for _, v in source_w.options]
+        if want in valid:
+            source_w.value = want
+
+    def _select_source_preset(n, apply=True):
+        _source_preset_state["n"] = n
+        _source_preset_guard["busy"] = True
+        try:
+            for i, cb in enumerate(_source_preset_cbs, start=1):
+                cb.value = (i == n)
+        finally:
+            _source_preset_guard["busy"] = False
+        if apply:
+            _apply_source_preset(n)
+
+    def _on_source_preset_toggle(n):
+        def _handler(change):
+            if _source_preset_guard["busy"]:
+                return
+            if change["new"]:
+                _select_source_preset(n)           # uncheck the other + apply
+            else:
+                # Clicking a checked box off is a no-op: re-check the active one
+                # (use the dropdown to reach terrabyte / cdse instead).
+                _source_preset_guard["busy"] = True
+                change["owner"].value = True
+                _source_preset_guard["busy"] = False
+        return _handler
+
+    for _i, _cb in enumerate(_source_preset_cbs, start=1):
+        _cb.observe(_on_source_preset_toggle(_i), names="value")
+
+    def _sync_source_preset_from_dropdown(*_):
+        """Reflect a manual dropdown change in the suggestion checkboxes: check
+        the matching one, or leave both unchecked for terrabyte / cdse."""
+        if _source_preset_guard["busy"]:
+            return
+        match = next(
+            (n for n, v in _SOURCE_PRESET_VALUE.items() if v == source_w.value),
+            None,
+        )
+        _source_preset_guard["busy"] = True
+        try:
+            for i, cb in enumerate(_source_preset_cbs, start=1):
+                cb.value = (i == match)
+            if match is not None:
+                _source_preset_state["n"] = match
+        finally:
+            _source_preset_guard["busy"] = False
+
+    source_w.observe(lambda c: _sync_source_preset_from_dropdown(), names="value")
+
+    # Default: preset 1 (Planetary Computer), selected but not greyed.
+    _select_source_preset(1)
+
     source_box = widgets.VBox(
         [
-            # Lead with the actual choice, then the slim hint and the optional
-            # "help me choose" tools (explainer + availability check) below it.
-            _field_group("Data Source", [_boxed(source_w), terrabyte_warning_html, cdse_warning_html],
-                         subtitle="Catalog to download from. The default is free, publicly available and does not require any login & credentials :)"),
+            # Slim hint first, then the guided suggestions + dropdown; the
+            # "About Data Sources" explainer and the availability check follow.
             source_info_bar,
+            _field_group(
+                "Data Source",
+                [
+                    # Suggestions in an accented sub-panel; the dropdown stays editable.
+                    _subpanel([_source_preset_box], accent="blue"),
+                    widgets.HTML("<div style='height:8px;'></div>"),
+                    _boxed(source_w),
+                    terrabyte_warning_html,
+                    cdse_warning_html,
+                ],
+                subtitle="Catalog to download from. First two are free, publicly available and does not require any login & credentials :)",
+            ),
             about_sources_acc,
             widgets.HBox([check_avail_btn], layout=widgets.Layout(margin="2px 0")),
             avail_result_acc,
@@ -4103,6 +4284,11 @@ def datacube_editor():
         clip_geom_w.disabled = not enabled
         browse_clip_btn.disabled = (not enabled) or (not filechooser_available)
 
+        # Mask clouds with binary file
+        enable_mask_clouds_w.disabled = not enabled
+        mask_file_w.disabled = not enabled
+        browse_mask_file_btn.disabled = (not enabled) or (not filechooser_available)
+
         # Spectral indices widgets
         indices_select_w.disabled = not enabled
         indices_all_btn.disabled = not enabled
@@ -4350,11 +4536,13 @@ def datacube_editor():
     export_fc = None
     gif_fc = None
     clip_fc = None
+    mask_file_fc = None
 
     load_fc_box = widgets.VBox([], layout=widgets.Layout(display="none", width="100%"))
     export_fc_box = widgets.VBox([], layout=widgets.Layout(display="none", width="100%"))
     gif_fc_box = widgets.VBox([], layout=widgets.Layout(display="none", width="100%"))
     clip_fc_box = widgets.VBox([], layout=widgets.Layout(display="none", width="100%"))
+    mask_file_fc_box = widgets.VBox([], layout=widgets.Layout(display="none", width="100%"))
 
     def _toggle_box_display(box):
         box.layout.display = "" if box.layout.display == "none" else "none"
@@ -4462,6 +4650,21 @@ def datacube_editor():
             except Exception:
                 pass
 
+    def _sync_mask_file_filechooser_from_text():
+        if not filechooser_available or mask_file_fc is None:
+            return
+        current = (mask_file_w.value or "").strip()
+        start_dir = _existing_dir_or_parent(current)
+        suggested_name = Path(current).name if current else ""
+        try:
+            mask_file_fc.reset(path=start_dir, filename=suggested_name)
+        except Exception:
+            try:
+                mask_file_fc.default_path = start_dir
+                mask_file_fc.default_filename = suggested_name
+            except Exception:
+                pass
+
     if filechooser_available:
         try:
             load_fc = FileChooser(
@@ -4509,13 +4712,28 @@ def datacube_editor():
                 pass
             clip_fc_box = widgets.VBox([clip_fc], layout=widgets.Layout(display="none", width="100%"))
 
+            mask_file_fc = FileChooser(
+                path=str(Path(".").resolve()),
+                filename="",
+                title="Select binary cloud-mask file (.nc)",
+                show_only_dirs=False,
+                select_default=False,
+            )
+            mask_file_fc.use_dir_icons = True
+            try:
+                mask_file_fc.filter_pattern = ["*.nc"]
+            except Exception:
+                pass
+            mask_file_fc_box = widgets.VBox([mask_file_fc], layout=widgets.Layout(display="none", width="100%"))
+
         except Exception:
             filechooser_available = False
-            load_fc = export_fc = gif_fc = clip_fc = None
+            load_fc = export_fc = gif_fc = clip_fc = mask_file_fc = None
             load_fc_box = widgets.VBox([], layout=widgets.Layout(display="none", width="100%"))
             export_fc_box = widgets.VBox([], layout=widgets.Layout(display="none", width="100%"))
             gif_fc_box = widgets.VBox([], layout=widgets.Layout(display="none", width="100%"))
             clip_fc_box = widgets.VBox([], layout=widgets.Layout(display="none", width="100%"))
+            mask_file_fc_box = widgets.VBox([], layout=widgets.Layout(display="none", width="100%"))
 
     # ---------------------------------------------------------------------
     # Widgets
@@ -4618,6 +4836,34 @@ def datacube_editor():
         disabled=True,
     )
     browse_clip_btn.style.button_color = "#f3f4f6"
+
+    # Mask clouds with a binary masking file (applied via Edit button). Masks the
+    # already-loaded cube out with a Cloud_Stack (1=cloud, 0=clear) NetCDF, e.g.
+    # one produced by 'Export Mask as Binary File' or the ARD cloud tools.
+    enable_mask_clouds_w = widgets.Checkbox(
+        value=False,
+        description="Enable masking",
+        indent=False,
+        layout=widgets.Layout(width="150px"),
+        disabled=True,
+    )
+
+    mask_file_w = widgets.Text(
+        value="",
+        description="",
+        placeholder="./results/test_mask_binary.nc",
+        layout=widgets.Layout(width="80%"),
+        disabled=True,
+    )
+
+    browse_mask_file_btn = widgets.Button(
+        description="",
+        icon="folder-open",
+        tooltip="Browse binary cloud-mask file (.nc)",
+        layout=widgets.Layout(width="34px", min_width="34px", height="32px", padding="0px"),
+        disabled=True,
+    )
+    browse_mask_file_btn.style.button_color = "#f3f4f6"
 
     # Spectral indices (applied via Edit button). Options are populated from the
     # loaded cube's mission once a cube is loaded.
@@ -4881,12 +5127,20 @@ def datacube_editor():
                 clip_geom_w.value = _normalize_ui_path(selected)
                 clip_fc_box.layout.display = "none"
 
+        def _on_mask_file_fc_selected(chooser):
+            selected = getattr(chooser, "selected", None)
+            if selected:
+                mask_file_w.value = _normalize_ui_path(selected)
+                mask_file_fc_box.layout.display = "none"
+
         try:
             load_fc.register_callback(_on_load_fc_selected)
             export_fc.register_callback(_on_export_fc_selected)
             gif_fc.register_callback(_on_gif_fc_selected)
             if clip_fc is not None:
                 clip_fc.register_callback(_on_clip_fc_selected)
+            if mask_file_fc is not None:
+                mask_file_fc.register_callback(_on_mask_file_fc_selected)
         except Exception:
             filechooser_available = False
 
@@ -4926,6 +5180,16 @@ def datacube_editor():
             return
         _sync_clip_filechooser_from_text()
         _toggle_box_display(clip_fc_box)
+
+    def _on_browse_mask_file_clicked(_):
+        if state["current"] is None:
+            _show_status("ℹ️ Load a cube first to enable editing features.")
+            return
+        if not filechooser_available or mask_file_fc is None:
+            _show_status("ℹ️ Optional dependency 'ipyfilechooser' is not available. Install it to use Browse buttons.")
+            return
+        _sync_mask_file_filechooser_from_text()
+        _toggle_box_display(mask_file_fc_box)
 
     # ---------------------------------------------------------------------
     # Feature helpers
@@ -5250,6 +5514,81 @@ def datacube_editor():
 
         raise TypeError(f"Unsupported object type for clipping: {type(obj)}")
 
+    def _pick_mask_band(cloud):
+        """Choose the binary cloud-mask band from a loaded Cloud_Stack: prefer the
+        SCL mask, then any 'cloud_mask_*' band. None when there is no band dim."""
+        if "band" not in getattr(cloud, "dims", ()) and "band" not in getattr(cloud, "coords", {}):
+            return None
+        bands = [str(b) for b in cloud["band"].values]
+        if "cloud_mask_scl" in bands:
+            return "cloud_mask_scl"
+        mask_bands = [b for b in bands if b.startswith("cloud_mask")]
+        if mask_bands:
+            return mask_bands[0]
+        raise ValueError(
+            "The selected file has no binary cloud-mask band (expected 'cloud_mask_*', "
+            "e.g. 'cloud_mask_scl'). It looks like a cloud probability cube - build a "
+            "binary mask first (ARD Cloud tools), or use one from 'Export Mask as "
+            "Binary File'."
+        )
+
+    def _apply_mask_clouds_feature(obj):
+        """Mask the working cube out with a binary Cloud_Stack file (1=cloud,
+        0=clear) via stac2cube.mask_stac_clouds(). Returns the masked DataArray;
+        any stats are dropped because masking changes pixel validity.
+        """
+        if not enable_mask_clouds_w.value:
+            return obj, False, []
+
+        path = (mask_file_w.value or "").strip()
+        if not path:
+            raise ValueError("Masking is enabled, but no binary mask file was provided.")
+        if not os.path.exists(path):
+            raise ValueError(f"Binary mask file not found: {path}")
+
+        # Load the Cloud_Stack (small binary mask; eager load for a clean align).
+        with xr.open_dataset(path) as cds:
+            if "Cloud_Stack" in cds.data_vars:
+                cloud = cds["Cloud_Stack"].load()
+            elif len(cds.data_vars) == 1:
+                cloud = cds[list(cds.data_vars)[0]].load()
+            else:
+                raise ValueError(
+                    "Binary mask file does not contain a 'Cloud_Stack' variable."
+                )
+
+        mask_layer = _pick_mask_band(cloud)
+        if mask_layer is None:
+            raise ValueError(
+                "The mask file has no 'band' dimension; expected a Cloud_Stack with "
+                "a binary 'cloud_mask_*' band."
+            )
+
+        # The mask must line up with the loaded cube (same dates), otherwise
+        # xarray alignment would silently drop/mismatch timesteps.
+        da_ref = obj["Spectral_Temporal_Stack"] if isinstance(obj, xr.Dataset) else obj
+        if "time" in getattr(da_ref, "dims", ()) and "time" in getattr(cloud, "dims", ()):
+            if int(cloud.sizes["time"]) != int(da_ref.sizes["time"]):
+                raise ValueError(
+                    f"The mask has {int(cloud.sizes['time'])} dates but the cube has "
+                    f"{int(da_ref.sizes['time'])}. The binary mask must come from the "
+                    "same cube (same dates & grid)."
+                )
+
+        # obj may be a DataArray or a Dataset (with stats); mask_stac_clouds pulls
+        # out the Spectral_Temporal_Stack and returns a masked DataArray.
+        masked = mask_stac_clouds(obj, cloud, mask_layer)
+
+        msgs = [
+            "mask_stac_clouds applied (binary cloud mask)",
+            f"mask file: {Path(path).name}",
+            f"mask band: {mask_layer}",
+            "Clouds masked out (pixels set to no-data); cloud_percentage recomputed.",
+        ]
+        if isinstance(obj, xr.Dataset):
+            msgs.append("Previous stats were removed because masking changes pixel validity.")
+        return masked, True, msgs
+
     def _apply_indices_feature(obj):
         """
         Calculate spectral indices via stac2cube.calculate_spectral_index() and
@@ -5487,6 +5826,7 @@ def datacube_editor():
     def _reset_feature_checkboxes_after_edit():
         # Uncheck feature toggles to prevent accidental re-application
         enable_cloud_filter_w.value = False
+        enable_mask_clouds_w.value = False
         enable_clip_w.value = False
         enable_update_w.value = False
 
@@ -5521,7 +5861,12 @@ def datacube_editor():
                     changed_any = changed_any or changed_cloud
                     messages.extend(cloud_msgs)
 
-                    # 3) Clip Raster
+                    # 3) Mask Clouds with Binary Masking File
+                    current_obj, changed_mask, mask_msgs = _apply_mask_clouds_feature(current_obj)
+                    changed_any = changed_any or changed_mask
+                    messages.extend(mask_msgs)
+
+                    # 4) Clip Raster
                     current_obj, changed_clip, clip_msgs = _apply_clip_feature(current_obj)
                     changed_any = changed_any or changed_clip
                     messages.extend(clip_msgs)
@@ -5711,6 +6056,7 @@ def datacube_editor():
     browse_export_btn.on_click(_on_browse_export_clicked)
     browse_gif_btn.on_click(_on_browse_gif_clicked)
     browse_clip_btn.on_click(_on_browse_clip_clicked)
+    browse_mask_file_btn.on_click(_on_browse_mask_file_clicked)
 
     load_cube_btn.on_click(_on_load_cube_clicked)
     reset_btn.on_click(_on_reset_clicked)
@@ -5838,6 +6184,39 @@ def datacube_editor():
     cloud_filter_acc = widgets.Accordion(children=[cloud_filter_feature_box], selected_index=None)
     cloud_filter_acc.set_title(0, "Filter by Cloud Coverage")
     cloud_filter_acc.layout = widgets.Layout(width="99%")
+
+    # Mask Clouds with Binary Masking File
+    mask_file_input_row = widgets.HBox(
+        [browse_mask_file_btn, mask_file_w],
+        layout=widgets.Layout(width="100%", gap="6px", align_items="center"),
+    )
+    mask_file_input_box = widgets.VBox(
+        [mask_file_input_row, mask_file_fc_box],
+        layout=widgets.Layout(width="100%", gap="4px"),
+    )
+    mask_clouds_controls = widgets.VBox(
+        [
+            enable_mask_clouds_w,
+            _stacked_field(mask_file_input_box, "Binary mask file (.nc)"),
+        ],
+        layout=widgets.Layout(width="100%", gap="6px"),
+    )
+    mask_clouds_feature_box = widgets.VBox(
+        [
+            widgets.HTML(
+                "<div style='font-size:12px; color:#666;'>"
+                "Mask the loaded cube's clouds out using a binary cloud-mask file "
+                "that was exported along (e.g. <code>test_mask_binary.nc</code>). "
+                "The mask must come from the same cube (same dates &amp; grid)."
+                "</div>"
+            ),
+            mask_clouds_controls,
+        ],
+        layout=widgets.Layout(width="100%", gap="8px"),
+    )
+    mask_clouds_acc = widgets.Accordion(children=[mask_clouds_feature_box], selected_index=None)
+    mask_clouds_acc.set_title(0, "Mask Clouds with Binary Masking File")
+    mask_clouds_acc.layout = widgets.Layout(width="99%")
 
     # Clip feature
     clip_input_row = widgets.HBox(
@@ -5992,6 +6371,7 @@ def datacube_editor():
             #widgets.HTML("<div style='font-size:12px; color:#666;'>- Do not forget to uncheck boxes after editing a data cube to prevent.</div>"),
             slice_acc,
             cloud_filter_acc,
+            mask_clouds_acc,
             clip_acc,
             indices_acc,
             stats_acc,
@@ -6148,6 +6528,8 @@ def datacube_editor():
             "slice_band": slice_band_w,
             "enable_cloud_filter": enable_cloud_filter_w,
             "cloud_max": cloud_max_w,
+            "enable_mask_clouds": enable_mask_clouds_w,
+            "mask_file": mask_file_w,
             "enable_clip": enable_clip_w,
             "clip_geom": clip_geom_w,
             "indices_select": indices_select_w,
@@ -6355,7 +6737,7 @@ def ard_cube_tools():
         "border-radius:6px; padding:10px 12px; margin:0 0 8px 0;'>"
         "<b>ℹ️ Note:</b> The 3 tools provided below are not chained. For each feature, load a "
         "separate data cube in NetCDF format with the loader below, then run a "
-        "one of the 3 tools"
+        "one of the 3 tools."
         "</div>"
     )
 

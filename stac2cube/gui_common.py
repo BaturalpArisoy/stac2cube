@@ -345,6 +345,25 @@ GUI_CSS = """
     overflow-x: clip;
 }
 
+/* Sub-panel: a lighter, warm off-white card used to visually box a related set
+   of fields (e.g. the Option 1 / Option 2 / Output shape blocks inside the
+   Polygon group). It sits on top of the olive group background (#eef0e3) and
+   reads as a separate raised panel thanks to the lighter fill, thin border and
+   a coloured left accent bar. Accent colour is set by a modifier class. */
+.stac2cube-subpanel {
+    background: #fcfbf5;
+    border: 1px solid #d7dbc4;
+    border-left-width: 4px;
+    border-radius: 8px;
+    padding: 8px 10px;
+    box-sizing: border-box;
+    min-width: 0;
+    overflow-x: clip;
+}
+.stac2cube-subpanel-blue  { border-left-color: #3b82f6; }
+.stac2cube-subpanel-green { border-left-color: #16a34a; }
+.stac2cube-subpanel-amber { border-left-color: #d97706; }
+
 /* Keep accordion panels and nested widget boxes from overflowing the card */
 .stac2cube-card .p-Accordion-child,
 .stac2cube-card .p-Accordion-child > .p-Widget,
