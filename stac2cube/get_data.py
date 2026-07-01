@@ -1,5 +1,5 @@
 from .vector_refiner import polygon_2_bbox
-from .cdse_auth import configure_cdse_environment
+from .cdse_auth import configure_cdse_environment, configure_anonymous_aws_environment
 
 import pandas as pd
 import geopandas as gpd
@@ -163,6 +163,16 @@ def get_stac(
     # that a previous source may have left behind.
     if source == "cdse":
         configure_cdse_environment()
+    elif source == "element84":
+        # element84 reads AWS-hosted public buckets. Reset the S3 env to unsigned
+        # AWS access so a CDSE query earlier in the SAME session (which points
+        # AWS_S3_ENDPOINT at eodata.dataspace.copernicus.eu) can't misdirect these
+        # reads and fail them all silently. L2A COGs (sentinel-cogs) are free; the
+        # L1C bucket (sentinel-s2-l1c) is requester-pays and gets its flag in
+        # _catalogue_search when the hrefs are rewritten.
+        configure_anonymous_aws_environment(
+            requester_pays=(mission == "sentinel_2_l1c")
+        )
 
     needs_pc_auth = mission in ("sentinel_1_rtc", "landsat_c2_l2") or (
         mission == "sentinel_2_l2a" and source == "planetary_computer"
@@ -456,15 +466,17 @@ def _catalogue_search(catalog, collection, bbox, daterange, query, mission,
     items = results.item_collection()
 
     # element84 stores L1C under the same S3 path as L2A with anonymous,
-    # requester-pays access -> rewrite hrefs and set the anonymous flags.
+    # requester-pays access -> rewrite hrefs and (re)assert a clean unsigned AWS
+    # env. The full reset (not just the two flags) is what clears any CDSE S3
+    # endpoint/keys a previous CDSE query left behind, which would otherwise
+    # misdirect these reads and fail every band silently.
     # CDSE L1C uses its own s3://eodata hrefs and *signed* access, so it must
     # NOT go through this path (its env is configured in get_stac instead).
     if mission == "sentinel_2_l1c" and source == "element84":
         for item in items:
             for asset in item.assets.values():
                 asset.href = asset.href.replace("sentinel-s2-l2a", "sentinel-s2-l1c")
-        os.environ["AWS_REQUEST_PAYER"] = "requester"
-        os.environ["AWS_NO_SIGN_REQUEST"] = "YES"
+        configure_anonymous_aws_environment(requester_pays=True)
 
     if len(items) < 1:
         if allow_empty:

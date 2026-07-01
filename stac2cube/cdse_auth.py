@@ -140,6 +140,46 @@ def read_cdse_credentials(keyfile=None):
     )
 
 
+# AWS/GDAL S3 environment variables that configure_cdse_environment() sets for
+# CDSE's private s3://eodata endpoint. They MUST be cleared before reading any
+# AWS-hosted public bucket (element84's sentinel-cogs L2A and the requester-pays
+# sentinel-s2-l1c L1C), otherwise GDAL routes those reads to CDSE's endpoint and
+# every band fails with InvalidAccessKeyId - which, under odc's fail_on_error=
+# False, is silently filled with nodata (an all-zero scene). For cloud masking
+# that means s2cloudless sees a blank cube and reports 0% cloud everywhere.
+_CDSE_S3_ENV_VARS = (
+    "AWS_S3_ENDPOINT",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_HTTPS",
+    "AWS_VIRTUAL_HOSTING",
+    "AWS_DEFAULT_REGION",
+    "AWS_REGION",
+)
+
+
+def configure_anonymous_aws_environment(requester_pays: bool = False):
+    """Reset the GDAL/AWS S3 environment for anonymous access to AWS-hosted public
+    Sentinel-2 buckets (element84).
+
+    Symmetric counterpart to :func:`configure_cdse_environment`: it clears the
+    CDSE-specific S3 settings a previous CDSE query may have left in ``os.environ``
+    (endpoint, keys, path-style hosting) so the reads go to real AWS S3, then sets
+    unsigned access. Idempotent; safe to call before every element84 search/load.
+
+    ``requester_pays`` -> also set ``AWS_REQUEST_PAYER=requester`` for the L1C
+    bucket (``s3://sentinel-s2-l1c``); the L2A COG bucket (``s3://sentinel-cogs``)
+    is free, so it stays unset there.
+    """
+    for var in _CDSE_S3_ENV_VARS:
+        os.environ.pop(var, None)
+    os.environ["AWS_NO_SIGN_REQUEST"] = "YES"
+    if requester_pays:
+        os.environ["AWS_REQUEST_PAYER"] = "requester"
+    else:
+        os.environ.pop("AWS_REQUEST_PAYER", None)
+
+
 def configure_cdse_environment(keyfile=None):
     """Read the CDSE keys and export the GDAL/AWS env vars used at compute time.
 
