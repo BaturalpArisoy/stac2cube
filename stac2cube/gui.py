@@ -22,6 +22,7 @@ from stac2cube import (
     export_stac,
     export_to_cogs,
     interactive_time_view,
+    interactive_cloud_overlay_view,
     save_timeseries_gif,
     calculate_statistics,
     calculate_spectral_index,
@@ -6735,7 +6736,7 @@ def ard_cube_tools():
         "<div style='font-size:13px; color:#1e3a8a; background:#eff6ff; "
         "border:1px solid #bfdbfe; border-left:4px solid #3b82f6; "
         "border-radius:6px; padding:10px 12px; margin:0 0 8px 0;'>"
-        "<b>ℹ️ Note:</b> The 3 tools provided below are not chained. For each feature, load a "
+        "<b>ℹ️</b> The 3 tools provided below are not chained. For each feature, load a "
         "separate data cube in NetCDF format with the loader below, then run a "
         "one of the 3 tools."
         "</div>"
@@ -7130,6 +7131,9 @@ def ard_cube_tools():
             b1_cloud_out_w.value = out_cloud
         out_cloud = _ensure_nc_suffix(out_cloud)
         b2_prob_in_w.value = out_cloud
+        # Also pre-fill the visualization step so the user can compare masks
+        # against RGB straight after building the cloud cube.
+        viz_cloud_path_w.value = out_cloud
 
         raw_thr = (b1_thresholds_w.value or "").strip()
         if raw_thr == "":
@@ -7233,7 +7237,7 @@ def ard_cube_tools():
     )
     b1_acc = widgets.Accordion(children=[b1_box], selected_index=None)
     b1_acc.set_title(0, "i) Build Cloud Mask Data Cube")
-    b1_acc.layout = widgets.Layout(width="100%")
+    b1_acc.layout = widgets.Layout(width="99%")
 
     # ii) (Optional) Generate Masks from Probability Map
     b2_prob_in_w = widgets.Text(value="", layout=widgets.Layout(width="100%"))
@@ -7404,7 +7408,7 @@ def ard_cube_tools():
     )
     b2_acc = widgets.Accordion(children=[b2_box], selected_index=None)
     b2_acc.set_title(0, "ii) (Optional) Generate Masks from Probability Map")
-    b2_acc.layout = widgets.Layout(width="100%")
+    b2_acc.layout = widgets.Layout(width="99%")
 
     
 
@@ -7692,9 +7696,139 @@ def ard_cube_tools():
 
     b3_acc = widgets.Accordion(children=[b3_box], selected_index=None)
     b3_acc.set_title(0, "iii) Mask out Data Cube (by single threshold value)")
-    b3_acc.layout = widgets.Layout(width="100%")
+    b3_acc.layout = widgets.Layout(width="99%")
 
 
+    # iv) Compare Masks vs RGB (Visualization)
+    # Lets the user overlay the cloud probability map and each binary threshold
+    # mask onto the true-color (RGB) scene, date by date, to decide which
+    # threshold best removes clouds without deleting good pixels. The main
+    # spectral cube loaded above supplies the RGB; the cloud cube is chosen here.
+    viz_cloud_path_w = widgets.Text(value="", layout=widgets.Layout(width="100%"))
+    browse_viz_cloud_btn = widgets.Button(icon="folder-open", description="", layout=widgets.Layout(width="36px"))
+    viz_cloud_fc_box = _attach_filechooser(
+        browse_viz_cloud_btn,
+        viz_cloud_path_w,
+        title="Select cloud probability/mask cube (NetCDF with Cloud_Stack)",
+        pattern=["*.nc", "*"],
+        select_dirs=False,
+    )
+    viz_cloud_row = widgets.HBox(
+        [browse_viz_cloud_btn, viz_cloud_path_w],
+        layout=widgets.Layout(width="100%", gap="6px", align_items="center"),
+    )
+    viz_cloud_box = widgets.VBox([viz_cloud_row, viz_cloud_fc_box], layout=widgets.Layout(width="100%", gap="4px"))
+
+    viz_btn = widgets.Button(
+        description="Visualize",
+        button_style="primary",
+        icon="image",
+        layout=widgets.Layout(width="160px"),
+    )
+    viz_out = widgets.Output(layout=widgets.Layout(width="99%", overflow="auto"))
+
+    def _on_visualize_masks_clicked(_):
+        with viz_out:
+            clear_output()
+
+        if state.get("loaded_obj") is None or not state.get("loaded_path"):
+            with viz_out:
+                print("❌ Load the main spectral data cube first (loader above).")
+            return
+
+        cloud_path = (viz_cloud_path_w.value or "").strip()
+        # Fall back to the loaded cube's default *_cloud.nc if it exists.
+        if not cloud_path and state.get("loaded_path"):
+            cand = _suggest_clouds_path_from_loaded()
+            if Path(cand).exists():
+                cloud_path = cand
+                viz_cloud_path_w.value = cloud_path
+        if not cloud_path:
+            with viz_out:
+                print("❌ Select a cloud cube NetCDF (with Cloud_Stack) to compare.")
+            return
+
+        p = Path(cloud_path)
+        if not p.exists():
+            with viz_out:
+                print(f"❌ File not found: {p.as_posix()}")
+            return
+
+        try:
+            with viz_out:
+                print("Loading cloud cube and preparing viewer...")
+
+            spectral = state["loaded_obj"]
+            if isinstance(spectral, xr.Dataset):
+                if "Spectral_Temporal_Stack" not in spectral.data_vars:
+                    raise ValueError("Loaded cube has no 'Spectral_Temporal_Stack'.")
+                spectral = spectral["Spectral_Temporal_Stack"]
+
+            spec_bands = [str(b).lower() for b in spectral["band"].values]
+            for need in ("red", "green", "blue"):
+                if need not in spec_bands:
+                    raise ValueError(
+                        f"Loaded cube is missing the '{need}' band; the RGB view needs red, green and blue."
+                    )
+
+            # Cloud cube is small; load it fully so no file handle lingers.
+            with xr.open_dataset(p) as ds:
+                if "Cloud_Stack" not in ds.data_vars:
+                    raise ValueError("Selected NetCDF has no 'Cloud_Stack'.")
+                cloud = ds["Cloud_Stack"].load()
+
+            if "band" not in cloud.dims:
+                raise ValueError("Cloud_Stack has no 'band' dimension.")
+
+            # Spatial grid must match (same AOI + resolution).
+            if (spectral.sizes.get("y"), spectral.sizes.get("x")) != (
+                cloud.sizes.get("y"),
+                cloud.sizes.get("x"),
+            ):
+                raise ValueError(
+                    "The spectral cube and the cloud cube have different y/x grids. "
+                    "They must cover the same area at the same resolution."
+                )
+
+            # Compare only on the dates both cubes share.
+            sp_times = pd.to_datetime(spectral["time"].values)
+            cl_times = pd.to_datetime(cloud["time"].values)
+            common = sp_times.intersection(cl_times)
+            if len(common) == 0:
+                raise ValueError("The spectral and cloud cubes share no common dates.")
+
+            spectral_c = spectral.sel(time=common.values)
+            cloud_c = cloud.sel(time=common.values)
+
+            with viz_out:
+                clear_output()
+                interactive_cloud_overlay_view(spectral_c, cloud_c, widget_type="dropdown")
+
+        except Exception as e:
+            with viz_out:
+                clear_output()
+                print(_friendly_error(e, "Cloud mask visualization"))
+
+    viz_btn.on_click(_on_visualize_masks_clicked)
+
+    viz_box = widgets.VBox(
+        [
+            widgets.HTML(
+                "<div style='font-size:12px; color:#666;'>"
+                "Compare the cloud <b>probability</b> map and each binary <b>threshold mask</b> against the "
+                "true-color (RGB) scene, date by date, to decide which threshold best removes clouds without "
+                "deleting good pixels."
+                "</div>"
+            ),
+            _stacked_field(viz_cloud_box, "Cloud probability/mask cube (NetCDF)"),
+            viz_btn,
+            viz_out,
+        ],
+        layout=widgets.Layout(width="100%", gap="8px"),
+    )
+    viz_acc = widgets.Accordion(children=[viz_box], selected_index=None)
+    viz_acc.set_title(0, "Compare Masks vs RGB (Visualization)")
+    viz_acc.layout = widgets.Layout(width="99%")
 
 
 
@@ -7706,10 +7840,11 @@ def ard_cube_tools():
     mask_b_box = widgets.VBox(
         [
             widgets.HTML("<div style='font-size:12px; color:#666;'>"
-                        "Manual workflow: build probability cube → (optional) generate binary masks → apply one threshold to mask the cube."
+                        "Manual workflow: build probability cube → (optional) generate binary masks → compare masks against RGB → apply one threshold to mask the cube."
                         "</div>"),
             b1_acc,
             b2_acc,
+            viz_acc,
             b3_acc,
         ],
         layout=widgets.Layout(width="100%", gap="10px"),

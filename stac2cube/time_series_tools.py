@@ -853,3 +853,226 @@ def interactive_time_view(
 
     display(widgets.VBox([mode_dd, time_w, out]))
     plot_current()
+
+
+# ==========================================================
+# CLOUD-MASK COMPARISON VIEWER (ARD manual workflow)
+# ==========================================================
+def _cloud_band_label(name: str):
+    """Friendly (label, value) pair for a Cloud_Stack band name."""
+    s = str(name)
+    if s.lower() == "cloud_prob":
+        return ("Cloud probability (%)", s)
+    m = re.search(r"(\d+)\s*$", s)
+    if s.lower().startswith("cloud_mask") and m:
+        return (f"Binary mask ≥ {m.group(1)}%", s)
+    return (s, s)
+
+
+def _is_probability_band(name: str) -> bool:
+    return "prob" in str(name).lower()
+
+
+def interactive_cloud_overlay_view(
+    spectral: xr.DataArray,
+    cloud: xr.DataArray,
+    widget_type: str = "dropdown",  # kept for API symmetry; date is always a dropdown
+    figsize=(13, 6),
+    default_opacity: float = 0.5,
+    mask_color=(1.0, 0.15, 0.15),
+    prob_cmap: str = "turbo",
+):
+    """
+    Side-by-side cloud-mask comparison viewer for the ARD manual workflow.
+
+    Left panel : clean RGB reference (unchanged true-color scene).
+    Right panel: the same RGB with the selected cloud band overlaid, so the user
+                 can judge which real pixels a probability/threshold removes and
+                 pick the threshold that fits their scene.
+
+    Controls:
+      - Date dropdown          (shared time axis of both cubes)
+      - Cloud band dropdown     (cloud_prob or any binary cloud_mask_*)
+      - Overlay opacity slider  (keeps the underlying RGB texture visible)
+
+    Overlay rules:
+      - cloud_prob   : translucent heat colormap; per-pixel alpha grows with
+                       probability so clear sky stays RGB and cloudy areas glow.
+                       A 0-100% colorbar is drawn.
+      - cloud_mask_* : binary; masked (==1) pixels get a translucent solid wash,
+                       clear pixels stay fully RGB. Title reports % masked.
+
+    Both cubes are expected to be pre-aligned on the same time and y/x grid
+    (the GUI handler validates and slices them to the common dates before call).
+    """
+    import matplotlib as mpl
+    from matplotlib.colors import Normalize
+    from matplotlib.cm import ScalarMappable
+
+    if "band" not in cloud.dims:
+        raise ValueError("Cloud cube has no 'band' dimension.")
+
+    # RGB rendering shares the exact pipeline used by interactive_time_view.
+    rgb_mode = _select_mode(spectral, "rgb")
+    extent, origin = _get_extent_and_origin(rgb_mode)
+    scaling = _get_scaling_policy(rgb_mode, "rgb")
+    time_values = pd.to_datetime(rgb_mode.time.values)
+
+    # Cloud band options: probability first, then masks by ascending threshold.
+    band_names = [str(b) for b in cloud["band"].values]
+
+    def _sort_key(n):
+        if _is_probability_band(n):
+            return (0, 0)
+        m = re.search(r"(\d+)\s*$", n)
+        return (1, int(m.group(1)) if m else 0)
+
+    band_names = sorted(band_names, key=_sort_key)
+    band_options = [_cloud_band_label(n) for n in band_names]
+
+    date_w = widgets.Dropdown(
+        options=[(t.strftime("%d-%m-%Y"), i) for i, t in enumerate(time_values)],
+        value=0,
+        description="Date:",
+        layout=widgets.Layout(width="260px"),
+    )
+    band_w = widgets.Dropdown(
+        options=band_options,
+        value=band_names[0],
+        description="Cloud band:",
+        style={"description_width": "initial"},
+        layout=widgets.Layout(width="320px", margin="0 0 0 48px"),
+    )
+    opacity_w = widgets.FloatSlider(
+        value=float(default_opacity),
+        min=0.1,
+        max=0.9,
+        step=0.05,
+        description="Overlay opacity:",
+        continuous_update=False,
+        readout_format=".2f",
+        style={"description_width": "initial"},
+        layout=widgets.Layout(width="360px"),
+    )
+    # Map layout control. "Vertical" stacks the two panels so each map spans the
+    # whole output cell (biggest option on a laptop screen); "Horizontal" keeps
+    # them side-by-side.
+    view_w = widgets.ToggleButtons(
+        options=[("Horizontal", "normal"), ("Vertical", "full")],
+        value="normal",
+        description="Map Layout:",
+        style={"description_width": "initial", "button_width": "110px"},
+    )
+
+    out = widgets.Output()
+
+    def _fmt_axis(ax):
+        ax.set_xlabel("Easting (10³ m)")
+        ax.set_ylabel("Northing (10⁴ m)")
+        ax.tick_params(axis="x", rotation=45)
+        ax.xaxis.set_major_locator(MaxNLocator(nbins=6, integer=True))
+        ax.yaxis.set_major_locator(MaxNLocator(nbins=6, integer=True))
+        ax.xaxis.set_major_formatter(FuncFormatter(lambda v, p: f"{v/1000:.0f}"))
+        ax.yaxis.set_major_formatter(FuncFormatter(lambda v, p: f"{v/10000:.0f}"))
+        ax.xaxis.offsetText.set_visible(False)
+        ax.yaxis.offsetText.set_visible(False)
+
+    def plot_current():
+        idx = int(date_w.value)
+        sel = band_w.value
+        alpha = float(opacity_w.value)
+        view = view_w.value
+        t = rgb_mode.time.values[idx]
+        date_str = time_values[idx].strftime("%d-%m-%Y")
+
+        with out:
+            clear_output(wait=True)
+
+            rgb_img = _render_frame_as_uint8(rgb_mode, "rgb", idx, scaling)
+
+            # "full" stacks the panels vertically so each map fills the output
+            # width; "normal" keeps them side-by-side at the base size.
+            if view == "full":
+                fig, (ax_l, ax_r) = plt.subplots(2, 1, figsize=(11, 15))
+            else:
+                fig, (ax_l, ax_r) = plt.subplots(1, 2, figsize=figsize)
+
+            if rgb_img is None:
+                for ax in (ax_l, ax_r):
+                    ax.text(0.5, 0.5, "Missing Data", fontsize=16,
+                            ha="center", va="center")
+                    ax.set_axis_off()
+                fig.suptitle(date_str, fontsize=14)
+                plt.tight_layout()
+                plt.show()
+                plt.close(fig)
+                return
+
+            # Left: clean RGB reference
+            ax_l.imshow(rgb_img, interpolation="nearest", extent=extent, origin=origin)
+            ax_l.set_title(f"{date_str}  —  RGB (reference)", fontsize=13)
+            _fmt_axis(ax_l)
+
+            # Right: RGB + cloud overlay
+            ax_r.imshow(rgb_img, interpolation="nearest", extent=extent, origin=origin)
+
+            carr = (
+                cloud.sel(time=t, band=sel)
+                .transpose("y", "x")
+                .values.astype("float32", copy=False)
+            )
+            finite = np.isfinite(carr)
+            label = dict(band_options).get(sel, sel)
+
+            if _is_probability_band(sel):
+                norm01 = np.clip(carr / 100.0, 0.0, 1.0)
+                cmap = mpl.colormaps[prob_cmap]
+                rgba = cmap(norm01)  # (H, W, 4) float
+                a = alpha * norm01
+                a[~finite] = 0.0
+                rgba[..., 3] = a
+                ax_r.imshow(rgba, interpolation="nearest", extent=extent, origin=origin)
+
+                sm = ScalarMappable(norm=Normalize(vmin=0, vmax=100), cmap=cmap)
+                sm.set_array([])
+                cbar = fig.colorbar(sm, ax=ax_r, fraction=0.046, pad=0.04)
+                cbar.set_label("Cloud probability (%)")
+                ax_r.set_title(f"{date_str}  —  {label} overlay", fontsize=13)
+            else:
+                masked = finite & (carr >= 0.5)
+                overlay = np.zeros(carr.shape + (4,), dtype="float32")
+                overlay[..., 0] = mask_color[0]
+                overlay[..., 1] = mask_color[1]
+                overlay[..., 2] = mask_color[2]
+                overlay[..., 3] = np.where(masked, alpha, 0.0)
+                ax_r.imshow(overlay, interpolation="nearest", extent=extent, origin=origin)
+
+                valid = int(finite.sum())
+                pct = (100.0 * masked.sum() / valid) if valid else 0.0
+                ax_r.set_title(
+                    f"{date_str}  —  {label}  ({pct:.1f}% masked)", fontsize=13
+                )
+
+            _fmt_axis(ax_r)
+            plt.tight_layout()
+            plt.show()
+            plt.close(fig)
+
+    def _on_change(_change):
+        plot_current()
+
+    date_w.observe(_on_change, names="value")
+    band_w.observe(_on_change, names="value")
+    opacity_w.observe(_on_change, names="value")
+    view_w.observe(_on_change, names="value")
+
+    controls = widgets.HBox(
+        [date_w, band_w],
+        layout=widgets.Layout(gap="32px"),
+    )
+    controls2 = widgets.HBox(
+        [opacity_w, view_w],
+        layout=widgets.Layout(gap="32px", align_items="center"),
+    )
+    display(widgets.VBox([controls, controls2, out]))
+    plot_current()
