@@ -725,6 +725,31 @@ def datacube_builder(missions_func=missions):
         disabled=True,
     )
 
+    # Result-panel date picker: tick/untick individual acquisition dates to keep
+    # or drop them. Like the Max cloud % filter, this is a reversible VIEW on the
+    # built cube - state["result"] is never mutated, and unticked dates stay in
+    # the list so a misclick is one click to undo. It composes with the cloud
+    # filter: a date survives only if it is ticked AND under the cloud threshold.
+    # Cloud % (when present) is shown per date. Populated + enabled after a
+    # single-cube build with a time dimension; hidden/greyed for multi-feature
+    # batches or cubes without a time axis. No pixels are read - times and
+    # cloud_percentage are metadata, so this stays fully lazy.
+    result_date_w = widgets.SelectMultiple(
+        options=[],
+        value=(),
+        description="",
+        rows=4,
+        layout=widgets.Layout(width="240px", height="88px"),
+        style={"description_width": "0px"},
+        disabled=True,
+    )
+    result_date_all_btn = widgets.Button(
+        description="All dates", layout=widgets.Layout(width="100px"), disabled=True
+    )
+    result_date_clear_btn = widgets.Button(
+        description="Clear dates", layout=widgets.Layout(width="110px"), disabled=True
+    )
+
     # The "now you can visualize / export" note lives BELOW the Max cloud box
     # (placed into result_box later), so it reads as the last step after the user
     # has optionally filtered. Filled in only when a ready cube is shown; cleared
@@ -733,8 +758,10 @@ def datacube_builder(missions_func=missions):
         "<div style='font-size:12px; color:#1e3a8a; background:#eff6ff; "
         "border:1px solid #bfdbfe; border-radius:6px; padding:6px 8px;'>"
         "ℹ️ Now you can <b>visualize</b> the data cube in the <b>Visualization</b> "
-        "section below or save it via <b>Export Options</b>. If available filter "
-        "by <b>max cloud %</b>."
+        "section below or save it via <b>Export Options</b>. You can also pick "
+        "specific <b>dates</b> and/or, if available, filter by <b>max cloud %</b>. "
+        "If stats were selected, they will be recalculated over the filtered "
+        "time series."
         "</div>"
     )
     result_viz_note_w = widgets.HTML(value="")
@@ -957,6 +984,11 @@ def datacube_builder(missions_func=missions):
     # (e.g. snapping back to 100 on a fresh build) don't trigger the filter
     # change handler and re-render mid-build.
     _cloud_filter_guard = {"busy": False}
+
+    # Same idea for the Result date picker: populating it (and its select-all)
+    # on a fresh build sets result_date_w.value programmatically, which must not
+    # fire the date-change re-render mid-build.
+    _date_filter_guard = {"busy": False}
 
     # -------------------------------------------------------------------------
     # File choosers (ipyfilechooser; optional)
@@ -1184,7 +1216,7 @@ def datacube_builder(missions_func=missions):
                 )
         else:
             info_rows.append(
-                _row("Dates", "- (time dimension collapsed by the aggregator)")
+                _row("Dates", "- (time dimension collapsed by Temporal Composite)")
             )
 
         # Two flexible columns (key facts | dates table) so the summary fills the
@@ -1618,9 +1650,9 @@ def datacube_builder(missions_func=missions):
                 and 0 <= idx < len(obj)
                 and isinstance(obj[idx], (xr.DataArray, xr.Dataset))
             ):
-                return _apply_cloud_threshold(obj[idx])
-            return _apply_cloud_threshold(cubes[0])
-        return _apply_cloud_threshold(obj)
+                return _effective_result(obj[idx])
+            return _effective_result(cubes[0])
+        return _effective_result(obj)
 
     # -------------------------------------------------------------------------
     # Result-panel cloud filter (drives table + visualization + export at once)
@@ -1689,15 +1721,186 @@ def datacube_builder(missions_func=missions):
         has_pct = _result_has_cloud_pct(state["result"])
         result_cloud_max_w.disabled = not (masking_on and has_pct)
 
+    # -------------------------------------------------------------------------
+    # Result-panel date picker (second reversible view; composes with the cloud
+    # filter). Both are pure time-axis selections on the built cube; the panel,
+    # visualization and export all read the combined view via _effective_result,
+    # so nothing is stored twice and state["result"] is never mutated.
+    # -------------------------------------------------------------------------
+    def _result_date_all_values():
+        """The value part (unique ISO timestamp string) of every option currently
+        in the date picker, in order."""
+        vals = []
+        for o in result_date_w.options:
+            vals.append(o[1] if isinstance(o, tuple) else o)
+        return vals
+
+    def _apply_date_selection(obj):
+        """Return a view of obj keeping only the acquisition dates ticked in the
+        Result date picker. Pure coord selection on the existing time axis - no
+        recompute, fully reversible by re-ticking. Passes obj through unchanged
+        when the picker is empty/disabled, when nothing is deselected, for
+        multi-feature lists, or for cubes without a time dim. Matching is on the
+        full ISO timestamp string, so it survives the cloud filter's isel and is
+        unambiguous even when two scenes share a calendar day."""
+        if obj is None:
+            return None
+        if isinstance(obj, list):
+            return obj
+        opts = _result_date_all_values()
+        if not opts:
+            return obj
+        sel = set(result_date_w.value)
+        if len(sel) >= len(opts):  # everything ticked -> nothing to drop
+            return obj
+        if "time" not in getattr(obj, "dims", {}):
+            return obj
+        tvals = obj["time"].values
+        keep = np.array([str(t) in sel for t in tvals])
+        if keep.all():
+            return obj
+        return obj.isel(time=np.flatnonzero(keep))
+
+    def _stats_tokens_used():
+        """The exact stats tokens passed to the most recent build (e.g.
+        ['mean_timeseries', 'max_timeseries']), or None if that build requested
+        no temporal statistics. Read from the stored build params, not the live
+        stats widget, so editing the widget after a build cannot desync it."""
+        p = state.get("last_call_params")
+        if not p:
+            return None
+        return p.get("stats") or None
+
+    def _refresh_stats_single(filtered_cube, tokens):
+        """Rebuild the temporal-statistics variables of ONE filtered cube from its
+        already-sliced Spectral_Temporal_Stack, so the composites describe the
+        dates that survived the date/cloud filter instead of the full build. Lazy:
+        calculate_statistics assembles dask reductions and nothing computes until
+        export writes. Left untouched when the cube carries no stats, has no
+        time-series stack, or had its time axis collapsed by a composite."""
+        if not isinstance(filtered_cube, xr.Dataset):
+            return filtered_cube
+        if "Spectral_Temporal_Stack" not in filtered_cube.data_vars:
+            return filtered_cube
+        stack = filtered_cube["Spectral_Temporal_Stack"]
+        if "time" not in stack.dims or stack.sizes.get("time", 0) == 0:
+            return filtered_cube
+        try:
+            base_attrs = dict(filtered_cube.attrs)
+            recomputed = calculate_statistics(stack, tokens)
+            recomputed.attrs.update(base_attrs)
+            return recomputed
+        except Exception:
+            # A stats recompute must never break the preview/export; fall back to
+            # the (stale-stats) filtered cube rather than raising.
+            return filtered_cube
+
+    def _refresh_stats(original, filtered):
+        """After the date/cloud views slice the time axis, the build-time stat
+        variables still describe the FULL series (Dataset.isel(time=...) leaves
+        time-less variables untouched). Recompute them from the filtered stack so
+        preview, visualization and export stay internally consistent. No-op when
+        the build requested no stats, or when nothing was actually filtered
+        (pass-through views return the original object unchanged)."""
+        tokens = _stats_tokens_used()
+        if not tokens:
+            return filtered
+        if isinstance(filtered, list):
+            orig = original if isinstance(original, list) else [original] * len(filtered)
+            return [
+                fc if fc is oc else _refresh_stats_single(fc, tokens)
+                for oc, fc in zip(orig, filtered)
+            ]
+        if filtered is original:
+            return filtered
+        return _refresh_stats_single(filtered, tokens)
+
+    def _effective_result(obj):
+        """The cube as the Result panel / viz / export should see it: the built
+        cube with BOTH reversible views applied - the Max cloud % threshold and
+        the date picker - AND its temporal statistics recomputed on the surviving
+        dates, so the composites never disagree with the visible time series.
+        state["result"] itself is never mutated."""
+        filtered = _apply_date_selection(_apply_cloud_threshold(obj))
+        return _refresh_stats(obj, filtered)
+
+    def _populate_result_dates(obj):
+        """Fill the Result date picker from a single cube's time axis (one entry
+        per acquisition date, with cloud % when available) and select all. Multi-
+        feature lists and time-less cubes hide + disable the picker. Guarded so
+        the programmatic select-all does not fire the change handler mid-build."""
+        def _disable():
+            _date_filter_guard["busy"] = True
+            try:
+                result_date_w.options = []
+                result_date_w.value = ()
+            finally:
+                _date_filter_guard["busy"] = False
+            result_date_w.disabled = True
+            result_date_all_btn.disabled = True
+            result_date_clear_btn.disabled = True
+            result_date_acc.selected_index = None
+            result_date_row.layout.display = "none"
+
+        # Only single cubes with a time dim are date-selectable in this version.
+        if obj is None or isinstance(obj, list):
+            _disable()
+            return
+        if "time" not in getattr(obj, "dims", {}):
+            _disable()
+            return
+        try:
+            tvals = obj["time"].values
+        except Exception:
+            _disable()
+            return
+        if len(tvals) == 0:
+            _disable()
+            return
+
+        # Cloud % per timestep is optional (only present on cloud-masked builds).
+        cp = _result_cloud_pct(obj)
+        cvals = None
+        if cp is not None:
+            try:
+                cvals = np.asarray(cp.values)
+                if cvals.shape[0] != len(tvals):
+                    cvals = None
+            except Exception:
+                cvals = None
+
+        options = []
+        for i, t in enumerate(tvals):
+            iso = str(t)  # unique per timestamp -> stable option value
+            date_str = iso.split("T")[0] if "T" in iso else iso
+            label = date_str
+            if cvals is not None:
+                try:
+                    label = f"{date_str}  ·  {float(cvals[i]):.0f}% cloud"
+                except Exception:
+                    label = date_str
+            options.append((label, iso))
+
+        _date_filter_guard["busy"] = True
+        try:
+            result_date_w.options = options
+            result_date_w.value = tuple(v for _, v in options)  # all selected
+        finally:
+            _date_filter_guard["busy"] = False
+        result_date_w.disabled = False
+        result_date_all_btn.disabled = False
+        result_date_clear_btn.disabled = False
+        result_date_row.layout.display = ""
+
     def _on_result_cloud_max_change(change=None):
         """Re-render the Result panel for the new Max cloud %. Visualization and
-        export read the same threshold (via _apply_cloud_threshold), so the
-        three stay in sync without storing a second copy of the cube."""
+        export read the same view (via _effective_result), so the three stay in
+        sync without storing a second copy of the cube."""
         if _cloud_filter_guard["busy"]:
             return
         if state["result"] is None:
             return
-        filtered = _apply_cloud_threshold(state["result"])
+        filtered = _effective_result(state["result"])
         # Threshold excludes every scene: the build succeeded, so don't show the
         # generic 'no data' failure - tell the user to raise the value instead.
         if _result_is_empty(filtered) and not _result_is_empty(state["result"]):
@@ -1715,8 +1918,43 @@ def datacube_builder(missions_func=missions):
         _show_result_summary(filtered)
         _update_gif_output_suggestion()
 
+    def _on_result_date_change(change=None):
+        """Re-render the Result panel when the ticked dates change. Viz + export
+        read the same selection via _effective_result, so all three stay in sync.
+        An empty selection (or the cloud filter having removed the rest) shows a
+        friendly hint rather than the generic 'no data' failure card."""
+        if _date_filter_guard["busy"]:
+            return
+        if state["result"] is None:
+            return
+        filtered = _effective_result(state["result"])
+        if _result_is_empty(filtered) and not _result_is_empty(state["result"]):
+            result_viz_note_w.value = ""
+            with result_out:
+                clear_output()
+                display(HTML(
+                    "<div style='font-size:13px; color:#92400e; background:#fffbeb; "
+                    "border:1px solid #fde68a; border-radius:6px; padding:10px 12px;'>"
+                    "No dates selected (or the cloud filter removed the rest). "
+                    "Tick at least one date - or press <b>All dates</b> - to bring "
+                    "the cube back."
+                    "</div>"
+                ))
+            return
+        _show_result_summary(filtered)
+        _update_gif_output_suggestion()
+
+    def _on_result_dates_all(_):
+        result_date_w.value = tuple(_result_date_all_values())
+
+    def _on_result_dates_clear(_):
+        result_date_w.value = ()
+
     result_cloud_max_w.observe(_on_result_cloud_max_change, names="value")
     cloud_masking_w.observe(_sync_cloud_filter_enabled, names="value")
+    result_date_w.observe(_on_result_date_change, names="value")
+    result_date_all_btn.on_click(_on_result_dates_all)
+    result_date_clear_btn.on_click(_on_result_dates_clear)
 
     def _refresh_viz_feature_options():
         """Show + populate the feature picker only when the result is a list of
@@ -1981,9 +2219,10 @@ def datacube_builder(missions_func=missions):
         if not export_target:
             raise ValueError("Please provide Output file / folder before exporting.")
 
-        # Export exactly what the Result panel shows: if the Max cloud % filter is
-        # active, write the filtered cube, not the full build.
-        obj = _apply_cloud_threshold(state["result"])
+        # Export exactly what the Result panel shows: if the Max cloud % filter
+        # and/or the date picker are active, write that filtered view, not the
+        # full build.
+        obj = _effective_result(state["result"])
 
         # Multi-feature batch result: a list of cubes -> one output per feature.
         if isinstance(obj, list):
@@ -2713,6 +2952,10 @@ def datacube_builder(missions_func=missions):
                     _cloud_filter_guard["busy"] = False
                 _sync_cloud_filter_enabled()
 
+                # Fresh build: repopulate the date picker (all dates ticked) for a
+                # single-cube result; hidden/disabled for lists or time-less cubes.
+                _populate_result_dates(state["result"])
+
                 # For a multi-feature batch, some features may have failed (kept in
                 # the list as markers). Count real cubes so messages don't claim a
                 # failed feature was produced/exported.
@@ -2769,7 +3012,7 @@ def datacube_builder(missions_func=missions):
                     )
 
             # Show preview in Result panel (not in Status)
-            _show_result_summary(_apply_cloud_threshold(state["result"]))
+            _show_result_summary(_effective_result(state["result"]))
 
             # Auto-open Result accordion after generation
             try:
@@ -2787,6 +3030,7 @@ def datacube_builder(missions_func=missions):
                 export_result_btn.disabled = True
                 _set_visualization_enabled(False)
                 result_cloud_max_w.disabled = True
+                _populate_result_dates(None)
             except Exception:
                 pass
             _show_result_summary(None)
@@ -3853,8 +4097,37 @@ def datacube_builder(missions_func=missions):
             width="100%", justify_content="flex-end", padding="0 6px 2px 0"
         ),
     )
+
+    # Per-date picker: the fine-grained companion to the Max cloud % filter. Its
+    # accordion is hidden until a single-cube build populates it (see
+    # _populate_result_dates); ticking dates re-renders the table, visualization
+    # and export via _effective_result.
+    result_date_box = widgets.VBox(
+        [
+            result_date_w,
+            widgets.HBox(
+                [result_date_all_btn, result_date_clear_btn],
+                layout=widgets.Layout(gap="6px"),
+            ),
+        ],
+        layout=widgets.Layout(width="100%", gap="4px"),
+    )
+    result_date_acc = widgets.Accordion(children=[result_date_box], selected_index=None)
+    result_date_acc.set_title(0, "Date Picker")
+    result_date_acc.layout = widgets.Layout(width="45%")
+
+    # Keep the Date Picker on the right half of the panel, right-aligned so it
+    # lines up under the Max cloud % box above it. The row is hidden/shown as a
+    # whole (see _populate_result_dates) so no stray gap is left when disabled.
+    result_date_row = widgets.HBox(
+        [result_date_acc],
+        layout=widgets.Layout(
+            width="100%", justify_content="flex-end", display="none"
+        ),
+    )
+
     result_box = widgets.VBox(
-        [result_out, result_cloud_filter_row, result_viz_note_w],
+        [result_out, result_cloud_filter_row, result_date_row, result_viz_note_w],
         layout=widgets.Layout(width="99%", gap="6px"),
     )
     result_acc = widgets.Accordion(children=[result_box], selected_index=None)
