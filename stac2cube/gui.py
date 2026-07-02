@@ -185,28 +185,29 @@ PARAM_HELP_HTML = {
     """,
     "stats": """
     <b>stats</b><br>
-    If empty/None: no stats cubes.<br>
-    Creates additional data variables with requested statistics.<br><br>
-    Examples:
+    Examples (for a date range of 2020-01-01 to 2021-12-31):
     <ul style="margin:4px 0 0 18px; padding:0;">
-        <li><code>mean_timeseries</code> -> mean of all time steps</li>
-        <li><code>mean_monthly</code> -> mean of each month</li>
-        <li><code>mean_annual</code> -> mean of each year</li>
+        <li><code>mean_timeseries</code> -> one image: the mean of every scene across 2020-2021</li>
+        <li><code>mean_monthly</code> -> one image per month present: mean of Jan 2020, Feb 2020, ... Dec 2021</li>
+        <li><code>mean_annual</code> -> one image per year: mean of 2020, and mean of 2021</li>
     </ul>
     """,
     "aggregator": """
     <b>Temporal Composite</b><br>
-    Generates a single aggregated scene along time for each selected band/index.<br>
-    Typically <code>mean</code> or <code>median</code>.<br><br>
-    If <b>None</b>: no temporal composite.<br>
-    Setting a temporal composite disables <code>stats</code>.
+    Collapses the currently displayed dates into a single scene (<code>mean</code>
+    or <code>median</code>) per band/index.<br><br>
+    It is applied to the <b>filtered</b> Result, so filter by date / max cloud %
+    first, then compose - the composite uses only the dates you kept.<br><br>
+    If <b>None</b>: no temporal composite (the full time series is kept).<br>
+    Setting a temporal composite disables <code>stats</code>.<br><br>
+    <b>Note:</b> Copy JSON still records this as <code>aggregator</code>, so a
+    headless / SLURM run (where you cannot filter interactively) collapses the
+    time series at build time.
     """,
     "output": """
     <b>Output</b><br>
-    <b>Quick Result, no Export</b> → returns lazy array, select this to check the data cube before exporting<br>
     <b>NetCDF + Output file set</b> → generates single file multispectral + multidate data cube<br>
-    <b>COGs + Output directory set</b> → generates multispectral GeoTiffs per each selected date<br><br>
-    <b>Tip:</b> You can generate lazily first, inspect the result, then switch export mode and export later.
+    <b>COGs + Output directory set</b> → generates multispectral GeoTiffs per each selected date
     """,
     "fps": """
     <b>FPS (frames per second)</b><br>
@@ -470,7 +471,7 @@ def datacube_builder(missions_func=missions):
     )
     advanced_dates_w = widgets.Checkbox(
         value=False,
-        description="Use a seasonal date range",
+        description="Use a seasonal date range (repeating across years)",
         indent=False,
     )
 
@@ -829,11 +830,10 @@ def datacube_builder(missions_func=missions):
     # -------------------------------------------------------------------------
     export_mode_w = widgets.Dropdown(
         options=[
-            ("Quick Result, no Export (Lazy Array)", "lazy"),
-            ("NetCDF", "netcdf"),
+            ("NetCDF (required for Analysis Ready Data Cube Tools)", "netcdf"),
             ("Cloud Optimized Geotiffs (select folder)", "cogs"),
         ],
-        value="lazy",
+        value="netcdf",
         description="Export mode:",
         layout=widgets.Layout(width="100%"),
         style={"description_width": "120px"},
@@ -842,8 +842,8 @@ def datacube_builder(missions_func=missions):
     export_target_w = widgets.Text(
         value="",
         description="",
-        placeholder="Disabled (Quick Result, no Export selected)",
-        disabled=True,
+        placeholder="",
+        disabled=False,
         layout=widgets.Layout(width="100%"),
         style={"description_width": "0px"},
     )
@@ -898,18 +898,20 @@ def datacube_builder(missions_func=missions):
     ))
 
     generate_btn = widgets.Button(
-        description="Build data cube",
+        description="Build Data Cube Preview",
         button_style="success",
         icon="play",
-        layout=widgets.Layout(width="190px"),
+        layout=widgets.Layout(width="220px"),
     )
     export_result_btn = widgets.Button(
-        description="Export current result",
-        button_style="danger",
-        icon="save",
-        layout=widgets.Layout(width="190px"),
+        description="Export Current Result",
+        icon="download",
+        layout=widgets.Layout(width="220px"),
         disabled=True,
     )
+    # Warm, energetic orange - a confident "go" call-to-action that stands out
+    # from the green Build button without the alarm of the old red (danger).
+    export_result_btn.style.button_color = "#f97316"
     copy_json_btn = widgets.Button(
         description="Copy JSON",
         icon="copy",
@@ -1667,7 +1669,12 @@ def datacube_builder(missions_func=missions):
 
     def _active_result_cube():
         """The cube the viz tools act on: for a multi-feature list, the one chosen
-        in the feature dropdown; for a single cube, that cube; otherwise None."""
+        in the feature dropdown; for a single cube, that cube; otherwise None.
+
+        Visualization keeps the filtered TIME SERIES (composite=False): the
+        interactive viewer scrubs dates and the GIF animates them, neither of
+        which works once a Temporal Composite has collapsed the time axis. The
+        composite is the export product, shown in the Result panel instead."""
         obj = state["result"]
         if obj is None:
             return None
@@ -1681,9 +1688,9 @@ def datacube_builder(missions_func=missions):
                 and 0 <= idx < len(obj)
                 and isinstance(obj[idx], (xr.DataArray, xr.Dataset))
             ):
-                return _effective_result(obj[idx])
-            return _effective_result(cubes[0])
-        return _effective_result(obj)
+                return _effective_result(obj[idx], composite=False)
+            return _effective_result(cubes[0], composite=False)
+        return _effective_result(obj, composite=False)
 
     # -------------------------------------------------------------------------
     # Result-panel cloud filter (drives table + visualization + export at once)
@@ -1846,14 +1853,45 @@ def datacube_builder(missions_func=missions):
             return filtered
         return _refresh_stats_single(filtered, tokens)
 
-    def _effective_result(obj):
-        """The cube as the Result panel / viz / export should see it: the built
-        cube with BOTH reversible views applied - the Max cloud % threshold and
-        the date picker - AND its temporal statistics recomputed on the surviving
-        dates, so the composites never disagree with the visible time series.
-        state["result"] itself is never mutated."""
+    def _apply_temporal_composite(obj):
+        """Collapse the time axis into a single mean/median scene, per the
+        Temporal Composite selector. Applied AFTER the date/cloud filters, so the
+        composite describes exactly the dates the user kept in the Result panel
+        (build -> filter -> composite), unlike get_stac_layers(aggregator=...)
+        which collapses at build time and leaves nothing to filter.
+
+        No-op when no composite is selected, when there is no time axis, or for
+        non-cube entries (failed features in a batch list). Lazy: the reduction is
+        a dask graph, nothing computes until export/preview. state["result"] is
+        never mutated - a reduced copy is returned."""
+        agg = aggregator_w.value
+        if not agg or obj is None:
+            return obj
+        if isinstance(obj, list):
+            return [_apply_temporal_composite(o) for o in obj]
+        if "time" not in getattr(obj, "dims", ()):
+            return obj
+        if agg == "mean":
+            return obj.mean(dim="time", skipna=True, keep_attrs=True)
+        if agg == "median":
+            return obj.median(dim="time", skipna=True, keep_attrs=True)
+        return obj
+
+    def _effective_result(obj, composite=True):
+        """The cube as the Result panel / export should see it: the built cube with
+        BOTH reversible views applied - the Max cloud % threshold and the date
+        picker - its temporal statistics recomputed on the surviving dates, and
+        (when composite=True) the Temporal Composite collapsed over those dates.
+        state["result"] itself is never mutated.
+
+        composite=False returns the filtered time series without collapsing it;
+        visualization (interactive viewer + GIF) uses that, since a single
+        composite scene has no time axis to scrub or animate."""
         filtered = _apply_date_selection(_apply_cloud_threshold(obj))
-        return _refresh_stats(obj, filtered)
+        refreshed = _refresh_stats(obj, filtered)
+        if composite:
+            return _apply_temporal_composite(refreshed)
+        return refreshed
 
     def _populate_result_dates(obj):
         """Fill the Result date picker from a single cube's time axis (one entry
@@ -1931,7 +1969,10 @@ def datacube_builder(missions_func=missions):
             return
         if state["result"] is None:
             return
-        filtered = _effective_result(state["result"])
+        # Emptiness is checked on the filtered TIME SERIES (composite=False): a
+        # composite of zero dates would drop the time axis and read as a valid
+        # (all-NaN) scene, hiding the "raise the threshold" hint.
+        filtered = _effective_result(state["result"], composite=False)
         # Threshold excludes every scene: the build succeeded, so don't show the
         # generic 'no data' failure - tell the user to raise the value instead.
         if _result_is_empty(filtered) and not _result_is_empty(state["result"]):
@@ -1946,7 +1987,7 @@ def datacube_builder(missions_func=missions):
                     "</div>"
                 ))
             return
-        _show_result_summary(filtered)
+        _show_result_summary(_apply_temporal_composite(filtered))
         _update_gif_output_suggestion()
 
     def _on_result_date_change(change=None):
@@ -1958,7 +1999,9 @@ def datacube_builder(missions_func=missions):
             return
         if state["result"] is None:
             return
-        filtered = _effective_result(state["result"])
+        # See _on_result_cloud_max_change: check emptiness on the time series, not
+        # the composite (which would drop the time axis and mask an empty view).
+        filtered = _effective_result(state["result"], composite=False)
         if _result_is_empty(filtered) and not _result_is_empty(state["result"]):
             result_viz_note_w.value = ""
             with result_out:
@@ -1972,7 +2015,7 @@ def datacube_builder(missions_func=missions):
                     "</div>"
                 ))
             return
-        _show_result_summary(filtered)
+        _show_result_summary(_apply_temporal_composite(filtered))
         _update_gif_output_suggestion()
 
     def _on_result_dates_all(_):
@@ -2085,16 +2128,15 @@ def datacube_builder(missions_func=missions):
         cloud_masking = cloud_masking_w.value
         # Keep clouds only applies when cloud masking is on (needs the SCL layer).
         keep_clouds = (cloud_masking is True) and (keep_clouds_w.value == "keep")
-        aggregator = aggregator_w.value
         source = source_w.value  # None for non-S2 missions
 
         export_mode = export_mode_w.value
         export_target = (export_target_w.value or "").strip() or None
 
-        # Direct export only for NetCDF mode during generation
-        output_for_get_stac = (
-            export_target if (export_mode == "netcdf" and export_target) else None
-        )
+        # "Build Data Cube Preview" always produces a lazy in-memory preview and
+        # writes nothing to disk; the actual file is written only when the user
+        # clicks "Export Current Result". So the build never passes an output path.
+        output_for_get_stac = None
 
         # The GUI never writes the mask *during* the build. Instead it asks
         # get_stac_layers to hand back the mask in memory (return_cloud_mask) and
@@ -2116,7 +2158,13 @@ def datacube_builder(missions_func=missions):
             "return_cloud_mask": return_cloud_mask,
             "indices": indices,
             "output": output_for_get_stac,
-            "aggregator": aggregator,
+            # Temporal Composite is intentionally NOT sent to the build. The GUI
+            # builds the full time series so the user can filter by date/cloud
+            # first, then applies the composite client-side over the filtered
+            # result (see _apply_temporal_composite / _effective_result). Copy JSON
+            # still writes aggregator for headless/SLURM runs where interactive
+            # filtering isn't available.
+            "aggregator": None,
             "stats": stats,
             "source": source,
             "q": True,  # hidden in UI, keep output cleaner while progress bars still show where applicable
@@ -2250,9 +2298,20 @@ def datacube_builder(missions_func=missions):
         if not export_target:
             raise ValueError("Please provide Output file / folder before exporting.")
 
+        # Guard against exporting a fully-filtered-out selection: with a Temporal
+        # Composite active this would silently write an all-NaN scene (no time
+        # axis left to flag as empty), so check the pre-composite series first.
+        if _result_is_empty(_effective_result(state["result"], composite=False)) \
+                and not _result_is_empty(state["result"]):
+            raise ValueError(
+                "The current date / max cloud % selection keeps no scenes. "
+                "Relax the filters in the Result panel before exporting."
+            )
+
         # Export exactly what the Result panel shows: if the Max cloud % filter
         # and/or the date picker are active, write that filtered view, not the
-        # full build.
+        # full build. When a Temporal Composite is set, this is the collapsed
+        # single scene (composite defaults to True in _effective_result).
         obj = _effective_result(state["result"])
 
         # Multi-feature batch result: a list of cubes -> one output per feature.
@@ -2685,6 +2744,12 @@ def datacube_builder(missions_func=missions):
 
         stats_disabled = agg_selected or (not stats_supported)
 
+        # Composite replaces stats: clear any leftover selection so the next build
+        # doesn't compute stats behind a disabled widget (the build now always
+        # keeps the time series, so it no longer silently ignores stats itself).
+        if agg_selected and len(stats_w.value) > 0:
+            stats_w.value = ()
+
         stats_w.disabled = stats_disabled
         stats_all_btn.disabled = stats_disabled
         stats_none_btn.disabled = stats_disabled
@@ -2999,42 +3064,11 @@ def datacube_builder(missions_func=missions):
                 else:
                     n_ok, n_fail = 1, 0
 
-                # Auto export only if COG mode + target (NetCDF direct export happens in get_stac_layers)
-                if export_mode == "cogs" and export_target:
-                    print("Generation finished. Exporting current result to COGs...")
-                    info = _export_current_result(export_mode, export_target)
-                    state["last_export_info"] = info
-                    print(
-                        f"✅ Data cube generation + COG export finished: {info['target']}"
-                    )
-
-                elif export_mode == "netcdf" and export_target:
-                    state["last_export_info"] = {
-                        "mode": "netcdf",
-                        "target": export_target,
-                        "via": "get_stac_layers",
-                    }
-                    # The status was just cleared, so restate the export path here
-                    # (export_stac's own print is wiped by clear_output above).
-                    if isinstance(result, list):
-                        _stem, _ext = os.path.splitext(export_target)
-                        print(
-                            f"✅ Generation finished - exported {n_ok} cube(s) as "
-                            f"{_stem}_<feature>{_ext}"
-                        )
-                    else:
-                        print(f"✅ Data cube generation finished. Exported to: {export_target}")
-
-                    # The cube was written during the build; write the held binary
-                    # mask alongside it now.
-                    _mask_written = _write_held_cloud_mask()
-                    if _mask_written:
-                        print(f"✅ Binary cloud mask exported: {_mask_written}")
-
-                else:
-                    print("✅ Data cube generation finished. Result stored in memory.")
-                    #print("")
-                    print("ℹ️ Inspect it, then change Export mode if you want to export.")
+                # Build always yields a lazy in-memory preview; nothing is written
+                # here. The user inspects the result, then clicks
+                # "Export Current Result" to write the NetCDF / COGs.
+                print("✅ Data cube preview ready. Result stored in memory.")
+                print("ℹ️ Inspect it, then click 'Export Current Result' to save it.")
 
                 if n_fail:
                     print(
@@ -3068,11 +3102,6 @@ def datacube_builder(missions_func=missions):
             _show_status(_friendly_error(e, "Building"))
 
     def _on_export_result_clicked(_):
-        # Quick Result (lazy) can never be exported - skip the work and just
-        # remind the user instead of attempting and failing.
-        if export_mode_w.value == "lazy":
-            _show_status(_EXPORT_MODE_REMINDER)
-            return
         try:
             export_mode = export_mode_w.value
             export_target = (
@@ -3123,7 +3152,15 @@ def datacube_builder(missions_func=missions):
     viz_make_gif_btn.on_click(_on_viz_make_gif_clicked)
 
     mission_dd.observe(_update_from_mission, names="value")
-    aggregator_w.observe(_apply_aggregator_stats_logic, names="value")
+
+    def _on_aggregator_change(*_):
+        # Composite disables stats, then re-render the Result panel so the user
+        # immediately sees the collapsed (or restored time-series) view. The
+        # re-render no-ops when no cube has been built yet.
+        _apply_aggregator_stats_logic()
+        _on_result_cloud_max_change()
+
+    aggregator_w.observe(_on_aggregator_change, names="value")
     export_mode_w.observe(lambda change: _apply_export_mode_defaults(), names="value")
     daterange_mode_w.observe(
         lambda change: _update_daterange_placeholder(), names="value"
@@ -3153,8 +3190,26 @@ def datacube_builder(missions_func=missions):
     )
 
     subtitle = widgets.HTML(
-        "<div style='font-size:13px; color:#6b7280; margin:0 0 4px 0;'>"
-        "Basic Parameters -> Advanced Parameters -> Data Source -> Build data cube -> inspect the result -> Export Options -> Export current result."
+        "<div style='display:flex; flex-wrap:wrap; gap:10px; margin:14px 0 8px 0;'>"
+        # Step 1 - blue "set up"
+        "<div style='flex:1 1 200px; background:#f8fafc; border:1px solid #e5e7eb; "
+        "border-left:4px solid #3b82f6; border-radius:8px; padding:8px 10px;'>"
+        "<div style='font-weight:700; color:#1e3a8a; font-size:13px;'>1 &nbsp; Set up</div>"
+        "<div style='font-size:12px; color:#475569; margin-top:2px;'>Fill <b>Basic</b> + "
+        "<b>Advanced Parameters</b> and pick a <b>Data Source</b>.</div></div>"
+        # Step 2 - green "build", matches the Build button
+        "<div style='flex:1 1 200px; background:#f0fdf4; border:1px solid #dcfce7; "
+        "border-left:4px solid #16a34a; border-radius:8px; padding:8px 10px;'>"
+        "<div style='font-weight:700; color:#166534; font-size:13px;'>2 &nbsp; Build &amp; inspect</div>"
+        "<div style='font-size:12px; color:#475569; margin-top:2px;'>Click "
+        "<b>Build Data Cube Preview</b>, then check the <b>Result</b>. Filter by "
+        "cloud percentage or date if necessary.</div></div>"
+        # Step 3 - orange "export", matches the Export button
+        "<div style='flex:1 1 200px; background:#fff7ed; border:1px solid #fed7aa; "
+        "border-left:4px solid #f97316; border-radius:8px; padding:8px 10px;'>"
+        "<div style='font-weight:700; color:#9a3412; font-size:13px;'>3 &nbsp; Export</div>"
+        "<div style='font-size:12px; color:#475569; margin-top:2px;'>Choose a format in "
+        "<b>Export Options</b>, then click <b>Export Current Result</b>.</div></div>"
         "</div>"
     )
 
@@ -3212,16 +3267,58 @@ def datacube_builder(missions_func=missions):
         open=False,
     )
 
+    # Stats help toggle built manually (not via field_group's help_html) so the
+    # "Stats Explanation ?" row sits AFTER the blue info box, not above it.
+    _stats_help_btn = _help_button()
+    _stats_help_box = widgets.HTML(
+        value=PARAM_HELP_HTML.get("stats", ""),
+        layout=widgets.Layout(
+            display="none",
+            border="1px solid #dbeafe",
+            padding="8px",
+            border_radius="8px",
+            margin="2px 0 2px 0",
+            width="100%",
+        ),
+    )
+
+    def _toggle_stats_help(_):
+        _stats_help_box.layout.display = (
+            "" if _stats_help_box.layout.display == "none" else "none"
+        )
+
+    _stats_help_btn.on_click(_toggle_stats_help)
+
+    _stats_explain_row = widgets.HBox(
+        [
+            widgets.HTML(
+                "<div style='font-weight:500; font-size:12px; color:#374151;'>"
+                "Stats Explanation</div>"
+            ),
+            _stats_help_btn,
+        ],
+        layout=widgets.Layout(align_items="center", gap="6px"),
+    )
+
     stats_box = _field_group(
         "Stats",
         [
+            widgets.HTML(
+                "<div style='font-size:12px; color:#1e3a8a; background:#eff6ff; "
+                "border:1px solid #bfdbfe; border-radius:6px; padding:8px 10px; "
+                "margin:0 0 6px 0;'>"
+                "Stats are additionally generated along the original time series. "
+                "If you want to export a single Temporal Composite instead of the "
+                "time series, you can set it in <b>Export Options</b>."
+                "</div>"
+            ),
+            _stats_explain_row,
+            _stats_help_box,
             _boxed(stats_w),
             widgets.HBox(
                 [stats_all_btn, stats_none_btn], layout=widgets.Layout(gap="6px")
             ),
         ],
-        subtitle="Keep the time series and add summary layers over all dates, or grouped by month/year. Disabled while a Temporal Composite is set.",
-        help_html=PARAM_HELP_HTML.get("stats", ""),
         collapsible=True,
         open=False,
     )
@@ -3734,12 +3831,18 @@ def datacube_builder(missions_func=missions):
         [
             cloud_masking_group,
             stats_box,
-            _field_group("Temporal Composite", [_boxed(aggregator_w)],
-                         subtitle="Collapse the whole time series into one image (mean or median). Individual dates are lost and this replaces the time series.",
-                         help_html=PARAM_HELP_HTML.get("aggregator", "")),
             _collapse_row(advanced_collapse_btn),
         ],
         layout=widgets.Layout(width="100%", gap="6px"),
+    )
+
+    # Temporal Composite now lives just above Export mode (not in Advanced
+    # Parameters), because it acts on the filtered Result, not on the build.
+    temporal_composite_group = _field_group(
+        "Temporal Composite",
+        [_boxed(aggregator_w)],
+        subtitle="Collapse the currently displayed dates into a single mean or median scene. Keep None to maintain the full time series.",
+        help_html=PARAM_HELP_HTML.get("aggregator", ""),
     )
 
     # Slim guidance line shown under the selector: the right source is study-area
@@ -4039,11 +4142,21 @@ def datacube_builder(missions_func=missions):
         layout=widgets.Layout(width="100%", gap="6px"),
     )
 
+    # Export mode + Output share one olive group, matching the Temporal Composite
+    # group above it.
+    export_mode_group = _field_group(
+        "Export mode & Output",
+        [
+            _stacked_field(export_mode_w, "Export mode"),
+            _with_help_left(output_input_box, "output", label_text="Output"),
+        ],
+    )
+
     export_box = widgets.VBox(
         [
             #widgets.HTML("<b>Export Options</b>"),
-            _stacked_field(export_mode_w, "Export mode"),
-            _with_help_left(output_input_box, "output", label_text="Output"),
+            temporal_composite_group,
+            export_mode_group,
         ],
         layout=widgets.Layout(width="100%", gap="6px"),
     )
@@ -4165,9 +4278,18 @@ def datacube_builder(missions_func=missions):
     result_acc.set_title(0, "Result")
     result_acc.layout = widgets.Layout(width="99%")
 
+    # Top action row: build the preview + copy JSON. Exporting is a separate,
+    # deliberate step that lives with the Export Options section further down.
     action_row = widgets.HBox(
-        [generate_btn, export_result_btn, copy_json_btn],
+        [generate_btn, copy_json_btn],
         layout=widgets.Layout(gap="8px", flex_flow="row wrap"),
+    )
+
+    # The Export Current Result button sits right under the Export Options
+    # accordion so the "choose format -> export" flow reads top to bottom.
+    export_action_row = widgets.HBox(
+        [export_result_btn],
+        layout=widgets.Layout(gap="8px", flex_flow="row wrap", margin="6px 0 0 0"),
     )
 
 
@@ -4176,7 +4298,7 @@ def datacube_builder(missions_func=missions):
     spacer_between_cards = widgets.HTML("<div style='height:12px;'></div>")
 
     builder_panel = widgets.VBox(
-        [basic_acc, advanced_acc, source_acc, export_acc, spacer_after_export, action_row],
+        [basic_acc, advanced_acc, source_acc, spacer_after_export, action_row],
         layout=widgets.Layout(width="100%", gap="8px"),
     )
     builder_panel.add_class("stac2cube-card")
@@ -4186,6 +4308,13 @@ def datacube_builder(missions_func=missions):
 
     viz_card = widgets.VBox([viz_acc], layout=widgets.Layout(width="100%"))
     viz_card.add_class("stac2cube-card")
+
+    # Export Options now lives below Visualization as its own card, with the
+    # Export Current Result button attached directly beneath it.
+    export_card = widgets.VBox(
+        [export_acc, export_action_row], layout=widgets.Layout(width="100%")
+    )
+    export_card.add_class("stac2cube-card")
 
     status_card = widgets.VBox(
         [widgets.HTML("<b>Status</b>"), status_out],
@@ -4206,6 +4335,9 @@ def datacube_builder(missions_func=missions):
 
             spacer_between_cards,
             viz_card,          # ✅ Visualization moved above Status
+
+            spacer_between_cards,
+            export_card,       # ✅ Export Options + Export Current Result
 
             spacer_between_cards,
             status_card,
