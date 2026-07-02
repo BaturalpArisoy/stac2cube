@@ -105,12 +105,22 @@ def _raster_layer_names(ds):
     ]
 
 
+def _layer_display_name(name):
+    """User-facing label for a layer variable. 'Spectral_Temporal_Stack' is the
+    internal name of the full time series, so show it as 'Time Series'; other
+    layers (temporal composites like median_timeseries) keep their own name."""
+    return "Time Series" if str(name) == "Spectral_Temporal_Stack" else str(name)
+
+
 def _layer_dropdown_options(ds, names):
-    """(label, value) dropdown options showing each layer's dims and sizes."""
+    """(label, value) dropdown options showing each layer's dims and sizes.
+
+    The value stays the real variable name; only the label is friendly.
+    """
     options = []
     for name in names:
         dims = ", ".join(f"{d}: {ds[name].sizes[d]}" for d in ds[name].dims)
-        options.append((f"{name}  ({dims})", name))
+        options.append((f"{_layer_display_name(name)}  ({dims})", name))
     return options
 
 
@@ -6067,7 +6077,7 @@ def datacube_editor():
             export_target_w.value = _auto_netcdf_export_suggestion()
 
         print(f"✅ Loaded cube: {path}")
-        print(f"   Working layer: {var_name}")
+        print(f"   Working layer: {_layer_display_name(var_name)}")
         _print_working_note()
 
         try:
@@ -6172,7 +6182,7 @@ def datacube_editor():
                             f"{d}: {ds_loaded[name].sizes[d]}"
                             for d in ds_loaded[name].dims
                         )
-                        print(f"   - {name}  ({dims})")
+                        print(f"   - {_layer_display_name(name)}  ({dims})")
                     print(
                         "Select the layer to work on in the 'Layer' dropdown, "
                         "then click 'Load selected layer'."
@@ -7177,9 +7187,9 @@ def ard_cube_tools():
                 "<div style='font-size:12px; color:#666;'>"
                 "This NetCDF contains <b>multiple layers</b>. Select the layer "
                 "you want to work on, then click <b>Load selected layer</b>. "
-                "Super-resolution runs on the selected layer; cloud masking and "
-                "co-registration always need the "
-                "<code>Spectral_Temporal_Stack</code> time series."
+                "Super-resolution runs on both time series and temporal "
+                "composites; cloud masking and co-registration always need only "
+                "time series."
                 "</div>"
             ),
             _stacked_field(layer_select_w, "Layer"),
@@ -9045,7 +9055,7 @@ def ard_cube_tools():
         _status(
             "✅ Cube loaded.",
             f"Loaded path: {state['loaded_path']}",
-            f"Working layer: {var_name}",
+            f"Working layer: {_layer_display_name(var_name)}",
             "Select one of the listed tools to proceed.",
         )
 
@@ -9127,7 +9137,7 @@ def ard_cube_tools():
                     dims = ", ".join(
                         f"{d}: {ds[name].sizes[d]}" for d in ds[name].dims
                     )
-                    layer_lines.append(f"   - {name}  ({dims})")
+                    layer_lines.append(f"   - {_layer_display_name(name)}  ({dims})")
                 _status(
                     f"ℹ️ This NetCDF contains {len(layers)} layers:",
                     *layer_lines,

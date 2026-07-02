@@ -554,19 +554,29 @@ def super_resolve_cube(
         da_super_all.rio.write_transform(tf0, inplace=True)
 
     else:
-        da_super_all = superresolve_single_time(
-            da=dataarray_sub,
-            crs_wkt=crs_wkt,
-            transform=tf,
-            model=model,
-            device=device,
-            bands_to_use=bands_to_use,
-            model_band_order=model_band_order,  # <-- requires your updated single_time
-            old_res=old_res,
-            new_res=new_res,
-            nan_pixel_buffer=nan_pixel_buffer,
-            edge_crop_px=edge_crop_px,
-        )
+        # A single, time-less image (e.g. a median composite). Wrap the one call
+        # in tqdm too so the GUI/log shows the same progress bar as the time
+        # series case, just counting to 1 (0/1 -> 1/1).
+        for _ in tqdm(
+            range(1),
+            desc=f"Super-resolving image ({model_type_used})",
+            unit="image",
+            file=sys.stdout,
+            dynamic_ncols=False,
+        ):
+            da_super_all = superresolve_single_time(
+                da=dataarray_sub,
+                crs_wkt=crs_wkt,
+                transform=tf,
+                model=model,
+                device=device,
+                bands_to_use=bands_to_use,
+                model_band_order=model_band_order,  # <-- requires your updated single_time
+                old_res=old_res,
+                new_res=new_res,
+                nan_pixel_buffer=nan_pixel_buffer,
+                edge_crop_px=edge_crop_px,
+            )
         # tf0 is also used by the indices block below; without this line a
         # time-less input (e.g. a median composite) with indices attrs raised
         # NameError because tf0 was only set in the time-series branch.
