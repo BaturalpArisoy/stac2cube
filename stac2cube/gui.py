@@ -93,6 +93,27 @@ def _busy_bear_html(lead, tail=""):
     )
 
 
+def _raster_layer_names(ds):
+    """Names of data variables that look like raster layers (have y/x dims).
+
+    Filters out helper variables such as 'spatial_ref', which xarray decodes
+    as a dimensionless data variable in exported cubes.
+    """
+    return [
+        str(v) for v in ds.data_vars
+        if ("y" in ds[v].dims and "x" in ds[v].dims)
+    ]
+
+
+def _layer_dropdown_options(ds, names):
+    """(label, value) dropdown options showing each layer's dims and sizes."""
+    options = []
+    for name in names:
+        dims = ", ".join(f"{d}: {ds[name].sizes[d]}" for d in ds[name].dims)
+        options.append((f"{name}  ({dims})", name))
+    return options
+
+
 # -------------------------------------------------------------------------
 # Parameter help
 # -------------------------------------------------------------------------
@@ -4113,7 +4134,7 @@ def datacube_builder(missions_func=missions):
         layout=widgets.Layout(width="100%", gap="4px"),
     )
     result_date_acc = widgets.Accordion(children=[result_date_box], selected_index=None)
-    result_date_acc.set_title(0, "Date Picker")
+    result_date_acc.set_title(0, "Date Selection")
     result_date_acc.layout = widgets.Layout(width="45%")
 
     # Keep the Date Picker on the right half of the panel, right-aligned so it
@@ -5043,6 +5064,35 @@ def datacube_editor():
         disabled=True,
     )
 
+    # Layer selection (shown only when the loaded NetCDF has multiple layers,
+    # e.g. a time series exported together with temporal composites/stats)
+    layer_select_w = widgets.Dropdown(
+        options=[],
+        value=None,
+        layout=widgets.Layout(width="100%"),
+    )
+    layer_load_btn = widgets.Button(
+        description="Load selected layer",
+        icon="check",
+        button_style="info",
+        layout=widgets.Layout(width="180px"),
+    )
+    layer_select_box = widgets.VBox(
+        [
+            widgets.HTML(
+                "<div style='font-size:12px; color:#666;'>"
+                "This NetCDF contains <b>multiple layers</b>. Select the layer "
+                "you want to work on, then click <b>Load selected layer</b>. "
+                "You can come back and load a different layer of the same file "
+                "at any time."
+                "</div>"
+            ),
+            _stacked_field(layer_select_w, "Layer"),
+            layer_load_btn,
+        ],
+        layout=widgets.Layout(width="100%", gap="6px", display="none"),
+    )
+
     # Slice feature
     slice_time_w = widgets.SelectMultiple(
         options=[],
@@ -5356,8 +5406,11 @@ def datacube_editor():
     state = {
         "loaded_path": None,
         "loaded_ds": None,        # open (lazy) xr.Dataset; kept open for on-demand reads
-        "loaded_original": None,  # untouched Spectral_Temporal_Stack DataArray
+        "loaded_var": None,       # name of the loaded layer (data variable)
+        "loaded_original": None,  # untouched loaded layer DataArray
         "current": None,          # working result (DataArray or Dataset after stats)
+        "pending_ds": None,       # multi-layer file waiting for a layer selection
+        "pending_path": None,
         "last_export_info": None,
         "last_auto_gif_suggestion": None,
     }
@@ -5990,6 +6043,42 @@ def datacube_editor():
     # ---------------------------------------------------------------------
     # Core callbacks
     # ---------------------------------------------------------------------
+    def _finalize_load(path, ds_loaded, var_name):
+        """Initialize the editor from one layer (data variable) of an already
+        opened dataset. Called directly for single-layer files, or from the
+        'Load selected layer' button for multi-layer files."""
+        loaded = ds_loaded[var_name]
+
+        state["loaded_path"] = path
+        state["loaded_var"] = var_name
+        state["loaded_original"] = loaded
+        state["current"] = _safe_copy_xarray(loaded)
+
+        _show_preview(loaded_summary_out, state["loaded_original"])
+        _show_preview(result_out, state["current"])
+
+        _populate_slice_widgets_from_current(select_all=True)
+        _populate_indices_widget_from_current()
+        _set_editor_enabled(True)
+        _update_gif_output_suggestion(force=True)
+        _update_update_daterange_example(force=True)
+
+        if export_mode_w.value == "netcdf" and not export_target_w.value:
+            export_target_w.value = _auto_netcdf_export_suggestion()
+
+        print(f"✅ Loaded cube: {path}")
+        print(f"   Working layer: {var_name}")
+        _print_working_note()
+
+        try:
+            loaded_summary_acc.selected_index = 0
+        except Exception:
+            pass
+        try:
+            result_acc.selected_index = 0
+        except Exception:
+            pass
+
     def _on_load_cube_clicked(_):
         path = (load_path_w.value or "").strip()
         if not path:
@@ -6032,49 +6121,82 @@ def datacube_editor():
                 )
                 state["loaded_ds"] = ds_open
 
-                # Accept either cube name
-                if "Spectral_Temporal_Stack" in ds_loaded.data_vars:
-                    var_name = "Spectral_Temporal_Stack"
-                elif "Cloud_Stack" in ds_loaded.data_vars:
-                    var_name = "Cloud_Stack"
-                else:
+                layers = _raster_layer_names(ds_loaded)
+                if not layers:
                     raise ValueError(
-                        "NetCDF does not contain 'Spectral_Temporal_Stack' or 'Cloud_Stack'. "
-                        f"Found data_vars: {list(ds_loaded.data_vars)}"
+                        "NetCDF contains no raster layers (data variables with "
+                        f"'y'/'x' dims). Found data_vars: {list(ds_loaded.data_vars)}"
                     )
 
-                loaded = ds_loaded[var_name]
+                if len(layers) == 1:
+                    # Single layer (e.g. cube exported without stats): load it
+                    # directly, no matter how the variable is named.
+                    state["pending_ds"] = None
+                    state["pending_path"] = None
+                    layer_select_w.options = []
+                    layer_select_box.layout.display = "none"
+                    _finalize_load(path, ds_loaded, layers[0])
+                else:
+                    # Multiple layers (e.g. time series + temporal composites):
+                    # list them and let the user pick before initializing.
+                    state["pending_ds"] = ds_loaded
+                    state["pending_path"] = path
+                    # The previous working result may reference the file handle
+                    # that was just closed above, so drop it until a layer is
+                    # confirmed.
+                    state["loaded_path"] = None
+                    state["loaded_var"] = None
+                    state["loaded_original"] = None
+                    state["current"] = None
+                    _set_editor_enabled(False)
 
-                state["loaded_path"] = path
-                state["loaded_var"] = var_name
-                state["loaded_original"] = loaded
-                state["current"] = _safe_copy_xarray(loaded)
+                    layer_select_w.options = _layer_dropdown_options(ds_loaded, layers)
+                    layer_select_w.value = (
+                        "Spectral_Temporal_Stack"
+                        if "Spectral_Temporal_Stack" in layers
+                        else layers[0]
+                    )
+                    layer_select_box.layout.display = ""
 
-                _show_preview(loaded_summary_out, state["loaded_original"])
-                _show_preview(result_out, state["current"])
+                    for out_w, note in (
+                        (loaded_summary_out, "No layer loaded yet."),
+                        (result_out, "No layer loaded yet."),
+                    ):
+                        with out_w:
+                            clear_output()
+                            print(note)
 
-                _populate_slice_widgets_from_current(select_all=True)
-                _populate_indices_widget_from_current()
-                _set_editor_enabled(True)
-                _update_gif_output_suggestion(force=True)
-                _update_update_daterange_example(force=True)
+                    print(f"ℹ️ This NetCDF contains {len(layers)} layers:")
+                    for name in layers:
+                        dims = ", ".join(
+                            f"{d}: {ds_loaded[name].sizes[d]}"
+                            for d in ds_loaded[name].dims
+                        )
+                        print(f"   - {name}  ({dims})")
+                    print(
+                        "Select the layer to work on in the 'Layer' dropdown, "
+                        "then click 'Load selected layer'."
+                    )
 
-                if export_mode_w.value == "netcdf" and not export_target_w.value:
-                    export_target_w.value = _auto_netcdf_export_suggestion()
+        except Exception as e:
+            _show_status(_friendly_error(e, "Loading"))
 
-                print(f"✅ Loaded cube: {path}")
-                #print("✅ Working object initialized from: Spectral_Temporal_Stack (DataArray)")
-                _print_working_note()
+    def _on_layer_load_clicked(_):
+        ds_loaded = state.get("pending_ds")
+        path = state.get("pending_path")
+        var_name = layer_select_w.value
+        if ds_loaded is None or not path:
+            _show_status("❌ Load a NetCDF cube first.")
+            return
+        if not var_name:
+            _show_status("❌ Please select a layer to load.")
+            return
 
-            try:
-                loaded_summary_acc.selected_index = 0
-            except Exception:
-                pass
-            try:
-                result_acc.selected_index = 0
-            except Exception:
-                pass
-
+        try:
+            with status_out:
+                clear_output()
+                print(f"Loading layer '{var_name}'...")
+                _finalize_load(path, ds_loaded, var_name)
         except Exception as e:
             _show_status(_friendly_error(e, "Loading"))
 
@@ -6333,6 +6455,7 @@ def datacube_editor():
     browse_mask_file_btn.on_click(_on_browse_mask_file_clicked)
 
     load_cube_btn.on_click(_on_load_cube_clicked)
+    layer_load_btn.on_click(_on_layer_load_clicked)
     reset_btn.on_click(_on_reset_clicked)
     edit_btn.on_click(_on_edit_clicked)
     export_current_btn.on_click(_on_export_current_clicked)
@@ -6388,6 +6511,7 @@ def datacube_editor():
             widgets.HTML("<div style='font-size:12px; color:#666;'>NetCDF only (Geotiffs are not supported as editor input).</div>"),
             _stacked_field(load_input_box, "Data cube path"),
             widgets.HBox([load_cube_btn, reset_btn], layout=widgets.Layout(gap="8px", flex_flow="row wrap")),
+            layer_select_box,
         ],
         layout=widgets.Layout(width="100%", gap="6px"),
     )
@@ -6797,6 +6921,8 @@ def datacube_editor():
         "widgets": {
             "load_path": load_path_w,
             "load_cube_btn": load_cube_btn,
+            "layer_select": layer_select_w,
+            "layer_load_btn": layer_load_btn,
             "reset_btn": reset_btn,
             "slice_time": slice_time_w,
             "slice_band": slice_band_w,
@@ -6851,7 +6977,10 @@ def ard_cube_tools():
     state = {
         "loaded_path": None,
         "loaded_ds": None,           # open (lazy) xr.Dataset; kept open for on-demand reads
+        "loaded_var": None,          # name of the loaded layer (data variable)
         "loaded_obj": None,
+        "pending_ds": None,          # multi-layer file waiting for a layer selection
+        "pending_path": None,
         "current_result_path": None,
     }
 
@@ -6893,7 +7022,11 @@ def ard_cube_tools():
                 elif "Cloud_Stack" in ds.data_vars:
                     display(ds["Cloud_Stack"])
                 else:
-                    display(ds)
+                    rasters = _raster_layer_names(ds)
+                    if len(rasters) == 1:
+                        display(ds[rasters[0]])
+                    else:
+                        display(ds)
 
         try:
             result_acc.selected_index = 0
@@ -7025,6 +7158,36 @@ def ard_cube_tools():
 
     load_fc_box = _attach_filechooser(browse_load_btn, load_path_w, title="Select NetCDF file", pattern=["*.nc", "*"], select_dirs=False)
 
+    # Layer selection (shown only when the loaded NetCDF has multiple layers,
+    # e.g. a time series exported together with temporal composites/stats)
+    layer_select_w = widgets.Dropdown(
+        options=[],
+        value=None,
+        layout=widgets.Layout(width="100%"),
+    )
+    layer_load_btn = widgets.Button(
+        description="Load selected layer",
+        icon="check",
+        button_style="primary",
+        layout=widgets.Layout(width="180px"),
+    )
+    layer_select_box = widgets.VBox(
+        [
+            widgets.HTML(
+                "<div style='font-size:12px; color:#666;'>"
+                "This NetCDF contains <b>multiple layers</b>. Select the layer "
+                "you want to work on, then click <b>Load selected layer</b>. "
+                "Super-resolution runs on the selected layer; cloud masking and "
+                "co-registration always need the "
+                "<code>Spectral_Temporal_Stack</code> time series."
+                "</div>"
+            ),
+            _stacked_field(layer_select_w, "Layer"),
+            layer_load_btn,
+        ],
+        layout=widgets.Layout(width="100%", gap="6px", display="none"),
+    )
+
 
 
 
@@ -7098,6 +7261,7 @@ def ard_cube_tools():
             widgets.HTML("<div style='font-size:12px; color:#666;'>NetCDF only (COGs are not supported as input).</div>"),
             _stacked_field(load_input_box, "Data cube path"),
             widgets.HBox([load_cube_btn], layout=widgets.Layout(gap="8px", flex_flow="row wrap")),
+            layer_select_box,
         ],
         layout=widgets.Layout(width="100%", gap="6px"),
     )
@@ -7227,6 +7391,15 @@ def ard_cube_tools():
     def _on_mask_and_export_clicked(_):
         if state["loaded_obj"] is None or not state["loaded_path"]:
             _status("❌ Load a cube first.")
+            return
+        if state.get("loaded_var") != "Spectral_Temporal_Stack":
+            _status(
+                "❌ Cloud masking applies to the 'Spectral_Temporal_Stack' time series, "
+                f"but the loaded layer is '{state.get('loaded_var')}'.",
+                "Composite layers (e.g. median) have no time dimension, so per-date "
+                "cloud masks cannot be applied to them.",
+                "Reload the cube and select the 'Spectral_Temporal_Stack' layer to mask.",
+            )
             return
         if get_cloud_layers is None:
             _status("❌ get_cloud_layers is not available. Check your stac2cube installation/imports.")
@@ -7772,6 +7945,15 @@ def ard_cube_tools():
         if state.get("loaded_path") is None:
             _status("❌ Load the main data cube first.")
             return
+        if state.get("loaded_var") != "Spectral_Temporal_Stack":
+            _status(
+                "❌ Cloud masking applies to the 'Spectral_Temporal_Stack' time series, "
+                f"but the loaded layer is '{state.get('loaded_var')}'.",
+                "Composite layers (e.g. median) have no time dimension, so per-date "
+                "cloud masks cannot be applied to them.",
+                "Reload the cube and select the 'Spectral_Temporal_Stack' layer to mask.",
+            )
+            return
 
         cloud_path = (b3_cloud_path_w.value or "").strip()
         if not cloud_path:
@@ -7844,15 +8026,24 @@ def ard_cube_tools():
             {name: coord.compute() for name, coord in ds_open.coords.items()}
         )
         state["loaded_ds"] = ds_open
-        state["loaded_obj"] = (
-            ds["Spectral_Temporal_Stack"]
-            if "Spectral_Temporal_Stack" in ds.data_vars
-            else ds
-        )
+        lv = state.get("loaded_var")
+        if lv and lv in ds.data_vars:
+            state["loaded_obj"] = ds[lv]
+        elif "Spectral_Temporal_Stack" in ds.data_vars:
+            state["loaded_obj"] = ds["Spectral_Temporal_Stack"]
+        else:
+            state["loaded_obj"] = ds
 
     def _on_b3_mask_export_clicked(_):
         if state.get("loaded_path") is None:
             _status("❌ Load the main data cube first.")
+            return
+        if state.get("loaded_var") != "Spectral_Temporal_Stack":
+            _status(
+                "❌ Cloud masking applies to the 'Spectral_Temporal_Stack' time series, "
+                f"but the loaded layer is '{state.get('loaded_var')}'.",
+                "Reload the cube and select the 'Spectral_Temporal_Stack' layer to mask.",
+            )
             return
         if mask_stac_clouds is None:
             _status("❌ mask_stac_clouds is not available. Check stac2cube imports.")
@@ -8217,6 +8408,15 @@ def ard_cube_tools():
     def _on_coregister_clicked(_):
         if state.get("loaded_path") is None:
             _status("❌ Load a cube first.")
+            return
+        if state.get("loaded_var") != "Spectral_Temporal_Stack":
+            _status(
+                "❌ Co-registration needs the 'Spectral_Temporal_Stack' time series, "
+                f"but the loaded layer is '{state.get('loaded_var')}'.",
+                "Composite layers (e.g. median) are single images and cannot be "
+                "co-registered over time.",
+                "Reload the cube and select the 'Spectral_Temporal_Stack' layer.",
+            )
             return
         if coregister_cube is None:
             _status("❌ coregister_cube is not available. Check stac2cube imports.")
@@ -8615,9 +8815,12 @@ def ard_cube_tools():
         old_mtime = p_out.stat().st_mtime if existed_before else None
         old_size = p_out.stat().st_size if existed_before else None
 
+        sr_var_name = state.get("loaded_var") or "Spectral_Temporal_Stack"
+
         _status(
             "Super-resolving and exporting...",
             f"input_path = {state['loaded_path']}",
+            f"layer = {sr_var_name}",
             f"mode = {mode}",
             f"output_path = {out_path}",
         )
@@ -8628,6 +8831,7 @@ def ard_cube_tools():
                 super_resolve_cube(
                     input_path=state["loaded_path"],
                     output_path=out_path,
+                    var_name=sr_var_name,
                     model_type=("rgbn" if mode == "rgbn" else "full_spectral"),
                 )
 
@@ -8823,6 +9027,28 @@ def ard_cube_tools():
     # -----------------------------------------
     # Events
     # -----------------------------------------
+    def _finalize_load(path_posix, ds, var_name):
+        """Initialize the tools from one layer (data variable) of an already
+        opened dataset. Called directly for single-layer files, or from the
+        'Load selected layer' button for multi-layer files."""
+        obj = ds[var_name]
+
+        state["loaded_path"] = path_posix
+        state["loaded_var"] = var_name
+        state["loaded_obj"] = obj
+        #reset_btn.disabled = False
+        _set_enabled_after_load(True)
+        _refresh_output_suggestions()
+
+        _show_loaded_summary(obj)
+        loaded_summary_acc.selected_index = 0
+        _status(
+            "✅ Cube loaded.",
+            f"Loaded path: {state['loaded_path']}",
+            f"Working layer: {var_name}",
+            "Select one of the listed tools to proceed.",
+        )
+
     def _on_load_clicked(_):
         path = (load_path_w.value or "").strip()
         if not path:
@@ -8856,20 +9082,74 @@ def ard_cube_tools():
                 {name: coord.compute() for name, coord in ds_open.coords.items()}
             )
             state["loaded_ds"] = ds_open
-            if "Spectral_Temporal_Stack" in ds.data_vars:
-                obj = ds["Spectral_Temporal_Stack"]
+
+            layers = _raster_layer_names(ds)
+            if not layers:
+                raise ValueError(
+                    "NetCDF contains no raster layers (data variables with "
+                    f"'y'/'x' dims). Found data_vars: {list(ds.data_vars)}"
+                )
+
+            if len(layers) == 1:
+                # Single layer (e.g. cube exported without stats): load it
+                # directly, no matter how the variable is named.
+                state["pending_ds"] = None
+                state["pending_path"] = None
+                layer_select_w.options = []
+                layer_select_box.layout.display = "none"
+                _finalize_load(p.as_posix(), ds, layers[0])
             else:
-                obj = ds
+                # Multiple layers (e.g. time series + temporal composites):
+                # list them and let the user pick before initializing.
+                state["pending_ds"] = ds
+                state["pending_path"] = p.as_posix()
+                # The previous loaded object may reference the file handle that
+                # was just closed above, so drop it until a layer is confirmed.
+                state["loaded_path"] = None
+                state["loaded_var"] = None
+                state["loaded_obj"] = None
+                _set_enabled_after_load(False)
 
-            state["loaded_path"] = p.as_posix()
-            state["loaded_obj"] = obj
-            #reset_btn.disabled = False
-            _set_enabled_after_load(True)
-            _refresh_output_suggestions()
+                layer_select_w.options = _layer_dropdown_options(ds, layers)
+                layer_select_w.value = (
+                    "Spectral_Temporal_Stack"
+                    if "Spectral_Temporal_Stack" in layers
+                    else layers[0]
+                )
+                layer_select_box.layout.display = ""
 
-            _show_loaded_summary(obj)
-            loaded_summary_acc.selected_index = 0
-            _status("✅ Cube loaded.", f"Loaded path: {state['loaded_path']}", "Select one of the listed tools to proceed.")
+                with loaded_summary_out:
+                    clear_output()
+                    print("No layer loaded yet.")
+
+                layer_lines = []
+                for name in layers:
+                    dims = ", ".join(
+                        f"{d}: {ds[name].sizes[d]}" for d in ds[name].dims
+                    )
+                    layer_lines.append(f"   - {name}  ({dims})")
+                _status(
+                    f"ℹ️ This NetCDF contains {len(layers)} layers:",
+                    *layer_lines,
+                    "Select the layer to work on in the 'Layer' dropdown, "
+                    "then click 'Load selected layer'.",
+                )
+        except Exception as e:
+            _status(f"❌ {type(e).__name__}: {e}")
+
+    def _on_layer_load_clicked(_):
+        ds = state.get("pending_ds")
+        path_posix = state.get("pending_path")
+        var_name = layer_select_w.value
+        if ds is None or not path_posix:
+            _status("❌ Load a NetCDF cube first.")
+            return
+        if not var_name:
+            _status("❌ Please select a layer to load.")
+            return
+
+        try:
+            _finalize_load(path_posix, ds, var_name)
         except Exception as e:
             _status(f"❌ {type(e).__name__}: {e}")
 
@@ -8886,6 +9166,7 @@ def ard_cube_tools():
 
 
     load_cube_btn.on_click(_on_load_clicked)
+    layer_load_btn.on_click(_on_layer_load_clicked)
     #reset_btn.on_click(_on_reset_clicked)
 
     # Tool buttons: skeleton only (no logic wired yet)
@@ -8957,6 +9238,8 @@ def ard_cube_tools():
         "widgets": {
             "load_path": load_path_w,
             "load_cube_btn": load_cube_btn,
+            "layer_select": layer_select_w,
+            "layer_load_btn": layer_load_btn,
             #"reset_btn": reset_btn,
             "mask_threshold": mask_threshold_w,
             "cr_out": cr_out_w,

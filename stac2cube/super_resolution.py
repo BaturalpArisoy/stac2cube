@@ -567,6 +567,10 @@ def super_resolve_cube(
             nan_pixel_buffer=nan_pixel_buffer,
             edge_crop_px=edge_crop_px,
         )
+        # tf0 is also used by the indices block below; without this line a
+        # time-less input (e.g. a median composite) with indices attrs raised
+        # NameError because tf0 was only set in the time-series branch.
+        tf0 = da_super_all.rio.transform()
 
     # ===========================
     # OPTIONAL: compute indices (only if provided in attrs)

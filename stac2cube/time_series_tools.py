@@ -680,7 +680,19 @@ def interactive_time_view(
 
     Uses your existing pipeline: _select_mode, _apply_crop, _get_extent_and_origin,
     _get_scaling_policy, _render_frame_as_uint8.
+
+    Also accepts a single image without a 'time' dimension (e.g. a temporal
+    composite such as a median layer): the time control is hidden and the
+    frame is titled with the layer name instead of a date.
     """
+    has_time = "time" in stac.dims
+    static_label = None
+    if not has_time:
+        static_label = str(stac.name) if stac.name is not None else "Composite"
+        # Length-1 time axis (no coordinate values, so no fake date) lets the
+        # per-frame rendering pipeline below be reused unchanged.
+        stac = stac.expand_dims("time")
+
     # UI
     mode_options = []
     for m in modes:
@@ -713,8 +725,12 @@ def interactive_time_view(
         stac_mode = _apply_crop(stac_mode, crop)
 
         extent, origin = _get_extent_and_origin(stac_mode)
-        time_values = pd.to_datetime(stac_mode.time.values)
-        n = stac_mode.time.size
+        if has_time:
+            time_values = pd.to_datetime(stac_mode.time.values)
+            n = stac_mode.time.size
+        else:
+            time_values = None
+            n = 1
         scaling = _get_scaling_policy(stac_mode, mode)
 
         cache[mode] = {
@@ -751,7 +767,10 @@ def interactive_time_view(
             layout=widgets.Layout(width="800px"),
         )
     elif widget_type == "dropdown":
-        options = [(t.strftime("%d-%m-%Y"), i) for i, t in enumerate(time_values0)]
+        if has_time:
+            options = [(t.strftime("%d-%m-%Y"), i) for i, t in enumerate(time_values0)]
+        else:
+            options = [(static_label, 0)]
         time_w = widgets.Dropdown(
             options=options,
             value=0,
@@ -761,8 +780,14 @@ def interactive_time_view(
     else:
         raise ValueError("widget_type must be 'slider' or 'dropdown'")
 
+    if not has_time:
+        # Single image: nothing to scrub through.
+        time_w.layout.display = "none"
+
     def _set_time_widget_options(state):
         """Update time widget to match current mode's time axis (usually identical)."""
+        if not has_time:
+            return
         n = state["n"]
         tv = state["time_values"]
 
@@ -804,7 +829,10 @@ def interactive_time_view(
             fig, ax = plt.subplots(figsize=figsize)
 
             # Title
-            title = time_values[idx].strftime("%d-%m-%Y")
+            if has_time:
+                title = time_values[idx].strftime("%d-%m-%Y")
+            else:
+                title = static_label
             if mode == "ndvi":
                 title += " (NDVI)"
             elif mode == "ndwi":
