@@ -200,9 +200,6 @@ PARAM_HELP_HTML = {
     first, then compose - the composite uses only the dates you kept.<br><br>
     If <b>None</b>: no temporal composite (the full time series is kept).<br>
     Setting a temporal composite disables <code>stats</code>.<br><br>
-    <b>Note:</b> Copy JSON still records this as <code>aggregator</code>, so a
-    headless / SLURM run (where you cannot filter interactively) collapses the
-    time series at build time.
     """,
     "output": """
     <b>Output</b><br>
@@ -4468,14 +4465,25 @@ def datacube_editor():
         "stats": """
         <b>stats</b><br>
         If empty/None: no stats cubes.<br>
-        Creates additional data variables with requested statistics.<br><br>
+        Creates additional data variables with requested statistics, generated
+        along the original time series.<br><br>
         Examples:
         <ul style="margin:4px 0 0 18px; padding:0;">
             <li><code>mean_timeseries</code> -> mean of all time steps</li>
             <li><code>mean_monthly</code> -> mean of each month</li>
             <li><code>mean_annual</code> -> mean of each year</li>
         </ul>
-        Disabled when <code>aggregator</code> is not None.
+        To export a single Temporal Composite instead of the time series, use the
+        <b>Temporal Composite</b> selector in <b>Export Options</b>.
+        """,
+        "aggregator": """
+        <b>Temporal Composite</b><br>
+        Collapses the loaded cube's time axis into a single scene
+        (<code>mean</code> or <code>median</code>) per band / index, applied at
+        export time.<br><br>
+        It affects only the exported file - the interactive viewer and the
+        animation still show the full time series.<br><br>
+        If <b>None</b>: no temporal composite (the full time series is exported).
         """,
         "fps": """
         <b>fps</b><br>
@@ -4669,16 +4677,7 @@ def datacube_editor():
         mode = export_mode_w.value
         current = (export_target_w.value or "").strip()
 
-        if mode == "lazy":
-            export_target_w.disabled = True
-            browse_export_btn.disabled = True
-            export_target_w.placeholder = "Disabled (Quick Result, no Export selected)"
-            export_target_w.value = ""
-            export_target_w.description = "Output:"
-            if filechooser_available:
-                export_fc_box.layout.display = "none"
-
-        elif mode == "netcdf":
+        if mode == "netcdf":
             export_target_w.disabled = False
             browse_export_btn.disabled = False
             export_target_w.description = "Export file:"
@@ -4750,18 +4749,25 @@ def datacube_editor():
         viz_make_gif_btn.disabled = not enabled
         browse_gif_btn.disabled = (not enabled) or (not filechooser_available)
 
-        # Export widgets
+        # Export widgets. Export mode is NetCDF / COGs only (the old "Quick
+        # Result, no Export" lazy option is gone): the loaded cube is already a
+        # real, exported cube and editing just shows the result in the Result
+        # panel, so not exporting simply means the edits aren't saved. Export is a
+        # deliberate click on the button below, never triggered by an edit.
         export_mode_w.disabled = not enabled
-        if not enabled:
+        aggregator_w.disabled = not enabled
+        if enabled:
+            _set_export_mode_defaults()
+        else:
             export_target_w.disabled = True
+            export_target_w.value = ""
             browse_export_btn.disabled = True
             export_current_btn.disabled = True
+            if filechooser_available:
+                export_fc_box.layout.display = "none"
             with viz_out:
                 clear_output()
                 print("ℹ️ Load a cube first to activate visualization tools.")
-            _set_export_mode_defaults()
-        else:
-            _set_export_mode_defaults()
 
     def _update_slice_widget_enabled_state(editor_enabled):
         obj = state.get("current")
@@ -4909,6 +4915,41 @@ def datacube_editor():
 
         state["last_auto_gif_suggestion"] = new_suggestion
 
+    def _apply_export_temporal_composite(obj):
+        """Collapse the time axis into a single mean/median scene per band/index,
+        per the Export Options 'Temporal Composite' selector. Applied only at
+        export (state['current'] is never mutated), so the interactive viewer and
+        the animation still see the full time series. No-op when None is selected
+        or the object has no time axis. Lazy: the reduction is a dask graph."""
+        agg = aggregator_w.value
+        if not agg or obj is None:
+            return obj
+        if "time" not in getattr(obj, "dims", ()):
+            return obj
+        if agg == "mean":
+            return obj.mean(dim="time", skipna=True, keep_attrs=True)
+        if agg == "median":
+            return obj.median(dim="time", skipna=True, keep_attrs=True)
+        return obj
+
+    def _show_result_current():
+        """Render the Result panel from the current cube with the Export Options
+        'Temporal Composite' applied as a VIEW. state['current'] is never mutated,
+        so the interactive viewer, the animation and the export step still read the
+        full time series (and re-collapse it themselves). No-op until a cube is
+        loaded."""
+        obj = state.get("current")
+        if obj is None:
+            return
+        _show_preview(result_out, _apply_export_temporal_composite(obj))
+
+    def _on_aggregator_change(_change=None):
+        """The Temporal Composite is applied at export, not via the Edit button,
+        so re-render the Result immediately when it changes - the user sees the
+        collapsed (or restored time-series) preview right away, matching the Data
+        Cube Builder. No-op when nothing is loaded."""
+        _show_result_current()
+
     def _export_current_result():
         if state["current"] is None:
             raise ValueError("No current result available. Load a cube first.")
@@ -4916,12 +4957,10 @@ def datacube_editor():
         mode = export_mode_w.value
         target = None if export_target_w.disabled else ((export_target_w.value or "").strip() or None)
 
-        if mode == "lazy":
-            raise ValueError(_EXPORT_MODE_REMINDER)
         if not target:
             raise ValueError("Please provide an export file/folder path.")
 
-        obj = state["current"]
+        obj = _apply_export_temporal_composite(state["current"])
         if not isinstance(obj, (xr.DataArray, xr.Dataset)):
             raise TypeError(f"Unsupported result type for export: {type(obj)}")
 
@@ -5005,10 +5044,6 @@ def datacube_editor():
 
         mode = export_mode_w.value
         current = (export_target_w.value or "").strip()
-
-        if mode == "lazy":
-            export_fc_box.layout.display = "none"
-            return
 
         if mode == "netcdf":
             suggestion = current or _auto_netcdf_export_suggestion()
@@ -5386,14 +5421,14 @@ def datacube_editor():
         disabled=True,
     )
 
-    # Export options
+    # Export options. NetCDF / COGs only - editing shows the result in the Result
+    # panel, so there is no separate "no export" mode; exporting saves the edits.
     export_mode_w = widgets.Dropdown(
         options=[
-            ("Quick Result, no Export (Lazy Array)", "lazy"),
-            ("NetCDF", "netcdf"),
+            ("NetCDF (required for Analysis Ready Data Cube Tools)", "netcdf"),
             ("Cloud Optimized Geotiffs (select folder)", "cogs"),
         ],
-        value="lazy",
+        value="netcdf",
         description="Mode:",
         layout=widgets.Layout(width="99%"),
         style={"description_width": "90px"},
@@ -5403,7 +5438,7 @@ def datacube_editor():
     export_target_w = widgets.Text(
         value="",
         description="Output:",
-        placeholder="Disabled (Quick Result, no Export selected)",
+        placeholder="Load a cube, then set an output path",
         layout=widgets.Layout(width="100%"),
         style={"description_width": "90px"},
         disabled=True,
@@ -5417,6 +5452,22 @@ def datacube_editor():
         disabled=True,
     )
     browse_export_btn.style.button_color = "#f3f4f6"
+
+    # Temporal Composite: collapse the loaded cube's time axis into a single
+    # mean/median scene at export time. Mirrors the Data Cube Builder's Export
+    # Options. Applied only when exporting, so the viewer/animation still see the
+    # full time series.
+    aggregator_w = widgets.Dropdown(
+        options=[("None", None), ("mean", "mean"), ("median", "median")],
+        value=None,
+        description="Temporal Composite:",
+        layout=widgets.Layout(width="99%"),
+        style={"description_width": "150px"},
+        disabled=True,
+    )
+    # ipywidgets shows a BLANK label for value=None even when a ("None", None)
+    # option exists, so set the label explicitly to display "None".
+    aggregator_w.label = "None"
 
     # Visualization
     viz_dropdown_btn = widgets.Button(
@@ -5496,10 +5547,12 @@ def datacube_editor():
     export_current_btn = widgets.Button(
         description="Export current result",
         icon="save",
-        button_style="danger",
         layout=widgets.Layout(width="190px"),
         disabled=True,
     )
+    # Warm, energetic orange call-to-action, matching the Data Cube Builder's
+    # export button (replaces the old red "danger" style).
+    export_current_btn.style.button_color = "#f97316"
 
     # Outputs
     loaded_summary_out = widgets.Output(
@@ -5621,9 +5674,6 @@ def datacube_editor():
         _toggle_box_display(load_fc_box)
 
     def _on_browse_export_clicked(_):
-        if export_mode_w.value == "lazy":
-            _show_status("ℹ️ Output selection is disabled in 'Quick Result, no Export (Lazy Array)' mode.")
-            return
         if not filechooser_available or export_fc is None:
             _show_status("ℹ️ Optional dependency 'ipyfilechooser' is not available. Install it to use Browse buttons.")
             return
@@ -6033,16 +6083,25 @@ def datacube_editor():
                 "a binary 'cloud_mask_*' band."
             )
 
-        # The mask must line up with the loaded cube (same dates), otherwise
-        # xarray alignment would silently drop/mismatch timesteps.
+        # Align the mask to the cube's CURRENT dates by the time coordinate, so
+        # masking still works after the cube has been date-sliced (this feature is
+        # chainable). The binary mask normally comes from the same cube, so its
+        # dates are a superset of whatever remains - we simply pick out the dates
+        # the cube still has. Only a mask that is actually MISSING one of those
+        # dates is a real error.
         da_ref = obj["Spectral_Temporal_Stack"] if isinstance(obj, xr.Dataset) else obj
         if "time" in getattr(da_ref, "dims", ()) and "time" in getattr(cloud, "dims", ()):
-            if int(cloud.sizes["time"]) != int(da_ref.sizes["time"]):
+            cube_times = da_ref["time"].values
+            mask_times = set(cloud["time"].values.tolist())
+            missing = [t for t in cube_times.tolist() if t not in mask_times]
+            if missing:
                 raise ValueError(
-                    f"The mask has {int(cloud.sizes['time'])} dates but the cube has "
-                    f"{int(da_ref.sizes['time'])}. The binary mask must come from the "
-                    "same cube (same dates & grid)."
+                    f"The binary mask is missing {len(missing)} of the cube's "
+                    f"{cube_times.size} current dates. The mask must come from the "
+                    "same cube and cover every date still in the cube."
                 )
+            # Keep only the dates the cube currently has (in the cube's order).
+            cloud = cloud.sel(time=cube_times)
 
         # obj may be a DataArray or a Dataset (with stats); mask_stac_clouds pulls
         # out the Spectral_Temporal_Stack and returns a masked DataArray.
@@ -6197,7 +6256,7 @@ def datacube_editor():
         state["current"] = _safe_copy_xarray(loaded)
 
         _show_preview(loaded_summary_out, state["loaded_original"])
-        _show_preview(result_out, state["current"])
+        _show_result_current()
 
         _populate_slice_widgets_from_current(select_all=True)
         _populate_indices_widget_from_current()
@@ -6349,7 +6408,7 @@ def datacube_editor():
 
         state["current"] = _safe_copy_xarray(state["loaded_original"])
         _populate_slice_widgets_from_current(select_all=True)
-        _show_preview(result_out, state["current"])
+        _show_result_current()
 
         with status_out:
             clear_output()
@@ -6423,7 +6482,7 @@ def datacube_editor():
 
                 # Refresh UI from updated current cube
                 _populate_slice_widgets_from_current(select_all=True)
-                _show_preview(result_out, state["current"])
+                _show_result_current()
 
                 if changed_any:
                     print("✅ Edit finished.")
@@ -6442,19 +6501,9 @@ def datacube_editor():
 
                 _print_working_note()
 
-                # Optional auto-export if export mode+target already selected
-                mode = export_mode_w.value
-                target = None if export_target_w.disabled else ((export_target_w.value or "").strip() or None)
-                if mode != "lazy" and target:
-                    print("")
-                    print("Export mode is set and output path is provided.")
-                    print("Exporting current result...")
-                    info = _export_current_result()
-                    state["last_export_info"] = info
-                    if info.get("mode") != "netcdf":
-                        print(f"✅ Export finished: {info['target']}")
-                    else:
-                        print("✅ Export finished.")
+                # Editing only previews the result in the Result panel - it never
+                # writes a file. Saving is a deliberate click on 'Export current
+                # result' (with the Temporal Composite, if any, applied there).
 
             try:
                 result_acc.selected_index = 0
@@ -6467,12 +6516,6 @@ def datacube_editor():
     def _on_export_current_clicked(_):
         if state["current"] is None:
             _show_status("❌ No current result available. Load and/or edit a cube first.")
-            return
-
-        # Quick Result (lazy) can never be exported - skip the work and just
-        # remind the user instead of attempting and failing.
-        if export_mode_w.value == "lazy":
-            _show_status(_EXPORT_MODE_REMINDER)
             return
 
         try:
@@ -6617,6 +6660,9 @@ def datacube_editor():
     viz_make_gif_btn.on_click(_on_make_gif_clicked)
 
     export_mode_w.observe(lambda change: _set_export_mode_defaults(), names="value")
+    # Temporal Composite is a view applied at export, not an edit, so re-render the
+    # Result panel live when it changes (no Edit-button click needed).
+    aggregator_w.observe(_on_aggregator_change, names="value")
     gif_display_mode_w.observe(lambda change: _update_gif_output_suggestion(), names="value")
     update_daterange_mode_w.observe(lambda change: _update_update_daterange_example(), names="value")
 
@@ -6632,8 +6678,26 @@ def datacube_editor():
     )
 
     subtitle = widgets.HTML(
-        "<div style='font-size:13px; color:#6b7280; margin:0 0 4px 0;'>"
-        "Load a data cube -> select editing feature(s) -> edit data cube -> inspect the result -> export current result."
+        "<div style='display:flex; flex-wrap:wrap; gap:10px; margin:14px 0 8px 0;'>"
+        # Step 1 - blue "load"
+        "<div style='flex:1 1 200px; background:#f8fafc; border:1px solid #e5e7eb; "
+        "border-left:4px solid #3b82f6; border-radius:8px; padding:8px 10px;'>"
+        "<div style='font-weight:700; color:#1e3a8a; font-size:13px;'>1 &nbsp; Load</div>"
+        "<div style='font-size:12px; color:#475569; margin-top:2px;'>Load a "
+        "<b>NetCDF</b> data cube - e.g. one built with the <b>Data Cube Builder</b>.</div></div>"
+        # Step 2 - green "edit", matches the green Edit button
+        "<div style='flex:1 1 200px; background:#f0fdf4; border:1px solid #dcfce7; "
+        "border-left:4px solid #16a34a; border-radius:8px; padding:8px 10px;'>"
+        "<div style='font-weight:700; color:#166534; font-size:13px;'>2 &nbsp; Edit &amp; inspect</div>"
+        "<div style='font-size:12px; color:#475569; margin-top:2px;'>Select editing "
+        "feature(s), click <b>Edit data cube</b>, then check the <b>Result</b>. "
+        "Repeat to chain edits.</div></div>"
+        # Step 3 - orange "export", matches the orange Export button
+        "<div style='flex:1 1 200px; background:#fff7ed; border:1px solid #fed7aa; "
+        "border-left:4px solid #f97316; border-radius:8px; padding:8px 10px;'>"
+        "<div style='font-weight:700; color:#9a3412; font-size:13px;'>3 &nbsp; Export</div>"
+        "<div style='font-size:12px; color:#475569; margin-top:2px;'>Choose a format in "
+        "<b>Export Options</b>, then click <b>Export Current Result</b>.</div></div>"
         "</div>"
     )
 
@@ -6680,8 +6744,24 @@ def datacube_editor():
         layout=widgets.Layout(width="50%", gap="6px"),
     )
 
+    # Small badge at the top of each editing feature: whether it can be combined
+    # with other features in one Edit run (chainable) or must run on its own
+    # (standalone). Green = chainable, amber = standalone.
+    def _chainable_badge(chainable, note=None):
+        if chainable:
+            bg, border, color, label = "#f0fdf4", "#bbf7d0", "#166534", "Chainable feature"
+        else:
+            bg, border, color, label = "#fff7ed", "#fed7aa", "#9a3412", "Standalone feature"
+        text = label + (f" &middot; {note}" if note else "")
+        return widgets.HTML(
+            f"<div style='display:inline-block; font-size:11px; font-weight:700; "
+            f"color:{color}; background:{bg}; border:1px solid {border}; "
+            f"border-radius:6px; padding:2px 8px; margin:0 0 2px 0;'>{text}</div>"
+        )
+
     slice_feature_box = widgets.VBox(
         [
+            _chainable_badge(True),
             #widgets.HTML("<b>Slice Data Cube</b>"),
             widgets.HTML(
                 "<div style='font-size:12px; color:#666;'>"
@@ -6709,10 +6789,11 @@ def datacube_editor():
 
     cloud_filter_feature_box = widgets.VBox(
         [
+            _chainable_badge(True),
             #widgets.HTML("<b>Filter by Cloud Coverage</b>"),
             widgets.HTML(
                 "<div style='font-size:12px; color:#666;'>"
-                "This is only possible if the data cube is already cloud-masked. "
+                "This is only possible if the data cube is already cloud-detected. "
                 "(either with SCL during data cube generation or masked by a cloud data cube)"
                 "</div>"
             ),
@@ -6743,11 +6824,13 @@ def datacube_editor():
     )
     mask_clouds_feature_box = widgets.VBox(
         [
+            _chainable_badge(True),
             widgets.HTML(
                 "<div style='font-size:12px; color:#666;'>"
                 "Mask the loaded cube's clouds out using a binary cloud-mask file "
                 "that was exported along (e.g. <code>test_mask_binary.nc</code>). "
-                "The mask must come from the same cube (same dates &amp; grid)."
+                "The mask must come from the same cube (same grid); it is matched to "
+                "the cube's current dates, so it still works after slicing."
                 "</div>"
             ),
             mask_clouds_controls,
@@ -6779,6 +6862,7 @@ def datacube_editor():
 
     clip_feature_box = widgets.VBox(
         [
+            _chainable_badge(True),
             #widgets.HTML("<b>Clip Raster</b>"),
             widgets.HTML(
                 "<div style='font-size:12px; color:#666;'>"
@@ -6805,6 +6889,7 @@ def datacube_editor():
 
     indices_feature_box = widgets.VBox(
         [
+            _chainable_badge(True),
             widgets.HTML(
                 "<div style='font-size:12px; color:#666;'>"
                 "Calculate spectral indices from the cube's spectral bands and append them as new bands. "
@@ -6820,7 +6905,9 @@ def datacube_editor():
     indices_acc.set_title(0, "Calculate Spectral Indices")
     indices_acc.layout = widgets.Layout(width="99%")
 
-    # Temporal Composites (stats) feature
+    # Stats feature (formerly titled "Temporal Composites" - renamed to "Stats"
+    # so it no longer clashes with the "Temporal Composite" selector now in
+    # Export Options).
     stats_inner_widget = widgets.VBox(
         [
             stats_select_w,
@@ -6829,22 +6916,60 @@ def datacube_editor():
         layout=widgets.Layout(width="100%", gap="6px"),
     )
 
+    # Stats help toggle built manually (not via _stacked_field_with_help) so the
+    # "Stats Explanation ?" row sits AFTER the blue info box, matching the builder.
+    _stats_help_btn = _help_button()
+    _stats_help_box = widgets.HTML(
+        value=HELP_HTML.get("stats", ""),
+        layout=widgets.Layout(
+            display="none",
+            border="1px solid #dbeafe",
+            padding="8px",
+            border_radius="8px",
+            margin="2px 0 2px 0",
+            width="100%",
+        ),
+    )
+
+    def _toggle_stats_help(_):
+        _stats_help_box.layout.display = (
+            "" if _stats_help_box.layout.display == "none" else "none"
+        )
+
+    _stats_help_btn.on_click(_toggle_stats_help)
+
+    _stats_explain_row = widgets.HBox(
+        [
+            widgets.HTML(
+                "<div style='font-weight:500; font-size:12px; color:#374151;'>"
+                "Stats Explanation</div>"
+            ),
+            _stats_help_btn,
+        ],
+        layout=widgets.Layout(align_items="center", gap="6px"),
+    )
+
     stats_feature_box = widgets.VBox(
         [
-            #widgets.HTML("<b>Temporal Composites</b>"),
+            _chainable_badge(True, "best applied last"),
             widgets.HTML(
-                "<div style='font-size:12px; color:#666;'>"
-                "Select statistics to build temporal composites. <br>"
-                "<b>This should be the last step before exporting, because it creates extra composite layers besides the original data cube.</b>"
+                "<div style='font-size:12px; color:#1e3a8a; background:#eff6ff; "
+                "border:1px solid #bfdbfe; border-radius:6px; padding:8px 10px; "
+                "margin:0 0 6px 0;'>"
+                "Stats are additionally generated along the original time series. "
+                "If you want to export a single Temporal Composite instead of the "
+                "time series, you can set it in <b>Export Options</b>."
                 "</div>"
             ),
-            _stacked_field_with_help(stats_inner_widget, "Stats", "stats"),
+            _stats_explain_row,
+            _stats_help_box,
+            stats_inner_widget,
         ],
         layout=widgets.Layout(width="100%", gap="8px"),
     )
 
     stats_acc = widgets.Accordion(children=[stats_feature_box], selected_index=None)
-    stats_acc.set_title(0, "Temporal Composites")
+    stats_acc.set_title(0, "Stats")
     stats_acc.layout = widgets.Layout(width="99%")
 
 
@@ -6852,6 +6977,7 @@ def datacube_editor():
     # Update Data Cube feature
     update_feature_box = widgets.VBox(
         [
+            _chainable_badge(False, "run on its own"),
             #widgets.HTML("<b>Update Data Cube</b>"),
             widgets.HTML(
                 "<div style='font-size:12px; color:#666;'>"
@@ -6893,6 +7019,7 @@ def datacube_editor():
         [
             #widgets.HTML("<b>Export Options</b>"),
             widgets.HTML("<div style='font-size:12px; color:#666;'>Exports the current result in the desired format.</div>"),
+            _stacked_field_with_help(aggregator_w, "Temporal Composite", "aggregator"),
             _stacked_field(export_mode_w, "Export mode"),
             _stacked_field(export_input_box, "Output"),
         ],
@@ -6916,14 +7043,14 @@ def datacube_editor():
             indices_acc,
             stats_acc,
             update_acc,
-            export_acc,
         ],
         layout=widgets.Layout(width="100%", gap="8px"),
     )
 
-    # Actions
+    # Actions. Export lives in its own card below Visualization now (matching the
+    # Data Cube Builder), so this row only holds the Edit button.
     action_row = widgets.HBox(
-        [edit_btn, export_current_btn],
+        [edit_btn],
         layout=widgets.Layout(gap="8px", flex_flow="row wrap"),
     )
 
@@ -6999,6 +7126,18 @@ def datacube_editor():
     viz_card = widgets.VBox([viz_acc], layout=widgets.Layout(width="100%"))
     viz_card.add_class("stac2cube-card")
 
+    # Export Options now lives below Visualization as its own card, with the
+    # Export current result button attached directly beneath it (matching the
+    # Data Cube Builder).
+    export_action_row = widgets.HBox(
+        [export_current_btn],
+        layout=widgets.Layout(gap="8px", flex_flow="row wrap", margin="6px 0 0 0"),
+    )
+    export_card = widgets.VBox(
+        [export_acc, export_action_row], layout=widgets.Layout(width="100%")
+    )
+    export_card.add_class("stac2cube-card")
+
     status_card = widgets.VBox(
         [widgets.HTML("<b>Status</b>"), status_out],
         layout=widgets.Layout(width="100%", gap="6px"),
@@ -7028,6 +7167,9 @@ def datacube_editor():
 
             spacer_med,
             viz_card,
+
+            spacer_med,
+            export_card,
 
             spacer_med,
             status_card,
@@ -7080,6 +7222,7 @@ def datacube_editor():
             "enable_update": enable_update_w,
             "update_daterange_mode": update_daterange_mode_w,
             "update_daterange": update_daterange_w,
+            "aggregator": aggregator_w,
             "export_mode": export_mode_w,
             "export_target": export_target_w,
             "export_current_btn": export_current_btn,
@@ -8212,10 +8355,6 @@ def ard_cube_tools():
 
         _status(
             "Masking and exporting...",
-            f"input cube = {state['loaded_path']}",
-            f"cloud cube = {state['cloud_path']}",
-            f"mask_layer = {mask_layer}",
-            f"output = {out_path}",
         )
 
         # Release our persistent handle on the loaded cube so mask_stac_clouds is
@@ -8583,8 +8722,6 @@ def ard_cube_tools():
 
         _status(
             "Co-registering and exporting...",
-            f"input_path = {state['loaded_path']}",
-            f"output_path = {out_path}",
         )
 
         try:
@@ -8961,10 +9098,11 @@ def ard_cube_tools():
 
         _status(
             "Super-resolving and exporting...",
-            f"input_path = {state['loaded_path']}",
-            f"layer = {sr_var_name}",
-            f"mode = {mode}",
-            f"output_path = {out_path}",
+            "",
+            "ℹ️ Note: the progress bar below tracks how many time steps have been "
+            "processed — not the progress of super-resolving each individual image. "
+            "A single time step can take a while, so the bar may sit still for a bit. "
+            "That's expected, not a bug.",
         )
 
         try:
