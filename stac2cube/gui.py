@@ -4697,6 +4697,12 @@ def datacube_editor():
             export_target_w.description = "Export dir:"
             export_target_w.placeholder = "./results/cogs"
 
+            # Switching from NetCDF: a ".nc" path is meaningless as a COGs output
+            # directory (it would create a folder literally named "*.nc"), so drop
+            # the leftover NetCDF file path and offer the COGs folder default.
+            if current.lower().endswith(".nc"):
+                export_target_w.value = ""
+
             if not export_target_w.value:
                 export_target_w.value = "./results/cogs"
 
