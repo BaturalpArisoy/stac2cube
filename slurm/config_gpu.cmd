@@ -9,7 +9,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
-#SBATCH --mem=256GB
+#SBATCH --mem=512GB
 #SBATCH --time=0-10:00:00
 #SBATCH --clusters=hpda2
 #SBATCH --partition=hpda2_compute_gpu

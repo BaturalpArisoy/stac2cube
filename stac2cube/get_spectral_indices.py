@@ -224,8 +224,14 @@ def _safe_div(num: xr.DataArray, den: xr.DataArray) -> xr.DataArray:
 
 
 def _nd(a: xr.DataArray, b: xr.DataArray) -> xr.DataArray:
-
-    return _safe_div(b - a, b + a)
+    # Normalized-difference indices (ndvi, ndwi, ndmi, nbr, mndwi, ndbi, ndre1,
+    # ndsi) are mathematically bounded to [-1, 1] whenever both reflectances are
+    # non-negative. Values outside that range are artifacts only: negative
+    # reflectance from atmospheric correction and/or a near-zero denominator over
+    # very dark water/shadow pixels. Clip them back to the valid range. clip()
+    # keeps NaN no-data gaps as NaN (it never turns a gap into a number), so it
+    # adds no new holes for AROSICS coregistration or super-resolution to grow.
+    return _safe_div(b - a, b + a).clip(-1.0, 1.0)
 
 
 def _savi(red: xr.DataArray, nir: xr.DataArray, L: float = 0.5) -> xr.DataArray:

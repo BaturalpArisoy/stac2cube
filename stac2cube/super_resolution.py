@@ -1,7 +1,6 @@
 import os
 import io
 import sys
-import math
 import ast
 import contextlib
 import mlstac
@@ -9,7 +8,6 @@ import torch
 import torch.nn.functional as F
 import xarray as xr
 import numpy as np
-import sen2sr
 import rioxarray
 from affine import Affine
 from tqdm.auto import tqdm
@@ -171,6 +169,115 @@ def dilate_mask_2d(mask: np.ndarray, radius_px: int) -> np.ndarray:
     return (m_dil[0, 0] > 0).cpu().numpy()
 
 
+def _dilate_mask_t(mask: torch.Tensor, radius_px: int) -> torch.Tensor:
+    """Dilate a 2D boolean mask tensor by `radius_px` pixels on its own device."""
+    if radius_px <= 0:
+        return mask
+    m = mask.to(torch.float32)[None, None, :, :]
+    k = 2 * radius_px + 1
+    m_dil = F.max_pool2d(m, kernel_size=k, stride=1, padding=radius_px)
+    return m_dil[0, 0] > 0
+
+
+# ==========================================================
+# Optimized replacement for sen2sr.predict_large
+# ==========================================================
+PATCH_SIZE = 128  # SEN2SRLite hard-constraint masks are baked for 128-px patches
+
+
+def _patch_positions(dim: int, chunk: int, step: int) -> list[int]:
+    """Start positions of chunk-sized windows covering [0, dim), clamped to bounds."""
+    if dim <= chunk:
+        return [0]
+    positions = [min(p, dim - chunk) for p in range(0, dim, step)]
+    return list(dict.fromkeys(positions))  # dedupe clamped tail, keep order
+
+
+def predict_large_batched(
+    model: torch.nn.Module,
+    X: torch.Tensor,
+    overlap: int = 32,
+    batch_size: int = 8,
+    autocast_dtype: torch.dtype | None = None,
+) -> torch.Tensor:
+    """
+    Drop-in replacement for sen2sr.predict_large with the same stitching
+    semantics, but:
+      - runs under torch.inference_mode()
+      - batches patches through the model instead of one forward per patch
+      - one device->host transfer per batch instead of per patch
+      - supports non-square inputs (any H, W >= 128)
+      - optional mixed-precision autocast on CUDA
+      - halves the batch and retries on CUDA OOM
+
+    Returns the super-resolved image as a float32 CPU tensor (C_out, H*r, W*r).
+    """
+    device = X.device
+    _, H, W = X.shape
+    step = PATCH_SIZE - overlap
+    positions = [
+        (y, x)
+        for y in _patch_positions(H, PATCH_SIZE, step)
+        for x in _patch_positions(W, PATCH_SIZE, step)
+    ]
+
+    use_autocast = autocast_dtype is not None and device.type == "cuda"
+    output = None
+    res_n = skip = 0
+
+    with torch.inference_mode():
+        i = 0
+        bs = max(1, int(batch_size))
+        while i < len(positions):
+            batch_pos = positions[i : i + bs]
+            batch = torch.stack(
+                [X[:, y : y + PATCH_SIZE, x : x + PATCH_SIZE] for (y, x) in batch_pos]
+            )
+            try:
+                if use_autocast:
+                    with torch.autocast(device_type="cuda", dtype=autocast_dtype):
+                        result = model(batch)
+                    result = result.float()
+                    if not torch.isfinite(result).all():
+                        # fp16 overflows to NaN/Inf inside the model's FFT on
+                        # very bright patches (snow, clouds); redo the batch in
+                        # full precision instead of leaving holes in the output
+                        result = model(batch)
+                else:
+                    result = model(batch)
+            except torch.cuda.OutOfMemoryError:
+                if bs == 1:
+                    raise
+                bs = max(1, bs // 2)
+                del batch
+                torch.cuda.empty_cache()
+                continue
+
+            if output is None:
+                res_n = result.shape[-1] // PATCH_SIZE
+                skip = overlap * res_n // 2
+                output = torch.zeros(
+                    (result.shape[1], H * res_n, W * res_n),
+                    dtype=torch.float32,
+                    device="cpu",
+                )
+
+            result = result.cpu()  # single transfer for the whole batch
+            for k, (y, x) in enumerate(batch_pos):
+                # keep everything except the leading half-overlap margin, which
+                # was already written by the previous (overlapping) patch
+                sy = 0 if y == 0 else skip
+                sx = 0 if x == 0 else skip
+                output[
+                    :,
+                    y * res_n + sy : (y + PATCH_SIZE) * res_n,
+                    x * res_n + sx : (x + PATCH_SIZE) * res_n,
+                ] = result[k, :, sy:, sx:]
+            i += len(batch_pos)
+
+    return output
+
+
 def superresolve_single_time(
     da,
     crs_wkt,
@@ -183,6 +290,8 @@ def superresolve_single_time(
     new_res=2.5,
     nan_pixel_buffer=8,
     edge_crop_px=8,
+    batch_size=8,
+    autocast_dtype=None,
 ):
     """
     Super-resolve a SINGLE time slice.
@@ -206,36 +315,44 @@ def superresolve_single_time(
 
     # --- reorder into SEN2SR-required input order ---
     new_order = list(model_band_order)
-    da_reordered = da.sel(band=new_order)
+    da_reordered = da.sel(band=new_order).transpose("band", "y", "x")
 
-    # --- pad to square for SEN2SR ---
+    # --- pad each axis independently to at least one 128-px patch ---
+    # (the batched predictor handles non-square inputs, so no square padding:
+    #  that used to waste up to ~2.5x compute on elongated AOIs)
     ny, nx = da_reordered.sizes["y"], da_reordered.sizes["x"]
-    new_side = math.ceil(max(ny, nx) / 128) * 128
-
-    pad_y = new_side - ny
-    pad_x = new_side - nx
+    pad_y = max(PATCH_SIZE - ny, 0)
+    pad_x = max(PATCH_SIZE - nx, 0)
     pad_dict = {
         "y": (pad_y // 2, pad_y - pad_y // 2),
         "x": (pad_x // 2, pad_x - pad_x // 2),
     }
-    da_square = da_reordered.pad(pad_dict, constant_values=0)
 
     # ============================================================
-    # 1) BUILD LR NAN/CLOUD MASK
+    # 1) READ ONCE, BUILD LR NAN/CLOUD MASK + INFERENCE INPUT
     # ============================================================
-    mask_lr = da_square.isnull().any(dim="band").compute().to_numpy()
+    arr_lr = da_reordered.to_numpy().astype(np.float32, copy=False)
+    arr_lr = np.pad(
+        arr_lr, ((0, 0), pad_dict["y"], pad_dict["x"]), constant_values=0.0
+    )
+    mask_lr = np.isnan(arr_lr).any(axis=0)
 
     # ============================================================
-    # 2) INFERENCE INPUT
+    # 2) INFERENCE
     # ============================================================
-    X = torch.from_numpy(da_square.compute().to_numpy().astype("float32")).to(device)
+    X = torch.from_numpy(arr_lr).to(device)
     X = torch.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
 
-    with suppress_tqdm():
-        superX = sen2sr.predict_large(model=model, X=X, overlap=32)
+    superX = predict_large_batched(
+        model=model,
+        X=X,
+        overlap=32,
+        batch_size=batch_size,
+        autocast_dtype=autocast_dtype,
+    )
 
     # ============================================================
-    # 3) UPSAMPLE LR MASK TO HR
+    # 3) UPSAMPLE LR MASK TO HR (stays on `device` until applied)
     # ============================================================
     scale = int(round(old_res / new_res))  # 10m -> 2.5m => 4
     mask_lr_t = torch.from_numpy(mask_lr.astype(np.float32))[None, None, :, :].to(device)
@@ -279,16 +396,15 @@ def superresolve_single_time(
     # 7) APPLY NAN BUFFER IN HR (AFTER EDGE CROP)
     # ============================================================
     if nan_pixel_buffer > 0:
-        mask_hr_np = mask_hr.detach().cpu().numpy()
-        mask_hr_np = dilate_mask_2d(mask_hr_np, radius_px=int(nan_pixel_buffer))
-        mask_hr = torch.from_numpy(mask_hr_np).to(device)
+        mask_hr = _dilate_mask_t(mask_hr, radius_px=int(nan_pixel_buffer))
 
-    superX[:, mask_hr.bool()] = float("nan")
+    superX = superX.contiguous()
+    superX.masked_fill_(mask_hr.cpu().unsqueeze(0), float("nan"))
 
     # ============================================================
     # 8) BUILD FINAL XARRAY OUTPUT (already cropped)
     # ============================================================
-    arr = superX.detach().cpu().numpy()
+    arr = superX.numpy()
     var_name = da.name or "Spectral_Temporal_Stack"
 
     da_hr = xr.DataArray(
@@ -342,6 +458,10 @@ def super_resolve_cube(
     nan_pixel_buffer: int = 8,
     model_type: str | None = None,  # NEW: None | "rgbn" | "full_spectral"
     model_dir: str | None = None,   # folder containing the 'model' dir (e.g. interactive/)
+    batch_size: int | None = None,  # patches per forward pass; None = auto
+    precision: str = "auto",        # "auto" | "fp32" | "fp16" | "bf16"
+    compress: bool = False,         # zlib-compress the output NetCDF (lossless, ~10x slower export)
+    pack_to_int16: bool = True,     # CF scale/offset int16 packing (near-lossless, 2x smaller, fast)
 ):
     """
     Super-resolve full cube.
@@ -352,6 +472,35 @@ def super_resolve_cube(
           * otherwise -> full_spectral
       - "rgbn": use SEN2SRLite-RGBN
       - "full_spectral": use SEN2SRLite (requires all 10 bands)
+
+    batch_size:
+      Number of 128x128 patches super-resolved per model call. None picks a
+      size from free GPU memory (falls back automatically on CUDA OOM); on CPU
+      a small batch is used.
+
+    precision:
+      - "auto" (default): full fp32 everywhere. fp16 is NOT used by default
+        because it overflows to NaN on very bright patches (snow, clouds).
+      - "fp32": same as "auto".
+      - "fp16"/"bf16": force the given autocast dtype on CUDA. Any batch
+        whose output comes back non-finite is automatically redone in fp32,
+        so this no longer punches holes in bright scenes.
+
+    compress:
+      Write the output with chunked zlib compression (lossless). Off by
+      default: zlib is the slow part of the export (roughly 10x slower write
+      for only ~1.25x further shrink on top of int16 packing). Turn on when
+      disk size matters more than export time (e.g. archival). Any NetCDF
+      reader (xarray, GDAL, QGIS) handles it transparently.
+
+    pack_to_int16:
+      Store values as int16 with CF scale_factor/add_offset (the same scheme
+      Sentinel-2 uses natively) for a ~2x size reduction at almost no time
+      cost. The scale is derived from the actual data range; if the range is
+      too wide to keep at least 1e-4 precision (coarser than S2's own
+      quantization), packing is skipped automatically and float32 is written
+      instead. Readers unpack transparently. Set False for bit-exact float32
+      output.
     """
 
     # ---------------------------
@@ -514,7 +663,53 @@ def super_resolve_cube(
     dataarray_sub = dataarray.sel(band=bands_to_use)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # ---------------------------
+    # inference performance setup
+    # ---------------------------
+    autocast_dtype = None
+    if device.type == "cuda":
+        # every forward pass sees the same (B, C, 128, 128) shape, so let
+        # cuDNN benchmark kernel choices once and reuse them
+        torch.backends.cudnn.benchmark = True
+
+        prec = str(precision).strip().lower()
+        if prec == "fp16":
+            autocast_dtype = torch.float16
+        elif prec == "bf16":
+            autocast_dtype = torch.bfloat16
+        elif prec not in ("auto", "fp32"):
+            raise ValueError("precision must be one of: 'auto', 'fp32', 'fp16', 'bf16'")
+        # "auto" runs full fp32: fp16 autocast overflows to NaN inside the
+        # model's FFT on very bright patches (snow, clouds), punching holes in
+        # the output. The speed win comes from batching + inference_mode, not
+        # from half precision.
+
+    if batch_size is None:
+        if device.type == "cuda":
+            # rough per-patch activation budget; OOM retry in the predictor
+            # shrinks the batch if this guess is too optimistic
+            free_bytes, _ = torch.cuda.mem_get_info()
+            per_patch = 192 * 1024**2 if autocast_dtype is None else 128 * 1024**2
+            batch_size = int(min(32, max(1, free_bytes // (2 * per_patch))))
+        else:
+            # on CPU, intra-op threading already uses all cores at batch 1;
+            # bigger batches only add memory pressure
+            batch_size = 1
+
     model = mlstac.load(model_path).compiled_model(device=device)
+
+    if device.type == "cuda":
+        print(
+            f"CUDA acceleration is detected! Super-resolution will run on GPU "
+            f"({torch.cuda.get_device_name(0)}).",
+            flush=True,
+        )
+    else:
+        print(
+            "No CUDA GPU detected - super-resolution will run on CPU (slower).",
+            flush=True,
+        )
 
     # ===========================
     # SUPER-RESOLVE (time or single)
@@ -542,6 +737,8 @@ def super_resolve_cube(
                 new_res=new_res,
                 nan_pixel_buffer=nan_pixel_buffer,
                 edge_crop_px=edge_crop_px,
+                batch_size=batch_size,
+                autocast_dtype=autocast_dtype,
             )
             super_list.append(da_sr_t)
 
@@ -576,6 +773,8 @@ def super_resolve_cube(
                 new_res=new_res,
                 nan_pixel_buffer=nan_pixel_buffer,
                 edge_crop_px=edge_crop_px,
+                batch_size=batch_size,
+                autocast_dtype=autocast_dtype,
             )
         # tf0 is also used by the indices block below; without this line a
         # time-less input (e.g. a median composite) with indices attrs raised
@@ -651,5 +850,52 @@ def super_resolve_cube(
     ds_out.attrs["transform"] = transform9
     ds_out[var_name].attrs["transform"] = transform9
 
+    # ---------------------------
+    # output encoding (compression / int16 packing)
+    # ---------------------------
+    var_encoding = {}
+    if compress or pack_to_int16:
+        # chunk per band/time so partial reads stay cheap and chunks compress well
+        var_encoding["chunksizes"] = tuple(
+            min(512, ds_out.sizes[d]) if d in ("y", "x") else 1
+            for d in ds_out[var_name].dims
+        )
+    if compress:
+        var_encoding.update({"zlib": True, "complevel": 4})
+
+    if pack_to_int16:
+        vals = ds_out[var_name].values
+        vmin = float(np.nanmin(vals))
+        vmax = float(np.nanmax(vals))
+        # 65534 int16 steps must resolve at least 1e-4 (S2's native precision)
+        if np.isfinite(vmin) and np.isfinite(vmax) and (vmax - vmin) <= 6.5:
+            scale = max((vmax - vmin) / (2**16 - 2), 1e-12)
+            # float32 scale/offset so readers decode back to float32, not float64
+            var_encoding.update(
+                {
+                    "dtype": "int16",
+                    "scale_factor": np.float32(scale),
+                    "add_offset": np.float32((vmax + vmin) / 2.0),
+                    "_FillValue": np.int16(-32768),
+                }
+            )
+        else:
+            print(
+                "Note: data range too wide (or non-finite) for int16 packing "
+                "at 1e-4 precision; writing float32 instead."
+            )
+
+    # Merge into the variable's existing .encoding (which holds grid_mapping=
+    # "spatial_ref") and write with a plain to_netcdf. Passing encoding={var_name:
+    # ...} to to_netcdf would override var.encoding and drop grid_mapping, leaving
+    # the output ungeoreferenced. Eager (non-dask) write on purpose: writing a
+    # dask-backed variable to netCDF4/HDF5 is not thread-safe (causes "NetCDF: HDF
+    # error") and is far slower here.
+    if var_encoding:
+        ds_out[var_name].encoding.update(var_encoding)
     ds_out.to_netcdf(output_path)
-    print(f"Data cube is super-resolved to 2.5-meters! (model_type={model_type_used})")
+    size_mb = os.path.getsize(output_path) / 1e6
+    print(
+        f"Data cube is super-resolved to 2.5-meters! "
+        f"(model_type={model_type_used}, {size_mb:.1f} MB)"
+    )

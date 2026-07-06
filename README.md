@@ -60,12 +60,6 @@ The result is a data cube that is cloud-masked with customizable thresholds, spa
 ## Installation
 Installation is possible with package managers like [Micromamba](https://mamba.readthedocs.io/en/latest/installation/micromamba-installation.html) & [Anaconda](https://www.anaconda.com/docs/getting-started/anaconda/install).<br>
 
-Choose one of the two methods below:
-
----
-
-### Option A - Manual Installation (recommended)
-
 #### Step 1: Clone the repository to your current working directory
 
     git clone https://github.com/BaturalpArisoy/stac2cube.git
@@ -94,18 +88,41 @@ If git is not available for you, download and unzip the file: https://github.com
 
 ---
 
-### Option B - Automated Installation via Claude Code
+### Optional: GPU (CUDA) acceleration for super-resolution (Windows only)
 
-**Important**: AI agents can easily make mistakes and should not be trusted fully. This prompt is for installation only and does not produce any data or another result.<br><br>
-If you have [Claude Code](https://claude.ai/code) available, the entire installation can be handled automatically, no manual commands needed.
+**Linux users (including HPC systems such as terrabyte) can skip this section** - the installation above already comes with a CUDA-enabled PyTorch, and super-resolution automatically uses an NVIDIA GPU if one is present.
 
-1. Open the `stac2cube` folder in VS Code
-2. Open Claude Code in the terminal (or any Claude agent with terminal access)
-3. Open [INSTALL_PROMPT.md](INSTALL_PROMPT.md), copy the full prompt inside the code block, and paste it into Claude Code
-4. Claude will detect your OS and package manager, then ask you **at most two questions**:
-   - Which package manager to use (only if both Micromamba and conda are found)
-   - Whether to keep or replace an existing `stac2cube` environment (only if one already exists)
-5. Everything else runs automatically. Claude verifies the install before reporting success.
+This step is only needed on **Windows**, where the default PyTorch is CPU-only: super-resolution runs on the CPU (it works, just slowly) until you swap in the CUDA build below. Once installed, the code detects and uses the GPU automatically.
+
+First, check that you have a CUDA-capable NVIDIA GPU:
+
+    nvidia-smi
+
+If it prints a table showing your NVIDIA GPU and a CUDA version of 12.x, you are ready to continue. If the command is not found, you do not have an NVIDIA GPU or driver, so stay on the CPU build.
+
+Then replace the CPU PyTorch in the `stac2cube` environment with the matching CUDA build:
+
+<!-- Maintainers: keep the +cu121 suffix on both versions. A bare torch==2.2.2 is treated by
+     pip as already satisfied by the installed 2.2.2+cpu build and silently skipped, leaving
+     the user on CPU. The +cu121 pin forces the CUDA wheels to replace the CPU ones. -->
+
+##### Micromamba
+
+    micromamba run -n stac2cube pip install torch==2.2.2+cu121 torchvision==0.17.2+cu121 --index-url https://download.pytorch.org/whl/cu121
+
+##### Anaconda Prompt
+
+    conda run -n stac2cube pip install torch==2.2.2+cu121 torchvision==0.17.2+cu121 --index-url https://download.pytorch.org/whl/cu121
+
+Verify that the GPU is detected:
+
+    micromamba run -n stac2cube python -c "import torch; print(torch.__version__, '| CUDA available:', torch.cuda.is_available())"
+
+It should print a build ending in `+cu121` and `CUDA available: True`.
+
+**Notes**
+- The CUDA build downloads ~2.4 GB of GPU libraries, which is why it is not installed by default.
+- The same build also runs on machines without a GPU (it falls back to the CPU), so it is safe to use in a shared environment.
 
 ---
 
