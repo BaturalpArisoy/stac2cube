@@ -928,6 +928,17 @@ def datacube_builder(missions_func=missions):
         min_height="90px",
     ))
 
+    # Animation status has its own box: the viewer and the animation maker are
+    # different tools, so GIF prompts/errors must never land in the interactive
+    # view's output.
+    anim_out = widgets.Output(layout=widgets.Layout(
+        border="1px solid #e5e7eb",
+        padding="10px",
+        border_radius="8px",
+        width="99%",
+        min_height="40px",
+    ))
+
     generate_btn = widgets.Button(
         description="Build Data Cube Preview",
         button_style="success",
@@ -984,6 +995,81 @@ def datacube_builder(missions_func=missions):
         style={"description_width": "120px"},
         disabled=True,
     )
+
+    # Animation rendering sections mirror the interactive viewer: presets,
+    # single band (grey levels) and custom RGB (free band mapping). Band
+    # dropdowns are populated from the built cube.
+    gif_section_w = widgets.ToggleButtons(
+        options=[
+            ("Presets", "preset"),
+            ("Single band", "band"),
+            ("Custom RGB", "custom"),
+        ],
+        value="preset",
+        style={"button_width": "110px"},
+        disabled=True,
+    )
+
+    gif_band_dd = widgets.Dropdown(
+        options=[],
+        description="Band:",
+        layout=widgets.Layout(width="260px"),
+        disabled=True,
+    )
+
+    _gif_chan_layout = widgets.Layout(width="180px")
+    _gif_chan_style = {"description_width": "24px"}
+    gif_r_dd = widgets.Dropdown(options=[], description="R:", layout=_gif_chan_layout,
+                                style=_gif_chan_style, disabled=True)
+    gif_g_dd = widgets.Dropdown(options=[], description="G:", layout=_gif_chan_layout,
+                                style=_gif_chan_style, disabled=True)
+    gif_b_dd = widgets.Dropdown(options=[], description="B:", layout=_gif_chan_layout,
+                                style=_gif_chan_style, disabled=True)
+
+    gif_stretch_w = widgets.FloatRangeSlider(
+        value=(2.0, 98.0),
+        min=0.0,
+        max=100.0,
+        step=0.5,
+        description="Stretch (%):",
+        continuous_update=False,
+        readout_format=".1f",
+        style={"description_width": "initial"},
+        layout=widgets.Layout(width="380px"),
+        disabled=True,
+    )
+    gif_stretch_hint = widgets.HTML(
+        "<div style='font-size:11px; color:#6b7280; margin-left:4px;'>"
+        "Per-frame percentile clip, so outlier min/max pixels do not blind the "
+        "scenes (default 2-98)."
+        "</div>"
+    )
+
+    # Contextual rows: only the active section's controls are visible.
+    gif_preset_box = widgets.VBox(
+        [_stacked_field(gif_display_mode_w, "Display mode")],
+        layout=widgets.Layout(width="100%"),
+    )
+    gif_band_box = widgets.VBox(
+        [gif_band_dd], layout=widgets.Layout(width="100%", display="none")
+    )
+    gif_custom_box = widgets.VBox(
+        [widgets.HBox([gif_r_dd, gif_g_dd, gif_b_dd],
+                      layout=widgets.Layout(gap="8px"))],
+        layout=widgets.Layout(width="100%", display="none"),
+    )
+    gif_stretch_box = widgets.VBox(
+        [gif_stretch_w, gif_stretch_hint],
+        layout=widgets.Layout(width="100%", gap="0px", display="none"),
+    )
+
+    def _sync_gif_section_visibility():
+        sec = gif_section_w.value
+        gif_preset_box.layout.display = "" if sec == "preset" else "none"
+        gif_band_box.layout.display = "" if sec == "band" else "none"
+        gif_custom_box.layout.display = "" if sec == "custom" else "none"
+        # Presets keep their fixed scaling; the stretch applies to band/custom.
+        gif_stretch_box.layout.display = "" if sec in ("band", "custom") else "none"
 
     gif_fps_w = widgets.IntText(
         value=3,
@@ -2085,7 +2171,13 @@ def datacube_builder(missions_func=missions):
 
     def _set_visualization_enabled(enabled: bool):
         viz_dropdown_btn.disabled = not enabled
+        gif_section_w.disabled = not enabled
         gif_display_mode_w.disabled = not enabled
+        gif_band_dd.disabled = not enabled
+        gif_r_dd.disabled = not enabled
+        gif_g_dd.disabled = not enabled
+        gif_b_dd.disabled = not enabled
+        gif_stretch_w.disabled = not enabled
         gif_fps_w.disabled = not enabled
         gif_label_w.disabled = not enabled
         gif_out_path_w.disabled = not enabled
@@ -2096,6 +2188,39 @@ def datacube_builder(missions_func=missions):
             with viz_out:
                 clear_output()
                 print("ℹ️ Build a data cube first to activate visualization tools.")
+            with anim_out:
+                clear_output()
+
+    def _refresh_gif_band_options():
+        """Populate the animation band selectors from the active cube's bands."""
+        try:
+            cube = _active_result_cube()
+            if cube is None:
+                return
+            da = _pick_dataarray_for_visualization(cube)
+        except Exception:
+            return
+
+        if "band" in da.dims:
+            bands = [str(b) for b in da.coords["band"].values]
+        else:
+            bands = [str(da.name) if da.name is not None else "layer"]
+        lower = [b.lower() for b in bands]
+
+        def _default(name, idx):
+            if name in lower:
+                return bands[lower.index(name)]
+            return bands[min(idx, len(bands) - 1)]
+
+        for dd, default in (
+            (gif_band_dd, bands[0]),
+            (gif_r_dd, _default("red", 0)),
+            (gif_g_dd, _default("green", 1)),
+            (gif_b_dd, _default("blue", 2)),
+        ):
+            old = dd.value
+            dd.options = bands
+            dd.value = old if old in bands else default
 
     def _auto_gif_filename_from_polygon_and_mode():
         raw = (polygon_w.value or "").strip()
@@ -2110,8 +2235,18 @@ def datacube_builder(missions_func=missions):
             stem = "test"
 
         stem = re.sub(r"[^A-Za-z0-9._-]+", "_", stem).strip("._-") or "test"
-        mode = (gif_display_mode_w.value or "rgb").strip()
+        mode = _gif_mode_token()
         return f"{stem}_{mode}.gif"
+
+    def _gif_mode_token():
+        """Filename token describing the current animation rendering choice."""
+        sec = gif_section_w.value
+        if sec == "band":
+            b = str(gif_band_dd.value or "band")
+            return re.sub(r"[^A-Za-z0-9._-]+", "_", f"band_{b}")
+        if sec == "custom":
+            return "customRGB"
+        return (gif_display_mode_w.value or "rgb").strip()
 
     def _auto_gif_output_suggestion():
         return f"./animations/{_auto_gif_filename_from_polygon_and_mode()}"
@@ -3010,10 +3145,7 @@ def datacube_builder(missions_func=missions):
 
             with viz_out:
                 clear_output()
-                print("Launching interactive time viewer...")
-                print("")
-                print("Note: Please be patient when selecting a date, the loading speed depends on your local machine.")
-                print("")
+                print("Note: Scenes are computed on demand, so changing the date or bands may take a moment depending on your machine.")
                 out = interactive_time_view(stac=da, widget_type="dropdown")
                 if out is not None:
                     display(out)
@@ -3023,11 +3155,38 @@ def datacube_builder(missions_func=missions):
                 clear_output()
                 print(_friendly_error(e, "Visualization"))
 
+    def _current_gif_render_kwargs():
+        """save_timeseries_gif kwargs for the active animation section."""
+        sec = gif_section_w.value
+        if sec == "band":
+            if not gif_band_dd.value:
+                raise ValueError("Select a band for the single-band animation.")
+            kwargs = {"display_mode": "band", "band": str(gif_band_dd.value)}
+        elif sec == "custom":
+            if not (gif_r_dd.value and gif_g_dd.value and gif_b_dd.value):
+                raise ValueError("Select R, G and B bands for the custom animation.")
+            kwargs = {
+                "display_mode": "custom",
+                "rgb_bands": (
+                    str(gif_r_dd.value),
+                    str(gif_g_dd.value),
+                    str(gif_b_dd.value),
+                ),
+            }
+        else:
+            return {"display_mode": gif_display_mode_w.value}
+
+        p_lo, p_hi = (float(v) for v in gif_stretch_w.value)
+        if p_hi <= p_lo:
+            p_lo, p_hi = 2.0, 98.0
+        kwargs.update(p_low=p_lo, p_high=p_hi)
+        return kwargs
+
     def _on_viz_make_gif_clicked(_):
         try:
             cube = _active_result_cube()
             if cube is None:
-                with viz_out:
+                with anim_out:
                     clear_output()
                     print("ℹ️ Build a data cube first.")
                 return
@@ -3047,21 +3206,23 @@ def datacube_builder(missions_func=missions):
             if fps_val <= 0:
                 raise ValueError("FPS must be > 0.")
 
-            with viz_out:
+            gif_kwargs = _current_gif_render_kwargs()
+
+            with anim_out:
                 clear_output()
                 print("Generating animation GIF...")
                 # Animation is generated only (no preview inside GUI)
                 save_timeseries_gif(
                     da=da,
                     out_path=out_path,
-                    display_mode=gif_display_mode_w.value,
                     fps=fps_val,
                     label=gif_label_w.value,
+                    **gif_kwargs,
                 )
                 print(f"✅ Animation saved: {out_path}")
 
         except Exception as e:
-            with viz_out:
+            with anim_out:
                 clear_output()
                 print(_friendly_error(e, "Animation"))
 
@@ -3145,6 +3306,7 @@ def datacube_builder(missions_func=missions):
                 export_result_btn.disabled = False
                 _set_visualization_enabled(True)
                 _refresh_viz_feature_options()
+                _refresh_gif_band_options()
                 _update_gif_output_suggestion()
 
                 # Fresh build shows everything; enable the Max cloud % filter only
@@ -3286,6 +3448,16 @@ def datacube_builder(missions_func=missions):
     gif_display_mode_w.observe(
         lambda change: _update_gif_output_suggestion(), names="value"
     )
+    gif_section_w.observe(
+        lambda change: (
+            _sync_gif_section_visibility(),
+            _update_gif_output_suggestion(),
+        ),
+        names="value",
+    )
+    gif_band_dd.observe(lambda change: _update_gif_output_suggestion(), names="value")
+    # Different features of a multi-feature build may carry different bands.
+    viz_feature_w.observe(lambda change: _refresh_gif_band_options(), names="value")
 
     # -------------------------------------------------------------------------
     # Layout
@@ -4287,27 +4459,39 @@ def datacube_builder(missions_func=missions):
     visualization_box = widgets.VBox(
         [
             viz_feature_box,
-            # widgets.HTML("<b>Visualization</b>"),
-            # widgets.HTML("<div style='font-size:12px; color:#666;'>Available after building a data cube.</div>"),
             widgets.VBox(
                 [
                     widgets.HTML("<b>1) Interactive View</b>"),
                     widgets.HTML(
-                        "<div style='font-size:12px; color:#666;'>Interactive viewer will be displayed below, when clicked.</div>"
+                        "<div style='font-size:12px; color:#666;'>Explore the cube scene by scene: "
+                        "presets (RGB, false color, indices), any single band in grey levels, or a "
+                        "custom R/G/B band combination. The viewer opens below.</div>"
                     ),
                     viz_dropdown_btn,
                 ],
                 layout=widgets.Layout(width="100%", gap="6px"),
             ),
             viz_out,
+            widgets.HTML(
+                "<div style='border-top:1px solid #e5e7eb; margin:6px 0 2px 0;'></div>"
+            ),
             widgets.VBox(
                 [
-                    widgets.HTML("<b>2) Animation (export only)</b>"),
-                    _stacked_field(gif_display_mode_w, "Display mode"),
+                    widgets.HTML("<b>2) Animation (GIF export)</b>"),
+                    widgets.HTML(
+                        "<div style='font-size:12px; color:#666;'>Renders the whole time series "
+                        "to an animated GIF on disk. Status is reported below the button.</div>"
+                    ),
+                    gif_section_w,
+                    gif_preset_box,
+                    gif_band_box,
+                    gif_custom_box,
+                    gif_stretch_box,
                     _with_help_left(gif_fps_w, "fps", label_text="FPS"),
                     _with_help_left(gif_label_w, "anim_label", label_text="Label"),
                     _stacked_field(gif_output_input_box, "Output GIF"),
                     viz_make_gif_btn,
+                    anim_out,
                 ],
                 layout=widgets.Layout(width="100%", gap="6px"),
             ),
@@ -4513,7 +4697,13 @@ def datacube_builder(missions_func=missions):
             "export_result_btn": export_result_btn,
             "copy_json_btn": copy_json_btn,
             "viz_dropdown_btn": viz_dropdown_btn,
+            "gif_section": gif_section_w,
             "gif_display_mode": gif_display_mode_w,
+            "gif_band": gif_band_dd,
+            "gif_r": gif_r_dd,
+            "gif_g": gif_g_dd,
+            "gif_b": gif_b_dd,
+            "gif_stretch": gif_stretch_w,
             "gif_fps": gif_fps_w,
             "gif_label": gif_label_w,
             "gif_out_path": gif_out_path_w,
@@ -4524,6 +4714,7 @@ def datacube_builder(missions_func=missions):
             "result": result_out,
             "status": status_out,
             "visualization": viz_out,
+            "animation": anim_out,
         },
     }
 
@@ -4726,10 +4917,50 @@ def datacube_editor():
         stem = re.sub(r"[^A-Za-z0-9._-]+", "_", _loaded_stem_default()).strip("._-") or "cube"
         return f"./results/{stem}_edited.nc"
 
+    def _gif_mode_token():
+        """Filename token describing the current animation rendering choice."""
+        sec = gif_section_w.value
+        if sec == "band":
+            b = str(gif_band_dd.value or "band")
+            return re.sub(r"[^A-Za-z0-9._-]+", "_", f"band_{b}")
+        if sec == "custom":
+            return "customRGB"
+        return (gif_display_mode_w.value or "rgb").strip()
+
     def _auto_gif_output_suggestion():
         stem = re.sub(r"[^A-Za-z0-9._-]+", "_", _loaded_stem_default()).strip("._-") or "cube"
-        mode = (gif_display_mode_w.value or "rgb").strip()
-        return f"./animations/{stem}_{mode}.gif"
+        return f"./animations/{stem}_{_gif_mode_token()}.gif"
+
+    def _refresh_gif_band_options():
+        """Populate the animation band selectors from the working cube's bands."""
+        obj = state.get("current")
+        if obj is None:
+            return
+        try:
+            da = _pick_dataarray_for_visualization(obj)
+        except Exception:
+            return
+
+        if "band" in da.dims:
+            bands = [str(b) for b in da.coords["band"].values]
+        else:
+            bands = [str(da.name) if da.name is not None else "layer"]
+        lower = [b.lower() for b in bands]
+
+        def _default(name, idx):
+            if name in lower:
+                return bands[lower.index(name)]
+            return bands[min(idx, len(bands) - 1)]
+
+        for dd, default in (
+            (gif_band_dd, bands[0]),
+            (gif_r_dd, _default("red", 0)),
+            (gif_g_dd, _default("green", 1)),
+            (gif_b_dd, _default("blue", 2)),
+        ):
+            old = dd.value
+            dd.options = bands
+            dd.value = old if old in bands else default
 
     def _safe_copy_xarray(obj):
         try:
@@ -4890,7 +5121,13 @@ def datacube_editor():
 
         # Visualization
         viz_dropdown_btn.disabled = not enabled
+        gif_section_w.disabled = not enabled
         gif_display_mode_w.disabled = not enabled
+        gif_band_dd.disabled = not enabled
+        gif_r_dd.disabled = not enabled
+        gif_g_dd.disabled = not enabled
+        gif_b_dd.disabled = not enabled
+        gif_stretch_w.disabled = not enabled
         gif_fps_w.disabled = not enabled
         gif_label_w.disabled = not enabled
         gif_out_path_w.disabled = not enabled
@@ -4917,6 +5154,8 @@ def datacube_editor():
             with viz_out:
                 clear_output()
                 print("ℹ️ Load a cube first to activate visualization tools.")
+            with anim_out:
+                clear_output()
 
     def _update_slice_widget_enabled_state(editor_enabled):
         obj = state.get("current")
@@ -5702,6 +5941,81 @@ def datacube_editor():
         disabled=True,
     )
 
+    # Animation rendering sections mirror the interactive viewer: presets,
+    # single band (grey levels) and custom RGB (free band mapping). Band
+    # dropdowns are populated from the loaded/edited cube.
+    gif_section_w = widgets.ToggleButtons(
+        options=[
+            ("Presets", "preset"),
+            ("Single band", "band"),
+            ("Custom RGB", "custom"),
+        ],
+        value="preset",
+        style={"button_width": "110px"},
+        disabled=True,
+    )
+
+    gif_band_dd = widgets.Dropdown(
+        options=[],
+        description="Band:",
+        layout=widgets.Layout(width="260px"),
+        disabled=True,
+    )
+
+    _gif_chan_layout = widgets.Layout(width="180px")
+    _gif_chan_style = {"description_width": "24px"}
+    gif_r_dd = widgets.Dropdown(options=[], description="R:", layout=_gif_chan_layout,
+                                style=_gif_chan_style, disabled=True)
+    gif_g_dd = widgets.Dropdown(options=[], description="G:", layout=_gif_chan_layout,
+                                style=_gif_chan_style, disabled=True)
+    gif_b_dd = widgets.Dropdown(options=[], description="B:", layout=_gif_chan_layout,
+                                style=_gif_chan_style, disabled=True)
+
+    gif_stretch_w = widgets.FloatRangeSlider(
+        value=(2.0, 98.0),
+        min=0.0,
+        max=100.0,
+        step=0.5,
+        description="Stretch (%):",
+        continuous_update=False,
+        readout_format=".1f",
+        style={"description_width": "initial"},
+        layout=widgets.Layout(width="380px"),
+        disabled=True,
+    )
+    gif_stretch_hint = widgets.HTML(
+        "<div style='font-size:11px; color:#6b7280; margin-left:4px;'>"
+        "Per-frame percentile clip, so outlier min/max pixels do not blind the "
+        "scenes (default 2-98)."
+        "</div>"
+    )
+
+    # Contextual rows: only the active section's controls are visible.
+    gif_preset_box = widgets.VBox(
+        [_stacked_field(gif_display_mode_w, "Display mode")],
+        layout=widgets.Layout(width="100%"),
+    )
+    gif_band_box = widgets.VBox(
+        [gif_band_dd], layout=widgets.Layout(width="100%", display="none")
+    )
+    gif_custom_box = widgets.VBox(
+        [widgets.HBox([gif_r_dd, gif_g_dd, gif_b_dd],
+                      layout=widgets.Layout(gap="8px"))],
+        layout=widgets.Layout(width="100%", display="none"),
+    )
+    gif_stretch_box = widgets.VBox(
+        [gif_stretch_w, gif_stretch_hint],
+        layout=widgets.Layout(width="100%", gap="0px", display="none"),
+    )
+
+    def _sync_gif_section_visibility():
+        sec = gif_section_w.value
+        gif_preset_box.layout.display = "" if sec == "preset" else "none"
+        gif_band_box.layout.display = "" if sec == "band" else "none"
+        gif_custom_box.layout.display = "" if sec == "custom" else "none"
+        # Presets keep their fixed scaling; the stretch applies to band/custom.
+        gif_stretch_box.layout.display = "" if sec in ("band", "custom") else "none"
+
     gif_fps_w = widgets.IntText(
         value=3,
         description="FPS:",
@@ -5802,6 +6116,19 @@ def datacube_editor():
             border_radius="8px",
             width="99%",
             min_height="90px",
+        )
+    )
+
+    # Animation status has its own box: the viewer and the animation maker are
+    # different tools, so GIF prompts/errors must never land in the interactive
+    # view's output.
+    anim_out = widgets.Output(
+        layout=widgets.Layout(
+            border="1px solid #e5e7eb",
+            padding="10px",
+            border_radius="8px",
+            width="99%",
+            min_height="40px",
         )
     )
 
@@ -6483,6 +6810,7 @@ def datacube_editor():
         _populate_slice_widgets_from_current(select_all=True)
         _populate_indices_widget_from_current()
         _set_editor_enabled(True)
+        _refresh_gif_band_options()
         _update_gif_output_suggestion(force=True)
         _update_update_daterange_example(force=True)
 
@@ -6640,6 +6968,7 @@ def datacube_editor():
 
         state["current"] = _safe_copy_xarray(state["loaded_original"])
         _populate_slice_widgets_from_current(select_all=True)
+        _refresh_gif_band_options()
         _show_result_current()
 
         with status_out:
@@ -6714,6 +7043,7 @@ def datacube_editor():
 
                 # Refresh UI from updated current cube
                 _populate_slice_widgets_from_current(select_all=True)
+                _refresh_gif_band_options()
                 _show_result_current()
 
                 if changed_any:
@@ -6780,7 +7110,6 @@ def datacube_editor():
                 clear_output()
                 if isinstance(state["current"], xr.Dataset) and da.name != "Spectral_Temporal_Stack":
                     print(f"ℹ️ Visualizing dataset variable: {da.name}")
-                print("Launching interactive viewer...")
                 out = interactive_time_view(stac=da, widget_type="dropdown")
                 if out is not None:
                     display(out)
@@ -6789,9 +7118,36 @@ def datacube_editor():
                 clear_output()
                 print(_friendly_error(e, "Visualization"))
 
+    def _current_gif_render_kwargs():
+        """save_timeseries_gif kwargs for the active animation section."""
+        sec = gif_section_w.value
+        if sec == "band":
+            if not gif_band_dd.value:
+                raise ValueError("Select a band for the single-band animation.")
+            kwargs = {"display_mode": "band", "band": str(gif_band_dd.value)}
+        elif sec == "custom":
+            if not (gif_r_dd.value and gif_g_dd.value and gif_b_dd.value):
+                raise ValueError("Select R, G and B bands for the custom animation.")
+            kwargs = {
+                "display_mode": "custom",
+                "rgb_bands": (
+                    str(gif_r_dd.value),
+                    str(gif_g_dd.value),
+                    str(gif_b_dd.value),
+                ),
+            }
+        else:
+            return {"display_mode": gif_display_mode_w.value}
+
+        p_lo, p_hi = (float(v) for v in gif_stretch_w.value)
+        if p_hi <= p_lo:
+            p_lo, p_hi = 2.0, 98.0
+        kwargs.update(p_low=p_lo, p_high=p_hi)
+        return kwargs
+
     def _on_make_gif_clicked(_):
         if state["current"] is None:
-            with viz_out:
+            with anim_out:
                 clear_output()
                 print("ℹ️ Load a cube first.")
             return
@@ -6819,20 +7175,22 @@ def datacube_editor():
 
             Path(out_path).parent.mkdir(parents=True, exist_ok=True)
 
-            with viz_out:
+            gif_kwargs = _current_gif_render_kwargs()
+
+            with anim_out:
                 clear_output()
                 print("Generating animation GIF...")
                 save_timeseries_gif(
                     da=da,
                     out_path=out_path,
-                    display_mode=gif_display_mode_w.value,
                     fps=fps_val,
                     label=gif_label_w.value,
+                    **gif_kwargs,
                 )
                 print(f"✅ Animation saved: {out_path}")
 
         except Exception as e:
-            with viz_out:
+            with anim_out:
                 clear_output()
                 print(_friendly_error(e, "Animation"))
 
@@ -6897,6 +7255,14 @@ def datacube_editor():
     # Result panel live when it changes (no Edit-button click needed).
     aggregator_w.observe(_on_aggregator_change, names="value")
     gif_display_mode_w.observe(lambda change: _update_gif_output_suggestion(), names="value")
+    gif_section_w.observe(
+        lambda change: (
+            _sync_gif_section_visibility(),
+            _update_gif_output_suggestion(),
+        ),
+        names="value",
+    )
+    gif_band_dd.observe(lambda change: _update_gif_output_suggestion(), names="value")
     update_daterange_mode_w.observe(lambda change: _update_update_daterange_example(), names="value")
 
     # ---------------------------------------------------------------------
@@ -7307,29 +7673,44 @@ def datacube_editor():
 
     visualization_box = widgets.VBox(
         [
-            #widgets.HTML("<b>Visualization</b>"),
-            #widgets.HTML("<div style='font-size:12px; color:#666;'>Available after loading a cube. For GIFs, a time dimension is required.</div>"),
             widgets.VBox(
                 [
                     widgets.HTML("<b>1) Interactive View</b>"),
-                    #widgets.HTML("<div style='font-size:12px; color:#666;'>Dropdown mode.</div>"),
+                    widgets.HTML(
+                        "<div style='font-size:12px; color:#666;'>Explore the cube scene by scene: "
+                        "presets (RGB, false color, indices), any single band in grey levels, or a "
+                        "custom R/G/B band combination. The viewer opens below.</div>"
+                    ),
                     viz_dropdown_btn,
                 ],
                 layout=widgets.Layout(width="100%", gap="6px"),
             ),
             viz_out,
+            widgets.HTML(
+                "<div style='border-top:1px solid #e5e7eb; margin:6px 0 2px 0;'></div>"
+            ),
             widgets.VBox(
                 [
-                    widgets.HTML("<b>2) Animation (export only)</b>"),
-                    _stacked_field(gif_display_mode_w, "Display mode"),
+                    widgets.HTML("<b>2) Animation (GIF export)</b>"),
+                    widgets.HTML(
+                        "<div style='font-size:12px; color:#666;'>Renders the whole time series "
+                        "to an animated GIF on disk (requires a time dimension). Status is "
+                        "reported below the button.</div>"
+                    ),
+                    gif_section_w,
+                    gif_preset_box,
+                    gif_band_box,
+                    gif_custom_box,
+                    gif_stretch_box,
                     _stacked_field_with_help(gif_fps_w, "FPS", "fps"),
                     _stacked_field_with_help(gif_label_w, "Label", "gif_label"),
                     _stacked_field(gif_input_box, "Output GIF"),
                     viz_make_gif_btn,
+                    anim_out,
                 ],
                 layout=widgets.Layout(width="100%", gap="6px"),
             ),
-            
+
         ],
         layout=widgets.Layout(width="100%", gap="8px"),
     )
@@ -7462,7 +7843,13 @@ def datacube_editor():
             "export_target": export_target_w,
             "export_current_btn": export_current_btn,
             "viz_dropdown_btn": viz_dropdown_btn,
+            "gif_section": gif_section_w,
             "gif_display_mode": gif_display_mode_w,
+            "gif_band": gif_band_dd,
+            "gif_r": gif_r_dd,
+            "gif_g": gif_g_dd,
+            "gif_b": gif_b_dd,
+            "gif_stretch": gif_stretch_w,
             "gif_fps": gif_fps_w,
             "gif_label": gif_label_w,
             "gif_out_path": gif_out_path_w,
@@ -7473,6 +7860,7 @@ def datacube_editor():
             "result": result_out,
             "status": status_out,
             "visualization": viz_out,
+            "animation": anim_out,
         },
     }
 

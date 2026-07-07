@@ -224,17 +224,24 @@ def _nd_to_rgb_uint8(
 # FRAME RENDERING (single time index)
 # ==========================================================
 def _render_frame_as_uint8(
-    stac_mode: xr.DataArray, display_mode: str, idx: int, scaling
+    stac_mode: xr.DataArray, display_mode: str, idx: int, scaling, raw=None
 ):
     """
     Returns a uint8 RGB image.
     Lazy-safe: computes ONLY the selected time slice.
+
+    ``raw`` optionally carries the already-computed pixel values of this slice
+    ((y, x, band) for rgb/false_color, (y, x) for ndvi/ndwi) so a caller-side
+    frame cache can restyle a scene without re-reading the data.
     """
     dm = str(display_mode).lower().strip()
 
     if dm in ["rgb", "false_color"]:
-        frame = stac_mode.isel(time=idx).transpose("y", "x", "band")
-        rgb = frame.values  # lazy -> computes only this slice
+        if raw is not None:
+            rgb = raw
+        else:
+            frame = stac_mode.isel(time=idx).transpose("y", "x", "band")
+            rgb = frame.values  # lazy -> computes only this slice
 
         if _missing_frame(rgb):
             return None
@@ -268,8 +275,11 @@ def _render_frame_as_uint8(
         )
 
     # NDVI / NDWI
-    frame = stac_mode.isel(time=idx)
-    data = frame.values  # lazy -> computes only this slice
+    if raw is not None:
+        data = raw
+    else:
+        frame = stac_mode.isel(time=idx)
+        data = frame.values  # lazy -> computes only this slice
 
     if _missing_frame(data):
         return None
@@ -467,7 +477,7 @@ def _apply_lut(u8: np.ndarray, lut: np.ndarray, nodata_mask: np.ndarray | None =
 def make_frame(
     da: xr.DataArray,
     t,
-    display_mode="rgb",  # "rgb" | "false_color" | "ndvi" | "ndwi"
+    display_mode="rgb",  # "rgb" | "false_color" | "ndvi" | "ndwi" | "band" | "custom"
     max_width=None,
     label=True,
     # label sizing (normally leave)
@@ -475,13 +485,17 @@ def make_frame(
     font_min=14,
     font_max=48,
     bar_pad=None,
-    # rgb/false-color stretch defaults
+    # stretch defaults (rgb/false-color/band/custom)
     p_low=2,
     p_high=98,
     gamma=1.1,
     # index ranges
     ndvi_range=(-1.0, 1.0),
     ndwi_range=(-1.0, 1.0),
+    # display_mode="band": name of the band to render in grey levels
+    band=None,
+    # display_mode="custom": (r, g, b) band names, QGIS-style free mapping
+    rgb_bands=None,
 ):
     mode = str(display_mode).lower().strip()
 
@@ -574,9 +588,37 @@ def make_frame(
         rgb = _apply_lut(u, _NDWI_LUT, nodata_mask=nodata)
         im = Image.fromarray(rgb, mode="RGB")
 
+    elif mode == "band":
+        # Single band in grey levels with per-frame percentile stretch.
+        if band is None or str(band).strip() == "":
+            raise ValueError("display_mode='band' requires the 'band' argument.")
+        if "band" in da.dims:
+            key = _band_key(da, str(band))
+            A = da.sel(time=t, band=key).transpose("y", "x").compute().values
+        else:
+            # Band-less array (single layer time series): render it directly.
+            A = da.sel(time=t).transpose("y", "x").compute().values
+        u = _stretch_uint8(A, p_low, p_high, gamma)
+        im = Image.fromarray(u, mode="L").convert("RGB")
+
+    elif mode == "custom":
+        # Free channel mapping: any band to R, G and B (QGIS logic).
+        if not rgb_bands or len(rgb_bands) != 3:
+            raise ValueError(
+                "display_mode='custom' requires rgb_bands=(r_band, g_band, b_band)."
+            )
+        keys = [_band_key(da, str(b)) for b in rgb_bands]
+        chans = [
+            da.sel(time=t, band=k).transpose("y", "x").compute().values
+            for k in keys
+        ]
+        rgb = np.dstack([_stretch_uint8(c, p_low, p_high, gamma) for c in chans])
+        im = Image.fromarray(rgb, mode="RGB")
+
     else:
         raise ValueError(
-            "display_mode must be one of: 'rgb', 'false_color', 'ndvi', 'ndwi'"
+            "display_mode must be one of: 'rgb', 'false_color', 'ndvi', 'ndwi', "
+            "'band', 'custom'"
         )
 
     # optional downscale only
@@ -599,9 +641,13 @@ def make_frame(
 
 
 # ---------------- GIF SAVER ----------------
-def _bands_needed_for_mode(display_mode):
+def _bands_needed_for_mode(display_mode, band=None, rgb_bands=None):
     """Band names required to render a single frame in the given display mode."""
     mode = str(display_mode).lower().strip()
+    if mode == "band":
+        return [str(band)] if band else []
+    if mode == "custom":
+        return [str(b) for b in (rgb_bands or [])]
     return {
         "rgb": ["red", "green", "blue"],
         "false_color": ["nir", "red", "green"],
@@ -610,7 +656,7 @@ def _bands_needed_for_mode(display_mode):
     }.get(mode, [])
 
 
-def _materialize_for_gif(da: xr.DataArray, display_mode):
+def _materialize_for_gif(da: xr.DataArray, display_mode, band=None, rgb_bands=None):
     """
     Load the bands needed for the animation into memory ONCE.
 
@@ -632,14 +678,18 @@ def _materialize_for_gif(da: xr.DataArray, display_mode):
 
     sub = da
     if "band" in da.dims:
-        wanted = _bands_needed_for_mode(display_mode)
+        wanted = _bands_needed_for_mode(display_mode, band=band, rgb_bands=rgb_bands)
         keys = []
         for name in wanted:
             try:
-                keys.append(_band_key(da, name))
+                k = _band_key(da, name)
             except KeyError:
                 # Let make_frame raise the precise, user-facing band error.
                 return da.load()
+            # Custom RGB may map the same band to several channels; sel() with
+            # duplicate keys would duplicate the band axis.
+            if k not in keys:
+                keys.append(k)
         if keys:
             sub = da.sel(band=keys)
     return sub.load()
@@ -652,11 +702,25 @@ def save_timeseries_gif(
     display_mode="rgb",
     max_width=None,
     label=True,
+    band=None,        # display_mode="band": band name to render in grey levels
+    rgb_bands=None,   # display_mode="custom": (r, g, b) band names
+    p_low=2,
+    p_high=98,
 ):
-    da = _materialize_for_gif(da, display_mode)
+    da = _materialize_for_gif(da, display_mode, band=band, rgb_bands=rgb_bands)
     times = list(da.coords["time"].values)
     frames = [
-        make_frame(da, t, display_mode=display_mode, max_width=max_width, label=label)
+        make_frame(
+            da,
+            t,
+            display_mode=display_mode,
+            max_width=max_width,
+            label=label,
+            band=band,
+            rgb_bands=rgb_bands,
+            p_low=p_low,
+            p_high=p_high,
+        )
         for t in times
     ]
     duration_ms = int(1000 / max(1, fps))
@@ -674,12 +738,18 @@ def interactive_time_view(
     modes=("rgb", "false_color", "ndvi", "ndwi"),
 ):
     """
-    Interactive viewer with TWO controls:
-      1) display_mode dropdown (default RGB)
-      2) time slider or date dropdown
+    Interactive cube viewer with three visualization sections:
 
-    Uses your existing pipeline: _select_mode, _apply_crop, _get_extent_and_origin,
-    _get_scaling_policy, _render_frame_as_uint8.
+      1) Presets     - RGB / False color / NDVI / NDWI composites (default).
+      2) Single band - any band of the cube shown in grey levels, with a
+                       percentile min/max stretch so a few outlier pixels
+                       cannot blind the whole scene.
+      3) Custom RGB  - free channel mapping: pick any band for R, G and B
+                       (QGIS logic), with the same percentile stretch.
+
+    A time slider or date dropdown is shared by all sections. Lazy
+    (dask-backed) cubes stay lazy: only the currently displayed scene is
+    computed.
 
     Also accepts a single image without a 'time' dimension (e.g. a temporal
     composite such as a median layer): the time control is hidden and the
@@ -693,82 +763,137 @@ def interactive_time_view(
         # per-frame rendering pipeline below be reused unchanged.
         stac = stac.expand_dims("time")
 
-    # UI
-    mode_options = []
-    for m in modes:
-        label = {
-            "rgb": "RGB",
-            "false_color": "False color",
-            "ndvi": "NDVI",
-            "ndwi": "NDWI",
-        }.get(m, m)
-        mode_options.append((label, m))
+    stac_c = _apply_crop(stac, crop)
+    extent, origin = _get_extent_and_origin(stac_c)
 
-    mode_dd = widgets.Dropdown(
-        options=mode_options,
-        value="rgb" if "rgb" in modes else modes[0],
-        description="Display Mode:",
-        layout=widgets.Layout(width="260px"),
+    if has_time:
+        time_values = pd.to_datetime(stac_c.time.values)
+        n_time = int(stac_c.time.size)
+    else:
+        time_values = None
+        n_time = 1
+
+    # ------------------------------------------------------------------
+    # Band inventory and section availability
+    # ------------------------------------------------------------------
+    if "band" in stac_c.dims:
+        band_names = [str(b) for b in stac_c.coords["band"].values]
+    else:
+        band_names = []
+    band_lower = [b.lower() for b in band_names]
+
+    # A preset is offered only when the cube actually carries the bands it
+    # needs; that way a sliced cube (e.g. no 'blue') simply hides RGB instead
+    # of erroring on click.
+    preset_needs = {
+        "rgb": ["red", "green", "blue"],
+        "false_color": ["nir", "red", "green"],
+        "ndvi": ["ndvi"],
+        "ndwi": ["ndwi"],
+    }
+    available_modes = [
+        m
+        for m in modes
+        if m in preset_needs and all(b in band_lower for b in preset_needs[m])
+    ]
+
+    section_options = []
+    if available_modes:
+        section_options.append(("Presets", "preset"))
+    # Single band works for any cube; a band-less array is treated as one layer.
+    section_options.append(("Single band", "band"))
+    if len(band_names) >= 2:
+        section_options.append(("Custom RGB", "custom"))
+
+    # ------------------------------------------------------------------
+    # Controls
+    # ------------------------------------------------------------------
+    section_w = widgets.ToggleButtons(
+        options=section_options,
+        value=section_options[0][1],
+        style={"button_width": "120px"},
+        layout=widgets.Layout(margin="0 0 2px 0"),
     )
 
-    out = widgets.Output()
+    preset_labels = {
+        "rgb": "RGB (true color)",
+        "false_color": "False color (NIR-R-G)",
+        "ndvi": "NDVI",
+        "ndwi": "NDWI",
+    }
+    mode_dd = widgets.Dropdown(
+        options=[(preset_labels.get(m, m), m) for m in available_modes]
+        or [("RGB (true color)", "rgb")],
+        value="rgb" if "rgb" in available_modes else (
+            available_modes[0] if available_modes else "rgb"
+        ),
+        description="Preset:",
+        layout=widgets.Layout(width="280px"),
+    )
 
-    # Cache per mode to avoid recomputing selection/scaling each time
-    cache = {}
+    single_options = band_names or [
+        str(stac.name) if stac.name is not None else "layer"
+    ]
+    band_dd = widgets.Dropdown(
+        options=single_options,
+        value=single_options[0],
+        description="Band:",
+        layout=widgets.Layout(width="240px"),
+    )
 
-    def _get_mode_state(mode: str):
-        mode = str(mode).lower().strip()
-        if mode in cache:
-            return cache[mode]
+    def _default_band(name, fallback_idx):
+        if name in band_lower:
+            return band_names[band_lower.index(name)]
+        return band_names[min(fallback_idx, len(band_names) - 1)]
 
-        stac_mode = _select_mode(stac, mode)
-        stac_mode = _apply_crop(stac_mode, crop)
+    if band_names:
+        r0 = _default_band("red", 0)
+        g0 = _default_band("green", 1)
+        b0 = _default_band("blue", 2)
+    else:
+        r0 = g0 = b0 = single_options[0]
 
-        extent, origin = _get_extent_and_origin(stac_mode)
-        if has_time:
-            time_values = pd.to_datetime(stac_mode.time.values)
-            n = stac_mode.time.size
-        else:
-            time_values = None
-            n = 1
-        scaling = _get_scaling_policy(stac_mode, mode)
+    chan_layout = widgets.Layout(width="190px")
+    chan_style = {"description_width": "24px"}
+    r_dd = widgets.Dropdown(options=band_names or single_options, value=r0,
+                            description="R:", layout=chan_layout, style=chan_style)
+    g_dd = widgets.Dropdown(options=band_names or single_options, value=g0,
+                            description="G:", layout=chan_layout, style=chan_style)
+    b_dd = widgets.Dropdown(options=band_names or single_options, value=b0,
+                            description="B:", layout=chan_layout, style=chan_style)
 
-        cache[mode] = {
-            "stac_mode": stac_mode,
-            "extent": extent,
-            "origin": origin,
-            "time_values": time_values,
-            "n": n,
-            "scaling": scaling,
-        }
-        return cache[mode]
-
-    # Time widget (created once, updated if needed)
-    # We build it after we know n from default mode
-    try:
-        s0 = _get_mode_state(mode_dd.value)
-    except Exception as e:
-        with out:
-            clear_output(wait=True)
-            print(f"Error initializing mode '{mode_dd.value}': {e}")
-        display(widgets.VBox([mode_dd, out]))
-        return
-
-    n0 = s0["n"]
-    time_values0 = s0["time_values"]
+    stretch_w = widgets.FloatRangeSlider(
+        value=(2.0, 98.0),
+        min=0.0,
+        max=100.0,
+        step=0.5,
+        description="Stretch (%):",
+        continuous_update=False,
+        readout_format=".1f",
+        style={"description_width": "initial"},
+        layout=widgets.Layout(width="380px"),
+    )
+    stretch_hint = widgets.HTML(
+        "<div style='font-size:11px; color:#6b7280; margin-left:4px;'>"
+        "Per-scene percentile clip: values below/above the low/high percentile "
+        "are saturated, so outlier min/max pixels do not blind the scene "
+        "(default 2-98)."
+        "</div>"
+    )
 
     if widget_type == "slider":
         time_w = widgets.IntSlider(
             min=0,
-            max=n0 - 1,
+            max=n_time - 1,
             step=1,
             value=0,
             description="Time",
-            layout=widgets.Layout(width="800px"),
+            continuous_update=False,
+            layout=widgets.Layout(width="600px"),
         )
     elif widget_type == "dropdown":
         if has_time:
-            options = [(t.strftime("%d-%m-%Y"), i) for i, t in enumerate(time_values0)]
+            options = [(t.strftime("%d-%m-%Y"), i) for i, t in enumerate(time_values)]
         else:
             options = [(static_label, 0)]
         time_w = widgets.Dropdown(
@@ -784,102 +909,227 @@ def interactive_time_view(
         # Single image: nothing to scrub through.
         time_w.layout.display = "none"
 
-    def _set_time_widget_options(state):
-        """Update time widget to match current mode's time axis (usually identical)."""
-        if not has_time:
-            return
-        n = state["n"]
-        tv = state["time_values"]
+    out = widgets.Output()
 
-        if widget_type == "slider":
-            time_w.max = n - 1
-            if time_w.value > n - 1:
-                time_w.value = n - 1
-        else:
-            opts = [(t.strftime("%d-%m-%Y"), i) for i, t in enumerate(tv)]
-            time_w.options = opts
-            if time_w.value > n - 1:
-                time_w.value = n - 1
+    # Section-specific control rows; only the active one is visible.
+    preset_box = widgets.HBox([mode_dd])
+    band_box = widgets.HBox([band_dd])
+    custom_box = widgets.HBox(
+        [r_dd, g_dd, b_dd], layout=widgets.Layout(gap="8px")
+    )
+    stretch_box = widgets.VBox(
+        [stretch_w, stretch_hint], layout=widgets.Layout(gap="0px")
+    )
+
+    def _sync_section_visibility():
+        sec = section_w.value
+        preset_box.layout.display = "" if sec == "preset" else "none"
+        band_box.layout.display = "" if sec == "band" else "none"
+        custom_box.layout.display = "" if sec == "custom" else "none"
+        # Presets keep their fixed, auto-balanced scaling policy; the manual
+        # stretch applies to the single-band and custom-RGB sections.
+        stretch_box.layout.display = "" if sec in ("band", "custom") else "none"
+
+    # ------------------------------------------------------------------
+    # Rendering
+    # ------------------------------------------------------------------
+    # Cache preset band selection + scaling so switching dates does not redo it.
+    preset_cache = {}
+
+    def _get_mode_state(mode: str):
+        mode = str(mode).lower().strip()
+        if mode not in preset_cache:
+            stac_mode = _select_mode(stac_c, mode)
+            preset_cache[mode] = {
+                "stac_mode": stac_mode,
+                "scaling": _get_scaling_policy(stac_mode, mode),
+            }
+        return preset_cache[mode]
+
+    # Raw-frame cache: interactions that only restyle already-seen pixels
+    # (moving the stretch slider, revisiting a date, remixing custom RGB
+    # channels) must not re-read the data. Values are the computed float32
+    # pixels of one scene, so revisits cost a dict lookup instead of a dask
+    # compute / network read. LRU-bounded by entry count and total bytes.
+    _frame_cache = {}
+    _FRAME_CACHE_MAX_ENTRIES = 16
+    _FRAME_CACHE_MAX_BYTES = 256 * 1024 * 1024
+
+    def _cache_get(key):
+        if key in _frame_cache:
+            _frame_cache[key] = _frame_cache.pop(key)  # move to end (LRU)
+            return _frame_cache[key]
+        return None
+
+    def _cache_put(key, val):
+        _frame_cache[key] = val
+        total = sum(v.nbytes for v in _frame_cache.values())
+        while len(_frame_cache) > 1 and (
+            total > _FRAME_CACHE_MAX_BYTES
+            or len(_frame_cache) > _FRAME_CACHE_MAX_ENTRIES
+        ):
+            oldest = next(iter(_frame_cache))
+            if oldest == key:
+                break
+            total -= _frame_cache.pop(oldest).nbytes
+        return val
+
+    def _get_band_frames(names, idx):
+        """Raw 2D float32 frames for the given band names at time idx.
+
+        Cached per band; the bands not in the cache are computed together in
+        ONE dask compute, so a custom RGB frame costs one read instead of
+        three sequential ones (dask parallelizes the band reads).
+        """
+        missing = [
+            n for n in dict.fromkeys(names) if ("band", n, idx) not in _frame_cache
+        ]
+        if missing:
+            if "band" in stac_c.dims:
+                keys = [_band_key(stac_c, n) for n in missing]
+                block = (
+                    stac_c.sel(band=keys)
+                    .isel(time=idx)
+                    .transpose("y", "x", "band")
+                    .values
+                )
+                block = np.asarray(block, dtype="float32")
+                for j, n in enumerate(missing):
+                    _cache_put(("band", n, idx), block[:, :, j])
+            else:
+                # Band-less array: every pseudo-band name is the layer itself.
+                arr = np.asarray(
+                    stac_c.isel(time=idx).transpose("y", "x").values,
+                    dtype="float32",
+                )
+                for n in missing:
+                    _cache_put(("band", n, idx), arr)
+        return [_cache_get(("band", n, idx)) for n in names]
+
+    def _get_preset_raw(mode, idx, st):
+        """Raw pixels for a preset frame at time idx, cached."""
+        key = ("preset", mode, idx)
+        raw = _cache_get(key)
+        if raw is None:
+            if mode in ("rgb", "false_color"):
+                raw = (
+                    st["stac_mode"]
+                    .isel(time=idx)
+                    .transpose("y", "x", "band")
+                    .values
+                )
+            else:
+                raw = st["stac_mode"].isel(time=idx).values
+            raw = _cache_put(key, np.asarray(raw, dtype="float32"))
+        return raw
+
+    def _render_current(idx):
+        """Returns (image, title_suffix, cmap). image=None means missing frame."""
+        sec = section_w.value
+        p_lo, p_hi = (float(v) for v in stretch_w.value)
+        if p_hi <= p_lo:
+            p_lo, p_hi = 2.0, 98.0
+
+        if sec == "preset":
+            mode = mode_dd.value
+            st = _get_mode_state(mode)
+            raw = _get_preset_raw(mode, idx, st)
+            img = _render_frame_as_uint8(
+                st["stac_mode"], mode, idx, st["scaling"], raw=raw
+            )
+            suffix = {
+                "ndvi": " (NDVI)",
+                "ndwi": " (NDWI)",
+                "false_color": " (False color)",
+            }.get(mode, "")
+            return img, suffix, None
+
+        if sec == "band":
+            suffix = f" - {band_dd.value}"
+            arr = _get_band_frames([str(band_dd.value)], idx)[0]
+            if _missing_frame(arr):
+                return None, suffix, None
+            return _stretch_uint8(arr, p_lo, p_hi), suffix, "gray"
+
+        # Custom RGB
+        names = [str(r_dd.value), str(g_dd.value), str(b_dd.value)]
+        suffix = f" - R:{names[0]} G:{names[1]} B:{names[2]}"
+        chans = _get_band_frames(names, idx)
+        if all(_missing_frame(c) for c in chans):
+            return None, suffix, None
+        rgb = np.dstack([_stretch_uint8(c, p_lo, p_hi) for c in chans])
+        return rgb, suffix, None
+
+    def _fmt_axes(ax):
+        ax.set_xlabel("Easting (10³ m)")
+        ax.set_ylabel("Northing (10⁴ m)")
+        ax.tick_params(axis="x", rotation=45)
+        ax.xaxis.set_major_locator(MaxNLocator(nbins=6, integer=True))
+        ax.yaxis.set_major_locator(MaxNLocator(nbins=6, integer=True))
+        ax.xaxis.set_major_formatter(FuncFormatter(lambda v, p: f"{v/1000:.0f}"))
+        ax.yaxis.set_major_formatter(FuncFormatter(lambda v, p: f"{v/10000:.0f}"))
+        ax.xaxis.offsetText.set_visible(False)
+        ax.yaxis.offsetText.set_visible(False)
 
     def plot_current():
-        mode = mode_dd.value
         idx = int(time_w.value)
 
         with out:
             clear_output(wait=True)
 
             try:
-                state = _get_mode_state(mode)
+                img, suffix, cmap = _render_current(idx)
             except Exception as e:
-                print(f"Mode '{mode}' not available: {e}")
+                print(f"View not available: {e}")
                 return
 
-            # keep time widget in sync (in case mode has different n)
-            if idx > state["n"] - 1:
-                idx = state["n"] - 1
-                time_w.value = idx
+            if has_time:
+                title = time_values[idx].strftime("%d-%m-%Y") + suffix
+            else:
+                title = str(static_label) + suffix
 
-            stac_mode = state["stac_mode"]
-            extent = state["extent"]
-            origin = state["origin"]
-            time_values = state["time_values"]
-            scaling = state["scaling"]
-
-            img = _render_frame_as_uint8(stac_mode, mode, idx, scaling)
             fig, ax = plt.subplots(figsize=figsize)
 
-            # Title
-            if has_time:
-                title = time_values[idx].strftime("%d-%m-%Y")
-            else:
-                title = static_label
-            if mode == "ndvi":
-                title += " (NDVI)"
-            elif mode == "ndwi":
-                title += " (NDWI)"
-            elif mode == "false_color":
-                title += " (False color)"
-
             if img is None:
-                ax.text(0.5, 0.5, "Missing Data", fontsize=16, ha="center", va="center")
+                ax.text(0.5, 0.5, "Missing Data", fontsize=16,
+                        ha="center", va="center")
                 ax.set_axis_off()
+                ax.set_title(title, fontsize=14)
                 plt.show()
                 plt.close(fig)
                 return
 
-            ax.imshow(img, interpolation="nearest", extent=extent, origin=origin)
+            if cmap is not None:
+                ax.imshow(img, cmap=cmap, vmin=0, vmax=255,
+                          interpolation="nearest", extent=extent, origin=origin)
+            else:
+                ax.imshow(img, interpolation="nearest",
+                          extent=extent, origin=origin)
             ax.set_title(title, fontsize=14)
-
-            ax.set_xlabel("Easting (10³ m)")
-            ax.set_ylabel("Northing (10⁴ m)")
-            ax.tick_params(axis="x", rotation=45)
-            ax.xaxis.set_major_locator(MaxNLocator(nbins=6, integer=True))
-            ax.yaxis.set_major_locator(MaxNLocator(nbins=6, integer=True))
-            ax.xaxis.set_major_formatter(FuncFormatter(lambda v, p: f"{v/1000:.0f}"))
-            ax.yaxis.set_major_formatter(FuncFormatter(lambda v, p: f"{v/10000:.0f}"))
-            ax.xaxis.offsetText.set_visible(False)
-            ax.yaxis.offsetText.set_visible(False)
+            _fmt_axes(ax)
 
             plt.tight_layout()
             plt.show()
             plt.close(fig)
 
-    def _on_mode_change(change):
-        # update time widget if needed + redraw
-        try:
-            state = _get_mode_state(change["new"])
-            _set_time_widget_options(state)
-        except Exception:
-            pass
+    def _on_section_change(_change):
+        _sync_section_visibility()
         plot_current()
 
-    def _on_time_change(change):
+    def _on_control_change(_change):
         plot_current()
 
-    mode_dd.observe(_on_mode_change, names="value")
-    time_w.observe(_on_time_change, names="value")
+    section_w.observe(_on_section_change, names="value")
+    for w in (mode_dd, band_dd, r_dd, g_dd, b_dd, stretch_w, time_w):
+        w.observe(_on_control_change, names="value")
 
-    display(widgets.VBox([mode_dd, time_w, out]))
+    _sync_section_visibility()
+
+    controls = widgets.VBox(
+        [section_w, preset_box, band_box, custom_box, stretch_box, time_w],
+        layout=widgets.Layout(gap="6px"),
+    )
+    display(widgets.VBox([controls, out]))
     plot_current()
 
 
