@@ -57,6 +57,59 @@ def _set_compression(ds, compress, complevel=4):
             )
 
 
+def _strip_netcdf_encoding(ds):
+    """Remove NetCDF/HDF5-only layout keys from every variable's encoding.
+
+    Needed before a Zarr write: encoding inherited from a NetCDF source (or set
+    by :func:`_set_compression`) carries keys like ``chunksizes``/``zlib`` that
+    Zarr does not understand and that would raise on ``to_zarr``.
+    """
+    for var in ds.variables.values():
+        for stale in (
+            "contiguous", "chunksizes", "zlib", "complevel", "shuffle",
+            "fletcher32", "preferred_chunks", "compression", "_FillValue",
+        ):
+            var.encoding.pop(stale, None)
+
+
+def _write_zarr(ds, output, overwrite):
+    """Write ``ds`` to a Zarr store, streaming chunks from dask.
+
+    Unlike the NetCDF path this does NOT materialize the whole cube first: the
+    array is (re)chunked to one spatial slice per (time, band) and dask writes
+    those chunks straight to the store, so peak memory is a few chunks rather
+    than the full cube - the reason Zarr is offered for very large cubes.
+
+    Compression: Zarr applies its own default lossless codec, so a store is
+    always compressed. The ``compress`` (zlib) flag is a NetCDF-only knob and
+    is intentionally not plumbed here - forcing a specific Zarr v3 codec object
+    is version-fragile, and the default already compresses well.
+    """
+    import shutil
+    import warnings
+
+    _strip_netcdf_encoding(ds)
+
+    # Uniform per-slice chunks: valid for Zarr (which needs equal chunk sizes
+    # bar the last) and good for partial reads. Daskifies an in-memory cube so
+    # the write streams in both the lazy and already-computed cases.
+    chunk_spec = {d: (-1 if d in ("y", "x") else 1) for d in ds.dims}
+    ds = ds.chunk(chunk_spec)
+
+    if overwrite and os.path.isdir(output):
+        shutil.rmtree(output, ignore_errors=True)
+
+    with warnings.catch_warnings():
+        # Both are informational and do not affect data read back by xarray
+        # (verified separately): (1) fixed-length unicode coords (e.g. band
+        # names) have no stable Zarr-v3 spec yet - other Zarr libraries may not
+        # read those *labels*, though values are fine; (2) consolidated
+        # metadata is an xarray convenience outside the v3 core spec.
+        warnings.filterwarnings("ignore", message=".*does not have a Zarr V3 specification.*")
+        warnings.filterwarnings("ignore", message=".*[Cc]onsolidated metadata.*")
+        ds.to_zarr(output, mode="w")
+
+
 def export_stac(
     stac,
     output,
@@ -66,11 +119,16 @@ def export_stac(
     overwrite=True,
     compress=False,
 ):
-    """Write a cube to NetCDF.
+    """Write a cube to disk. Output format is chosen by the file extension:
+
+    - ``*.zarr`` -> a chunked, streamed Zarr store (always compressed with
+      Zarr's default codec; low peak memory - good for very large cubes).
+    - anything else -> a single NetCDF file (the long-standing default).
 
     ``compress=True`` -> lossless zlib compression (level 4) on all spatial
-    variables. Values are bit-identical on read-back; the write is slower.
-    Shrinks cloud-masked cubes especially well (NaN runs compress strongly).
+    variables. NetCDF only (Zarr compresses by default). Values are
+    bit-identical on read-back; the write is slower. Shrinks cloud-masked
+    cubes especially well (NaN runs compress strongly).
     """
     if not isinstance(stac, (xr.DataArray, xr.Dataset)):
         raise TypeError(
@@ -84,9 +142,24 @@ def export_stac(
     stac = stac.rio.write_crs(crs, inplace=True)
     stac.attrs["crs"] = crs
 
-    if _is_dask_backed(stac):
+    is_zarr = str(output).lower().endswith(".zarr")
+
+    # NetCDF is written from an in-memory array (long-standing behavior). Zarr
+    # is kept lazy so dask can stream it chunk-by-chunk (see _write_zarr).
+    if not is_zarr and _is_dask_backed(stac):
         with ProgressBar():
             stac = stac.compute()
+
+    if isinstance(stac, xr.DataArray):
+        name = var_name or stac.name or "Spectral_Temporal_Stack"
+        ds = stac.to_dataset(name=name)
+    else:
+        ds = stac
+
+    if is_zarr:
+        _write_zarr(ds, output, overwrite)
+        print(f"Export is done: {output}")
+        return stac
 
     if overwrite and os.path.exists(output):
         try:
@@ -97,11 +170,6 @@ def export_stac(
             suffix = datetime.now().strftime("_%Y%m%d_%H%M%S")
             output = str(Path(output).with_stem(Path(output).stem + suffix))
 
-    if isinstance(stac, xr.DataArray):
-        name = var_name or stac.name or "Spectral_Temporal_Stack"
-        ds = stac.to_dataset(name=name)
-    else:
-        ds = stac
     _set_compression(ds, compress)
     ds.to_netcdf(output)
 

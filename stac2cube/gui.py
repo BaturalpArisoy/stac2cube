@@ -829,6 +829,7 @@ def datacube_builder(missions_func=missions):
         options=[
             ("NetCDF (required for Analysis Ready Data Cube Tools)", "netcdf"),
             ("Cloud Optimized Geotiffs (select folder)", "cogs"),
+            ("Zarr (for interested parties, does NOT work with Analysis Ready Data Cube Tools and Data Cube Editor)", "zarr"),
         ],
         value="netcdf",
         description="Export mode:",
@@ -844,6 +845,36 @@ def datacube_builder(missions_func=missions):
         layout=widgets.Layout(width="100%"),
         style={"description_width": "0px"},
     )
+
+    # Lossless zlib compression for the exported cube. NetCDF only: COGs and
+    # Zarr are already compressed by their own codecs, so the checkbox is
+    # hidden for those modes (see _apply_compress_visibility).
+    export_compress_w = widgets.Checkbox(
+        value=False,
+        description="Lossless compression (zlib)",
+        indent=False,
+        layout=widgets.Layout(width="auto"),
+    )
+    export_compress_warn_html = widgets.HTML(
+        "<div style='font-size:12px; color:#b00020;'>"
+        "⚠️ <b>Warning:</b> compression shrinks the output file a further "
+        "~20-40% (scene-dependent), but the export step takes roughly "
+        "<b>10x longer</b>. Enable it only for archiving, when disk space "
+        "matters more than your time.</div>"
+    )
+    export_compress_warn_html.layout.display = "none"
+
+    def _apply_compress_visibility(*_):
+        # The zlib option only applies to NetCDF; hide it entirely for cogs /
+        # zarr (already compressed) / lazy. The warning shows only when the
+        # option is both visible and ticked.
+        show = export_mode_w.value == "netcdf"
+        export_compress_w.layout.display = "" if show else "none"
+        export_compress_warn_html.layout.display = (
+            "" if (show and export_compress_w.value) else "none"
+        )
+
+    export_compress_w.observe(_apply_compress_visibility, names="value")
 
     browse_polygon_btn = widgets.Button(
         description="",
@@ -2220,20 +2251,25 @@ def datacube_builder(missions_func=missions):
             return crs_ref, transform_ref
 
         written = []
-        if export_mode == "netcdf":
+        if export_mode in ("netcdf", "zarr"):
+            want_ext = ".zarr" if export_mode == "zarr" else ".nc"
             stem, ext = os.path.splitext(export_target)
-            if ext.lower() != ".nc":
-                stem, ext = export_target, ".nc"
+            if ext.lower() not in (".nc", ".zarr"):
+                stem = export_target
+            ext = want_ext
+            compress = bool(export_compress_w.value)
             for i, c in enumerate(cubes, 1):
                 out_i = f"{stem}_{i}{ext}"
                 Path(out_i).parent.mkdir(parents=True, exist_ok=True)
                 if isinstance(c, xr.DataArray):
-                    export_stac(c, out_i, var_name=(c.name or "Spectral_Temporal_Stack"))
+                    export_stac(c, out_i, var_name=(c.name or "Spectral_Temporal_Stack"),
+                                compress=compress)
                 else:
                     crs_ref, transform_ref = _ref(c)
-                    export_stac(c, out_i, crs=crs_ref, transform=transform_ref)
+                    export_stac(c, out_i, crs=crs_ref, transform=transform_ref,
+                                compress=compress)
                 written.append(out_i)
-            return {"mode": "netcdf", "target": export_target, "files": written, "count": n}
+            return {"mode": export_mode, "target": export_target, "files": written, "count": n}
 
         if export_mode == "cogs":
             base = Path(export_target)
@@ -2277,12 +2313,14 @@ def datacube_builder(missions_func=missions):
                 i += 1
                 out_i = f"{stem}_{i}{ext}"
                 Path(out_i).parent.mkdir(parents=True, exist_ok=True)
-                export_stac(m, out_i, var_name="Cloud_Stack")
+                export_stac(m, out_i, var_name="Cloud_Stack",
+                            compress=bool(export_compress_w.value))
                 written.append(out_i)
             return written or None
 
         Path(path).parent.mkdir(parents=True, exist_ok=True)
-        export_stac(mask, path, var_name="Cloud_Stack")
+        export_stac(mask, path, var_name="Cloud_Stack",
+                    compress=bool(export_compress_w.value))
         return path
 
     def _export_current_result(export_mode: str, export_target: str):
@@ -2315,19 +2353,28 @@ def datacube_builder(missions_func=missions):
         if isinstance(obj, list):
             return _export_feature_list(obj, export_mode, export_target)
 
-        if export_mode == "netcdf":
+        if export_mode in ("netcdf", "zarr"):
+            # NetCDF -> single .nc file; Zarr -> a .zarr store. Same code path;
+            # export_stac dispatches on the extension. Swap any existing cube
+            # extension so switching mode never yields e.g. "cube.nc.zarr".
+            ext = ".zarr" if export_mode == "zarr" else ".nc"
             target = export_target
-            if not target.lower().endswith(".nc"):
-                target = target + ".nc"
-                export_target_w.value = target
+            low = target.lower()
+            if low.endswith(".nc") or low.endswith(".zarr"):
+                target = target[: target.rfind(".")]
+            if not target.lower().endswith(ext):
+                target = target + ext
+            export_target_w.value = target
 
             Path(target).parent.mkdir(parents=True, exist_ok=True)
+            compress = bool(export_compress_w.value)
 
             if isinstance(obj, xr.DataArray):
                 export_stac(
                     stac=obj,
                     output=target,
                     var_name=(obj.name or "Spectral_Temporal_Stack"),
+                    compress=compress,
                 )
 
             elif isinstance(obj, xr.Dataset):
@@ -2357,15 +2404,16 @@ def datacube_builder(missions_func=missions):
                         transform_ref = ref_da.attrs.get("transform")
 
                 export_stac(
-                    stac=obj, output=target, crs=crs_ref, transform=transform_ref
+                    stac=obj, output=target, crs=crs_ref, transform=transform_ref,
+                    compress=compress,
                 )
 
             else:
                 raise TypeError(
-                    f"Unsupported result type for NetCDF export: {type(obj)}"
+                    f"Unsupported result type for {export_mode} export: {type(obj)}"
                 )
 
-            return {"mode": "netcdf", "target": target}
+            return {"mode": export_mode, "target": target}
 
         elif export_mode == "cogs":
             Path(export_target).mkdir(parents=True, exist_ok=True)
@@ -2421,10 +2469,13 @@ def datacube_builder(missions_func=missions):
 
         # JSON is for get_stac_layers config:
         # - lazy -> output null
-        # - netcdf -> output path
+        # - netcdf / zarr -> output path (extension selects the format in
+        #   get_stac_layers: .zarr -> Zarr store, otherwise NetCDF)
         # - cogs -> output null (COG export is deferred / separate UI step)
         output_for_json = (
-            export_target if (export_mode == "netcdf" and export_target) else None
+            export_target
+            if (export_mode in ("netcdf", "zarr") and export_target)
+            else None
         )
 
         json_payload = {
@@ -2444,6 +2495,7 @@ def datacube_builder(missions_func=missions):
                 "clip_raster": clip_raster,
                 "aggregator": aggregator,
                 "stats": stats,
+                "compress": bool(export_compress_w.value),
             }
         }
 
@@ -2564,6 +2616,27 @@ def datacube_builder(missions_func=missions):
             output_fc.filter_pattern = ["*.nc"]
             output_fc.use_dir_icons = True
 
+        elif mode == "zarr":
+            suggestion = current or _auto_netcdf_suggestion_from_polygon()
+            start_dir = _existing_dir_or_parent(suggestion)
+            suggested_name = Path(suggestion).name or "test.zarr"
+            if not suggested_name.lower().endswith(".zarr"):
+                suggested_name = f"{Path(suggested_name).stem}.zarr"
+
+            try:
+                output_fc.reset(path=start_dir, filename=suggested_name)
+            except Exception:
+                try:
+                    output_fc.default_path = start_dir
+                    output_fc.default_filename = suggested_name
+                except Exception:
+                    pass
+
+            output_fc.title = "Select Zarr output store (name ending in .zarr)"
+            output_fc.show_only_dirs = False
+            output_fc.filter_pattern = ["*.zarr", "*"]
+            output_fc.use_dir_icons = True
+
         elif mode == "cogs":
             start_dir = _existing_dir_or_parent(current or "./results/cogs")
             try:
@@ -2622,6 +2695,17 @@ def datacube_builder(missions_func=missions):
                 s = str(selected)
                 if not s.lower().endswith(".nc"):
                     s += ".nc"
+                export_target_w.value = _normalize_ui_path(s)
+                _hide_output_chooser()
+
+        elif mode == "zarr":
+            selected = getattr(chooser, "selected", None)
+            if selected:
+                s = str(selected)
+                if s.lower().endswith(".nc"):
+                    s = s[: s.rfind(".")]
+                if not s.lower().endswith(".zarr"):
+                    s += ".zarr"
                 export_target_w.value = _normalize_ui_path(s)
                 _hide_output_chooser()
 
@@ -2697,6 +2781,9 @@ def datacube_builder(missions_func=missions):
         mode = export_mode_w.value
         current = (export_target_w.value or "").strip()
 
+        # Show the zlib option only in NetCDF mode.
+        _apply_compress_visibility()
+
         if mode == "lazy":
             export_target_w.description = "Output:"
             export_target_w.disabled = True
@@ -2713,8 +2800,30 @@ def datacube_builder(missions_func=missions):
 
             if current in ["./results/cogs", "results/cogs", r"results\cogs"]:
                 export_target_w.value = ""
+            elif current.lower().endswith(".zarr"):
+                # Switching zarr -> netcdf: keep the name, swap the extension.
+                export_target_w.value = f"{os.path.splitext(current)[0]}.nc"
 
             _update_netcdf_output_suggestion()
+            _sync_output_filechooser_from_mode_and_text()
+
+        elif mode == "zarr":
+            export_target_w.disabled = False
+            browse_output_btn.disabled = False
+            export_target_w.description = "Export store:"
+            export_target_w.placeholder = "./results/test.zarr"
+
+            # Reuse the NetCDF path suggestion, swapping the extension to .zarr,
+            # so switching netcdf <-> zarr keeps the same name with the right
+            # extension. Only replace an empty field or a prior auto suggestion.
+            base = _auto_netcdf_suggestion_from_polygon()
+            zarr_suggestion = f"{os.path.splitext(base)[0]}.zarr"
+            if current == "" or current == state.get("last_auto_netcdf_suggestion") \
+                    or current.lower().endswith(".nc"):
+                stem_current = os.path.splitext(current)[0] if current else ""
+                export_target_w.value = (
+                    f"{stem_current}.zarr" if stem_current else zarr_suggestion
+                )
             _sync_output_filechooser_from_mode_and_text()
 
         elif mode == "cogs":
@@ -3115,8 +3224,9 @@ def datacube_builder(missions_func=missions):
                 info = _export_current_result(export_mode, export_target)
                 state["last_export_info"] = info
 
-                # export_stac() already prints "Export is done: ..."
-                if info.get("mode") != "netcdf":
+                # export_stac() already prints "Export is done: ..." for file
+                # exports (netcdf/zarr); only add a line for the COG folder case.
+                if info.get("mode") not in ("netcdf", "zarr"):
                     print(f"✅ Export finished: {info['target']}")
 
                 # Write the held binary mask alongside the cube (skipped for COG).
@@ -4146,6 +4256,8 @@ def datacube_builder(missions_func=missions):
         [
             _stacked_field(export_mode_w, "Export mode"),
             _with_help_left(output_input_box, "output", label_text="Output"),
+            export_compress_w,
+            export_compress_warn_html,
         ],
     )
 
@@ -4677,6 +4789,9 @@ def datacube_editor():
         mode = export_mode_w.value
         current = (export_target_w.value or "").strip()
 
+        # Show the zlib option only in NetCDF mode.
+        _apply_editor_compress_visibility()
+
         if mode == "netcdf":
             export_target_w.disabled = False
             browse_export_btn.disabled = False
@@ -4762,6 +4877,7 @@ def datacube_editor():
         # deliberate click on the button below, never triggered by an edit.
         export_mode_w.disabled = not enabled
         aggregator_w.disabled = not enabled
+        export_compress_w.disabled = not enabled
         if enabled:
             _set_export_mode_defaults()
         else:
@@ -4976,12 +5092,14 @@ def datacube_editor():
                 export_target_w.value = target
 
             Path(target).parent.mkdir(parents=True, exist_ok=True)
+            compress = bool(export_compress_w.value)
 
             if isinstance(obj, xr.DataArray):
                 export_stac(
                     stac=obj,
                     output=target,
                     var_name=(obj.name or "Spectral_Temporal_Stack"),
+                    compress=compress,
                 )
                 return {"mode": "netcdf", "target": target}
 
@@ -4992,6 +5110,7 @@ def datacube_editor():
                 output=target,
                 crs=crs_ref,
                 transform=transform_ref,
+                compress=compress,
             )
             return {"mode": "netcdf", "target": target}
 
@@ -5458,6 +5577,36 @@ def datacube_editor():
         disabled=True,
     )
     browse_export_btn.style.button_color = "#f3f4f6"
+
+    # Lossless zlib compression for the exported cube. NetCDF only: COGs are
+    # already compressed (deflate), so the checkbox is hidden in COG mode (see
+    # _apply_editor_compress_visibility). Same behavior as the Data Cube Builder.
+    export_compress_w = widgets.Checkbox(
+        value=False,
+        description="Lossless compression (zlib)",
+        indent=False,
+        layout=widgets.Layout(width="auto"),
+        disabled=True,
+    )
+    export_compress_warn_html = widgets.HTML(
+        "<div style='font-size:12px; color:#b00020;'>"
+        "⚠️ <b>Warning:</b> compression shrinks the output file a further "
+        "~20-40% (scene-dependent), but the export step takes roughly "
+        "<b>10x longer</b>. Enable it only for archiving, when disk space "
+        "matters more than your time.</div>"
+    )
+    export_compress_warn_html.layout.display = "none"
+
+    def _apply_editor_compress_visibility(*_):
+        # The zlib option only applies to NetCDF; hide it for cogs (already
+        # compressed). The warning shows only when the option is visible + ticked.
+        show = export_mode_w.value == "netcdf"
+        export_compress_w.layout.display = "" if show else "none"
+        export_compress_warn_html.layout.display = (
+            "" if (show and export_compress_w.value) else "none"
+        )
+
+    export_compress_w.observe(_apply_editor_compress_visibility, names="value")
 
     # Temporal Composite: collapse the loaded cube's time axis into a single
     # mean/median scene at export time. Mirrors the Data Cube Builder's Export
@@ -7028,6 +7177,8 @@ def datacube_editor():
             _stacked_field_with_help(aggregator_w, "Temporal Composite", "aggregator"),
             _stacked_field(export_mode_w, "Export mode"),
             _stacked_field(export_input_box, "Output"),
+            export_compress_w,
+            export_compress_warn_html,
         ],
         layout=widgets.Layout(width="100%", gap="6px"),
     )
