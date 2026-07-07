@@ -20,6 +20,43 @@ def _is_dask_backed(obj) -> bool:
     raise TypeError(f"Unsupported type: {type(obj)}")
 
 
+def _set_compression(ds, compress, complevel=4):
+    """Make each spatial variable's on-disk layout deterministic, in place.
+
+    xarray keeps the storage settings of the file a variable was READ from in
+    ``.encoding`` and silently reuses them on the next ``to_netcdf`` - so a
+    cube opened from a compressed file would be re-written compressed even
+    when compression was not requested (and derived variables, which lose
+    their encoding, would not be). To avoid that ambiguity, any inherited
+    layout keys are stripped first, then zlib is requested only when
+    ``compress`` is True: the flag alone decides the output layout.
+
+    The encoding is merged into the variable's existing ``.encoding`` instead
+    of being passed to ``to_netcdf(encoding=...)``, which would override the
+    whole dict and drop ``grid_mapping`` (the CRS link GIS tools need).
+    Chunking is one spatial slice per chunk: NaN-masked scenes compress well
+    and single-date reads stay cheap.
+    """
+    for da in ds.data_vars.values():
+        if "y" not in da.dims or "x" not in da.dims:
+            continue
+        for stale in (
+            "contiguous", "chunksizes", "zlib", "complevel",
+            "shuffle", "fletcher32", "preferred_chunks", "compression",
+        ):
+            da.encoding.pop(stale, None)
+        if compress:
+            da.encoding.update(
+                {
+                    "zlib": True,
+                    "complevel": complevel,
+                    "chunksizes": tuple(
+                        da.sizes[d] if d in ("y", "x") else 1 for d in da.dims
+                    ),
+                }
+            )
+
+
 def export_stac(
     stac,
     output,
@@ -27,7 +64,14 @@ def export_stac(
     transform=None,
     var_name=None,
     overwrite=True,
+    compress=False,
 ):
+    """Write a cube to NetCDF.
+
+    ``compress=True`` -> lossless zlib compression (level 4) on all spatial
+    variables. Values are bit-identical on read-back; the write is slower.
+    Shrinks cloud-masked cubes especially well (NaN runs compress strongly).
+    """
     if not isinstance(stac, (xr.DataArray, xr.Dataset)):
         raise TypeError(
             f"export_stac expects xarray.DataArray or xarray.Dataset, got {type(stac)}"
@@ -56,9 +100,10 @@ def export_stac(
     if isinstance(stac, xr.DataArray):
         name = var_name or stac.name or "Spectral_Temporal_Stack"
         ds = stac.to_dataset(name=name)
-        ds.to_netcdf(output)
     else:
-        stac.to_netcdf(output)
+        ds = stac
+    _set_compression(ds, compress)
+    ds.to_netcdf(output)
 
     print(f"Export is done: {output}")
     return stac

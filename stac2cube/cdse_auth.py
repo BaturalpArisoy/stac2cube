@@ -179,6 +179,16 @@ def configure_anonymous_aws_environment(requester_pays: bool = False):
     else:
         os.environ.pop("AWS_REQUEST_PAYER", None)
 
+    # Latency reducers (same rationale as the CDSE block below): the per-scene
+    # read cost on AWS is dominated by HTTP round-trips per JP2/COG open, not
+    # by decode. Skip .SAFE directory listings, pull the codestream header in
+    # one shot, and coalesce adjacent range requests. setdefault: respect
+    # anything the user has already tuned.
+    os.environ.setdefault("GDAL_DISABLE_READDIR_ON_OPEN", "EMPTY_DIR")
+    os.environ.setdefault("GDAL_INGESTED_BYTES_AT_OPEN", "65536")
+    os.environ.setdefault("GDAL_HTTP_MERGE_CONSECUTIVE_RANGES", "YES")
+    os.environ.setdefault("VSI_CACHE", "TRUE")
+
 
 def configure_cdse_environment(keyfile=None):
     """Read the CDSE keys and export the GDAL/AWS env vars used at compute time.

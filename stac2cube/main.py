@@ -54,6 +54,7 @@ def get_stac_layers(
     update=None,
     source=None,
     q=None,
+    compress=False,
 ):
 
     # Reassign short names
@@ -116,6 +117,7 @@ def get_stac_layers(
                     update=update,
                     source=source,
                     q=q,
+                    compress=compress,
                 )
 
                 # When asked for the in-memory mask, each feature returns
@@ -131,7 +133,7 @@ def get_stac_layers(
                 if output and isinstance(res, (xr.DataArray, xr.Dataset)):
                     stem, ext = os.path.splitext(output)
                     feature_output = f"{stem}_{idx}{ext}"
-                    export_stac(res, feature_output)
+                    export_stac(res, feature_output, compress=compress)
 
                 # Report each cube's estimated (logical, pre-load) data size.
                 if isinstance(res, (xr.DataArray, xr.Dataset)):
@@ -306,6 +308,7 @@ def get_stac_layers(
                     export_stac(
                         mask_cube, cloud_mask_output, crs=crs,
                         transform=stac.rio.transform(), var_name="Cloud_Stack",
+                        compress=compress,
                     )
                     if not q:
                         print(f"Binary cloud mask exported: {cloud_mask_output}", flush=True)
@@ -378,7 +381,7 @@ def get_stac_layers(
 
             print(stac, flush=True)
 
-        img = export_stac(stac, output, crs, transform)
+        img = export_stac(stac, output, crs, transform, compress=compress)
         if return_cloud_mask:
             return img, mask_cube
         return img
