@@ -3,6 +3,7 @@ import io
 import numpy as np
 import xarray as xr
 import rioxarray
+from .export_cfg import open_cube, is_zarr_path, _write_zarr
 from arosics import COREG
 from geoarray import GeoArray
 from rasterio.transform import Affine
@@ -56,7 +57,7 @@ def _load_coreg_input(input_obj, stack_name="Spectral_Temporal_Stack"):
       input_path_str (str or None)
     """
     if isinstance(input_obj, str):
-        ds = xr.open_dataset(input_obj)
+        ds = open_cube(input_obj)
         if stack_name not in ds:
             raise KeyError(
                 f"Dataset has no variable '{stack_name}'. Found: {list(ds.data_vars)}"
@@ -179,6 +180,18 @@ def _auto_output_path(input_path_str, suffix="_coregistered"):
         ext = ".nc"
     out_name = f"{base}{suffix}{ext}"
     return os.path.join(in_dir, out_name)
+
+
+def _write_coreg_output(out_ds, out_path):
+    """Write the co-registered Dataset; the extension picks the format.
+
+    ``*.zarr`` -> streamed Zarr store (export_cfg._write_zarr, same writer as
+    export_stac); anything else -> the long-standing plain to_netcdf.
+    """
+    if is_zarr_path(out_path):
+        _write_zarr(out_ds, out_path, overwrite=True)
+    else:
+        out_ds.to_netcdf(out_path)
 
 
 def _roi_to_geom_and_projected_bbox(roi, roi_crs="EPSG:4326", target_crs_wkt=None):
@@ -595,7 +608,7 @@ def coregister_cube(
                 final_out_path = _auto_output_path(input_path_str, suffix="_cr")
 
             if final_out_path is not None:
-                out_ds.to_netcdf(final_out_path)
+                _write_coreg_output(out_ds, final_out_path)
                 print(f"\nCo-registered cube written to: {final_out_path}")
             else:
                 print(
@@ -924,7 +937,7 @@ def coregister_cube_roi(
                 final_out_path = _auto_output_path(input_path_str, suffix="_cr")
 
             if final_out_path is not None:
-                out_ds.to_netcdf(final_out_path)
+                _write_coreg_output(out_ds, final_out_path)
                 print(f"\nCo-registered cube written to: {final_out_path}")
             else:
                 print(
@@ -973,7 +986,7 @@ import plotly.graph_objects as go
 
 
 def _load_stac(path, stack_name="Spectral_Temporal_Stack"):
-    with xr.open_dataset(path) as ds:
+    with open_cube(path) as ds:
         return ds[stack_name].load()
 
 

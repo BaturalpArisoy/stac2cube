@@ -13,6 +13,7 @@ from affine import Affine
 from tqdm.auto import tqdm
 
 from .get_spectral_indices import calculate_spectral_index
+from .export_cfg import open_cube, is_zarr_path, _write_zarr
 
 
 @contextlib.contextmanager
@@ -501,6 +502,16 @@ def super_resolve_cube(
       quantization), packing is skipped automatically and float32 is written
       instead. Readers unpack transparently. Set False for bit-exact float32
       output.
+
+    Output container:
+      The output_path extension picks the format: ``*.zarr`` -> Zarr store,
+      anything else -> NetCDF (unchanged behavior). With no output_path the
+      input's own extension is kept (zarr in -> zarr out). ``compress`` is
+      NetCDF-only (Zarr always applies its default lossless codec). Zarr
+      caveat with pack_to_int16: Zarr attrs are JSON and cannot hold a
+      float32 scale_factor, so readers decode the packed values to float64 -
+      equal to the NetCDF float32 decode within float32 rounding, not
+      bit-identical.
     """
 
     # ---------------------------
@@ -591,10 +602,10 @@ def super_resolve_cube(
 
     if isinstance(input_path, xr.DataArray):
         raise ValueError(
-            "This version expects a NetCDF file path so it can read CF georef from metadata."
+            "This version expects a NetCDF/Zarr cube path so it can read CF georef from metadata."
         )
 
-    ds_in = xr.open_dataset(input_path)
+    ds_in = open_cube(input_path)
     dataarray = ds_in[var_name]
 
     crs_wkt, tf = _extract_cf_crs_and_geotransform(ds_in, var_name)
@@ -855,14 +866,19 @@ def super_resolve_cube(
     # ---------------------------
     # output encoding (compression / int16 packing)
     # ---------------------------
+    # The output extension picks the container: *.zarr -> Zarr store, else
+    # NetCDF (unchanged). zlib/chunksizes are NetCDF/HDF5-only knobs; Zarr
+    # always compresses with its own default codec, so `compress` is a no-op
+    # there (mirrors export_stac).
+    write_zarr = is_zarr_path(output_path)
     var_encoding = {}
-    if compress or pack_to_int16:
+    if not write_zarr and (compress or pack_to_int16):
         # chunk per band/time so partial reads stay cheap and chunks compress well
         var_encoding["chunksizes"] = tuple(
             min(512, ds_out.sizes[d]) if d in ("y", "x") else 1
             for d in ds_out[var_name].dims
         )
-    if compress:
+    if not write_zarr and compress:
         var_encoding.update({"zlib": True, "complevel": 4})
 
     if pack_to_int16:
@@ -919,10 +935,26 @@ def super_resolve_cube(
     # the output ungeoreferenced. Eager (non-dask) write on purpose: writing a
     # dask-backed variable to netCDF4/HDF5 is not thread-safe (causes "NetCDF: HDF
     # error") and is far slower here.
-    if var_encoding:
-        ds_out[var_name].encoding.update(var_encoding)
-    ds_out.to_netcdf(output_path)
-    size_mb = os.path.getsize(output_path) / 1e6
+    if write_zarr:
+        # Same writer as export_stac: strips NetCDF-only encoding keys (keeps
+        # grid_mapping), rechunks per (time, band) slice and streams via dask.
+        # The int16 packing above is container-independent: the store holds
+        # int16 + CF scale/offset attrs and readers unpack transparently.
+        # Caveat (Zarr only): attributes are JSON, which cannot express a
+        # float32 scale_factor, so CF decoding yields float64 values - equal
+        # to the NetCDF float32 decode within float32 rounding (<= 1 ulp),
+        # not bit-identical. NaN holes (_FillValue) restore exactly.
+        _write_zarr(ds_out, output_path, overwrite=True)
+        from pathlib import Path
+
+        size_mb = sum(
+            f.stat().st_size for f in Path(output_path).rglob("*") if f.is_file()
+        ) / 1e6
+    else:
+        if var_encoding:
+            ds_out[var_name].encoding.update(var_encoding)
+        ds_out.to_netcdf(output_path)
+        size_mb = os.path.getsize(output_path) / 1e6
     print(
         f"Data cube is super-resolved to 2.5-meters! "
         f"(model_type={model_type_used}, {size_mb:.1f} MB)"

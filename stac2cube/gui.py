@@ -21,6 +21,9 @@ from stac2cube import (
     missions,
     export_stac,
     export_to_cogs,
+    open_cube,
+    is_zarr_path,
+    resolve_cube_path,
     interactive_time_view,
     interactive_cloud_overlay_view,
     save_timeseries_gif,
@@ -60,8 +63,8 @@ from .gui_common import (
 # (lazy). Used both as the early-return guard message in the export buttons and
 # as the ValueError raised deeper in the export helpers.
 _EXPORT_MODE_REMINDER = (
-    "ʕ•ᴥ•ʔ Mr. Bear would like to remind you to change Export mode to NetCDF "
-    "or COGs before exporting, thanks."
+    "ʕ•ᴥ•ʔ Mr. Bear would like to remind you to change Export mode to NetCDF, "
+    "Zarr or COGs before exporting, thanks."
 )
 
 
@@ -827,9 +830,9 @@ def datacube_builder(missions_func=missions):
     # -------------------------------------------------------------------------
     export_mode_w = widgets.Dropdown(
         options=[
-            ("NetCDF (required for Analysis Ready Data Cube Tools)", "netcdf"),
+            ("NetCDF (single .nc file)", "netcdf"),
             ("Cloud Optimized Geotiffs (select folder)", "cogs"),
-            ("Zarr (for interested parties, does NOT work with Analysis Ready Data Cube Tools and Data Cube Editor)", "zarr"),
+            ("Zarr (chunked .zarr store, streams lazily - works with all tools)", "zarr"),
         ],
         value="netcdf",
         description="Export mode:",
@@ -4532,14 +4535,14 @@ def datacube_editor():
     """
     Data Cube Editor GUI
     --------------------
-    - Load NetCDF data cube
+    - Load NetCDF (.nc) or Zarr (.zarr) data cube
     - Work on a current in-memory result (starts with Spectral_Temporal_Stack)
     - Slice by time and band (chained)
     - Filter by cloud coverage using existing cloud_percentage coord (chained)
     - Clip raster (vector file or bbox list; applied via Edit button)
     - Temporal composites (stats) via stac2cube.calculate_statistics (applied via Edit button)
     - Visualize (interactive dropdown + GIF generation)
-    - Export current result (NetCDF / COGs)
+    - Export current result (NetCDF / Zarr / COGs)
     - Reset to loaded cube
     """
 
@@ -4617,7 +4620,7 @@ def datacube_editor():
         """,
         "update_cube": """
         <b>update data cube</b><br>
-        Uses <code>get_stac_layers(update=...)</code> with the loaded NetCDF path to fetch only missing dates
+        Uses <code>get_stac_layers(update=...)</code> with the loaded cube path to fetch only missing dates
         and return an updated <code>Spectral_Temporal_Stack</code>.<br><br>
         <b>Important:</b> This replaces the current working result with a refreshed time series.<br>
         Use it first (or by itself), then continue with other editing features (slice, clip, stats, export).
@@ -4800,9 +4803,33 @@ def datacube_editor():
 
             if current in ["./results/cogs", "results/cogs", r"results\cogs"]:
                 export_target_w.value = ""
+            elif current.lower().endswith(".zarr"):
+                # Switching zarr -> netcdf: keep the name, swap the extension
+                # (mirrors the Data Cube Builder).
+                export_target_w.value = f"{os.path.splitext(current)[0]}.nc"
 
             if not export_target_w.value:
                 export_target_w.value = _auto_netcdf_export_suggestion()
+
+            _sync_export_filechooser_from_mode_and_text()
+
+        elif mode == "zarr":
+            export_target_w.disabled = False
+            browse_export_btn.disabled = False
+            export_target_w.description = "Export store:"
+            export_target_w.placeholder = "./results/cube_edited.zarr"
+
+            # Switching netcdf -> zarr keeps the same name with the extension
+            # swapped; a leftover COGs folder path is replaced by the default
+            # suggestion (mirrors the Data Cube Builder).
+            if current in ["./results/cogs", "results/cogs", r"results\cogs"]:
+                export_target_w.value = ""
+            elif current.lower().endswith(".nc"):
+                export_target_w.value = f"{os.path.splitext(current)[0]}.zarr"
+
+            if not export_target_w.value:
+                base = _auto_netcdf_export_suggestion()
+                export_target_w.value = f"{os.path.splitext(base)[0]}.zarr"
 
             _sync_export_filechooser_from_mode_and_text()
 
@@ -4812,10 +4839,10 @@ def datacube_editor():
             export_target_w.description = "Export dir:"
             export_target_w.placeholder = "./results/cogs"
 
-            # Switching from NetCDF: a ".nc" path is meaningless as a COGs output
-            # directory (it would create a folder literally named "*.nc"), so drop
-            # the leftover NetCDF file path and offer the COGs folder default.
-            if current.lower().endswith(".nc"):
+            # Switching from NetCDF/Zarr: a ".nc"/".zarr" path is meaningless as
+            # a COGs output directory (it would create a folder literally named
+            # "*.nc"), so drop the leftover path and offer the COGs default.
+            if current.lower().endswith((".nc", ".zarr")):
                 export_target_w.value = ""
 
             if not export_target_w.value:
@@ -5086,13 +5113,17 @@ def datacube_editor():
         if not isinstance(obj, (xr.DataArray, xr.Dataset)):
             raise TypeError(f"Unsupported result type for export: {type(obj)}")
 
-        if mode == "netcdf":
-            if not target.lower().endswith(".nc"):
-                target = target + ".nc"
+        if mode in ("netcdf", "zarr"):
+            # Same export path for both: export_stac picks the container from
+            # the extension (.zarr -> Zarr store, else NetCDF). zlib applies to
+            # NetCDF only (Zarr always uses its own default codec).
+            want_ext = ".zarr" if mode == "zarr" else ".nc"
+            if not target.lower().endswith(want_ext):
+                target = f"{os.path.splitext(target)[0]}{want_ext}"
                 export_target_w.value = target
 
             Path(target).parent.mkdir(parents=True, exist_ok=True)
-            compress = bool(export_compress_w.value)
+            compress = bool(export_compress_w.value) if mode == "netcdf" else False
 
             if isinstance(obj, xr.DataArray):
                 export_stac(
@@ -5101,7 +5132,7 @@ def datacube_editor():
                     var_name=(obj.name or "Spectral_Temporal_Stack"),
                     compress=compress,
                 )
-                return {"mode": "netcdf", "target": target}
+                return {"mode": mode, "target": target}
 
             # Dataset export (e.g. after calculate_statistics)
             crs_ref, transform_ref = _get_reference_crs_transform_from_loaded()
@@ -5112,7 +5143,7 @@ def datacube_editor():
                 transform=transform_ref,
                 compress=compress,
             )
-            return {"mode": "netcdf", "target": target}
+            return {"mode": mode, "target": target}
 
         elif mode == "cogs":
             Path(target).mkdir(parents=True, exist_ok=True)
@@ -5189,6 +5220,26 @@ def datacube_editor():
             export_fc.title = "Select NetCDF export file"
             export_fc.show_only_dirs = False
             export_fc.filter_pattern = ["*.nc"]
+
+        elif mode == "zarr":
+            suggestion = current or _auto_netcdf_export_suggestion()
+            start_dir = _existing_dir_or_parent(suggestion)
+            suggested_name = Path(suggestion).name or "cube_edited.zarr"
+            if not suggested_name.lower().endswith(".zarr"):
+                suggested_name = f"{Path(suggested_name).stem}.zarr"
+
+            try:
+                export_fc.reset(path=start_dir, filename=suggested_name)
+            except Exception:
+                try:
+                    export_fc.default_path = start_dir
+                    export_fc.default_filename = suggested_name
+                except Exception:
+                    pass
+
+            export_fc.title = "Select Zarr export store (name ending in .zarr)"
+            export_fc.show_only_dirs = False
+            export_fc.filter_pattern = ["*.zarr", "*"]
 
         elif mode == "cogs":
             start_dir = _existing_dir_or_parent(current or "./results/cogs")
@@ -5267,11 +5318,13 @@ def datacube_editor():
             load_fc = FileChooser(
                 path=str(Path(".").resolve()),
                 filename="",
-                title="Select NetCDF cube",
+                title="Select cube (.nc file, or any file inside a .zarr store)",
                 show_only_dirs=False,
                 select_default=False,
             )
-            load_fc.filter_pattern = ["*.nc"]
+            # "*" so a Zarr store can be picked by clicking a file inside it
+            # (e.g. zarr.json); the load handler resolves it to the store root.
+            load_fc.filter_pattern = ["*.nc", "*.zarr", "*"]
             load_fc.use_dir_icons = True
             load_fc_box = widgets.VBox([load_fc], layout=widgets.Layout(display="none", width="100%"))
 
@@ -5312,13 +5365,13 @@ def datacube_editor():
             mask_file_fc = FileChooser(
                 path=str(Path(".").resolve()),
                 filename="",
-                title="Select binary cloud-mask file (.nc)",
+                title="Select binary cloud-mask cube (.nc file, or any file inside a .zarr store)",
                 show_only_dirs=False,
                 select_default=False,
             )
             mask_file_fc.use_dir_icons = True
             try:
-                mask_file_fc.filter_pattern = ["*.nc"]
+                mask_file_fc.filter_pattern = ["*.nc", "*.zarr", "*"]
             except Exception:
                 pass
             mask_file_fc_box = widgets.VBox([mask_file_fc], layout=widgets.Layout(display="none", width="100%"))
@@ -5338,8 +5391,8 @@ def datacube_editor():
     # Loading
     load_path_w = widgets.Text(
         value="./results/test.nc",
-        description="NetCDF:",
-        placeholder="./results/test.nc",
+        description="Cube:",
+        placeholder="./results/test.nc or ./results/test.zarr",
         layout=widgets.Layout(width="100%"),
         style={"description_width": "90px"},
     )
@@ -5383,7 +5436,7 @@ def datacube_editor():
         [
             widgets.HTML(
                 "<div style='font-size:12px; color:#666;'>"
-                "This NetCDF contains <b>multiple layers</b>. Select the layer "
+                "This cube contains <b>multiple layers</b>. Select the layer "
                 "you want to work on, then click <b>Load selected layer</b>. "
                 "You can come back and load a different layer of the same file "
                 "at any time."
@@ -5546,11 +5599,13 @@ def datacube_editor():
         disabled=True,
     )
 
-    # Export options. NetCDF / COGs only - editing shows the result in the Result
-    # panel, so there is no separate "no export" mode; exporting saves the edits.
+    # Export options. NetCDF / Zarr / COGs - editing shows the result in the
+    # Result panel, so there is no separate "no export" mode; exporting saves
+    # the edits.
     export_mode_w = widgets.Dropdown(
         options=[
-            ("NetCDF (required for Analysis Ready Data Cube Tools)", "netcdf"),
+            ("NetCDF (single .nc file)", "netcdf"),
+            ("Zarr (chunked .zarr store, streams lazily - good for very large cubes)", "zarr"),
             ("Cloud Optimized Geotiffs (select folder)", "cogs"),
         ],
         value="netcdf",
@@ -5783,6 +5838,16 @@ def datacube_editor():
                     s = str(selected)
                     if not s.lower().endswith(".nc"):
                         s += ".nc"
+                    export_target_w.value = _normalize_ui_path(s)
+                    export_fc_box.layout.display = "none"
+            elif mode == "zarr":
+                selected = getattr(chooser, "selected", None)
+                if selected:
+                    s = str(selected)
+                    if s.lower().endswith(".nc"):
+                        s = s[: s.rfind(".")]
+                    if not s.lower().endswith(".zarr"):
+                        s += ".zarr"
                     export_target_w.value = _normalize_ui_path(s)
                     export_fc_box.layout.display = "none"
             elif mode == "cogs":
@@ -6217,11 +6282,13 @@ def datacube_editor():
         path = (mask_file_w.value or "").strip()
         if not path:
             raise ValueError("Masking is enabled, but no binary mask file was provided.")
+        # A file picked inside a .zarr store resolves to the store root.
+        path = resolve_cube_path(path)
         if not os.path.exists(path):
             raise ValueError(f"Binary mask file not found: {path}")
 
         # Load the Cloud_Stack (small binary mask; eager load for a clean align).
-        with xr.open_dataset(path) as cds:
+        with open_cube(path) as cds:
             if "Cloud_Stack" in cds.data_vars:
                 cloud = cds["Cloud_Stack"].load()
             elif len(cds.data_vars) == 1:
@@ -6421,6 +6488,9 @@ def datacube_editor():
 
         if export_mode_w.value == "netcdf" and not export_target_w.value:
             export_target_w.value = _auto_netcdf_export_suggestion()
+        elif export_mode_w.value == "zarr" and not export_target_w.value:
+            base = _auto_netcdf_export_suggestion()
+            export_target_w.value = f"{os.path.splitext(base)[0]}.zarr"
 
         print(f"✅ Loaded cube: {path}")
         print(f"   Working layer: {_layer_display_name(var_name)}")
@@ -6438,10 +6508,16 @@ def datacube_editor():
     def _on_load_cube_clicked(_):
         path = (load_path_w.value or "").strip()
         if not path:
-            _show_status("❌ Please provide a NetCDF file path.")
+            _show_status("❌ Please provide a NetCDF (.nc) or Zarr (.zarr) cube path.")
             return
-        if not path.lower().endswith(".nc"):
-            _show_status("❌ Please select a NetCDF file (.nc).")
+        # A file picked INSIDE a .zarr store (e.g. zarr.json) resolves to the
+        # store root, so the file chooser can be used for Zarr cubes too.
+        resolved = resolve_cube_path(path)
+        if resolved != path:
+            path = resolved
+            load_path_w.value = path
+        if not (path.lower().endswith(".nc") or is_zarr_path(path)):
+            _show_status("❌ Please select a NetCDF file (.nc) or a Zarr store (.zarr).")
             return
         if not Path(path).exists():
             _show_status(f"❌ File not found: {path}")
@@ -6450,7 +6526,7 @@ def datacube_editor():
         try:
             with status_out:
                 clear_output()
-                print("Loading data cube from NetCDF...")
+                print("Loading data cube...")
 
                 # Close any previously opened cube to release its file handle
                 # (important on Windows, where an open handle locks the file).
@@ -6466,8 +6542,9 @@ def datacube_editor():
                 # demand instead of being copied into RAM at load time. The lazy
                 # array keeps reading from this file during preview/edit/export,
                 # so the handle must stay open -- do NOT wrap this in a closing
-                # `with` block.
-                ds_open = xr.open_dataset(path, chunks="auto")
+                # `with` block. open_cube dispatches .zarr -> open_zarr (always
+                # lazy), else NetCDF with chunks="auto".
+                ds_open = open_cube(path, chunks="auto")
                 # Keep small coordinates in memory; only the data variables stay
                 # lazy. Otherwise chunked non-dimension coords (e.g.
                 # cloud_percentage) become dask arrays, which breaks boolean-indexer
@@ -6480,7 +6557,7 @@ def datacube_editor():
                 layers = _raster_layer_names(ds_loaded)
                 if not layers:
                     raise ValueError(
-                        "NetCDF contains no raster layers (data variables with "
+                        "Cube contains no raster layers (data variables with "
                         f"'y'/'x' dims). Found data_vars: {list(ds_loaded.data_vars)}"
                     )
 
@@ -6522,7 +6599,7 @@ def datacube_editor():
                             clear_output()
                             print(note)
 
-                    print(f"ℹ️ This NetCDF contains {len(layers)} layers:")
+                    print(f"ℹ️ This cube contains {len(layers)} layers:")
                     for name in layers:
                         dims = ", ".join(
                             f"{d}: {ds_loaded[name].sizes[d]}"
@@ -6542,7 +6619,7 @@ def datacube_editor():
         path = state.get("pending_path")
         var_name = layer_select_w.value
         if ds_loaded is None or not path:
-            _show_status("❌ Load a NetCDF cube first.")
+            _show_status("❌ Load a cube first.")
             return
         if not var_name:
             _show_status("❌ Please select a layer to load.")
@@ -6680,8 +6757,9 @@ def datacube_editor():
                 info = _export_current_result()
                 state["last_export_info"] = info
 
-                # export_stac() already prints "Export is done: ..."
-                if info.get("mode") != "netcdf":
+                # export_stac() already prints "Export is done: ..." for the
+                # netcdf and zarr modes; only add a line for the COG folder.
+                if info.get("mode") not in ("netcdf", "zarr"):
                     print(f"✅ Export finished: {info['target']}")
 
                 _print_working_note()
@@ -7445,6 +7523,24 @@ def ard_cube_tools():
             clear_output()
             display(obj)
 
+    def _output_stat(p: Path):
+        """(mtime, size) fingerprint of an exported output.
+
+        For a directory (a Zarr store) aggregate over all files inside: the
+        directory's own mtime/size do not reliably change when chunk files
+        inside are rewritten, so the flat stat() the NetCDF checks use would
+        false-fail the "was the output updated" verification."""
+        if p.is_dir():
+            mtime, size = 0.0, 0
+            for f in p.rglob("*"):
+                if f.is_file():
+                    st = f.stat()
+                    mtime = max(mtime, st.st_mtime)
+                    size += st.st_size
+            return mtime, size
+        st = p.stat()
+        return st.st_mtime, st.st_size
+
     def _show_result_from_path(nc_path: str):
         with result_out:
             clear_output()
@@ -7458,7 +7554,7 @@ def ard_cube_tools():
                 return
 
             print(f"Exported file: {p.as_posix()}")
-            with xr.open_dataset(p) as ds:
+            with open_cube(p) as ds:
                 if "Spectral_Temporal_Stack" in ds.data_vars:
                     display(ds["Spectral_Temporal_Stack"])
                 elif "Cloud_Stack" in ds.data_vars:
@@ -7551,24 +7647,32 @@ def ard_cube_tools():
             return Path(state["loaded_path"]).parent
         return Path("./results")
 
+    def _ext_from_loaded():
+        """Output extension matching the loaded cube's format, so every tool
+        preserves the container: zarr in -> zarr out, nc in -> nc out."""
+        lp = state.get("loaded_path")
+        if lp and is_zarr_path(lp):
+            return ".zarr"
+        return ".nc"
+
     def _suggest_masked_path(threshold: int):
         base = _stem_from_loaded()
         outdir = _dir_from_loaded()
-        return (outdir / f"{base}_masked_{int(threshold)}.nc").as_posix()
+        return (outdir / f"{base}_masked_{int(threshold)}{_ext_from_loaded()}").as_posix()
 
     def _suggest_cr_path():
         base = _stem_from_loaded()
         outdir = _dir_from_loaded()
-        return (outdir / f"{base}_cr.nc").as_posix()
+        return (outdir / f"{base}_cr{_ext_from_loaded()}").as_posix()
 
     def _suggest_sr_path():
         base = _stem_from_loaded()
         outdir = _dir_from_loaded()
-        return (outdir / f"{base}_sr.nc").as_posix()
-    
+        return (outdir / f"{base}_sr{_ext_from_loaded()}").as_posix()
+
     def _suggest_clouds_path_from_loaded():
         p = Path(state["loaded_path"])
-        return (p.parent / f"{p.stem}_cloud.nc").as_posix()
+        return (p.parent / f"{p.stem}_cloud{_ext_from_loaded()}").as_posix()
 
     # -----------------------------------------
     # Header
@@ -7585,8 +7689,8 @@ def ard_cube_tools():
         "border:1px solid #bfdbfe; border-left:4px solid #3b82f6; "
         "border-radius:6px; padding:10px 12px; margin:0 0 8px 0;'>"
         "<b>ℹ️</b> The 3 tools provided below are not chained. For each feature, load a "
-        "separate data cube in NetCDF format with the loader below, then run a "
-        "one of the 3 tools."
+        "separate data cube (NetCDF .nc or Zarr .zarr) with the loader below, then run "
+        "one of the 3 tools. Each tool keeps the loaded cube's format: zarr in -&gt; zarr out."
         "</div>"
     )
 
@@ -7598,7 +7702,13 @@ def ard_cube_tools():
     load_cube_btn = widgets.Button(description="Load cube", button_style="primary", icon="upload", layout=widgets.Layout(width="140px"))
     #reset_btn = widgets.Button(description="Reset to loaded cube", icon="undo", layout=widgets.Layout(width="180px"), disabled=True)
 
-    load_fc_box = _attach_filechooser(browse_load_btn, load_path_w, title="Select NetCDF file", pattern=["*.nc", "*"], select_dirs=False)
+    load_fc_box = _attach_filechooser(
+        browse_load_btn,
+        load_path_w,
+        title="Select cube (.nc file, or any file inside a .zarr store)",
+        pattern=["*.nc", "*.zarr", "*"],
+        select_dirs=False,
+    )
 
     # Layer selection (shown only when the loaded NetCDF has multiple layers,
     # e.g. a time series exported together with temporal composites/stats)
@@ -7617,7 +7727,7 @@ def ard_cube_tools():
         [
             widgets.HTML(
                 "<div style='font-size:12px; color:#666;'>"
-                "This NetCDF contains <b>multiple layers</b>. Select the layer "
+                "This cube contains <b>multiple layers</b>. Select the layer "
                 "you want to work on, then click <b>Load selected layer</b>. "
                 "Super-resolution runs on both time series and temporal "
                 "composites; cloud masking and co-registration always need only "
@@ -7791,7 +7901,7 @@ def ard_cube_tools():
     def _suggest_clouds_path():
         base = _stem_from_loaded()
         outdir = _dir_from_loaded()
-        return (outdir / f"{base}_cloud.nc").as_posix()
+        return (outdir / f"{base}_cloud{_ext_from_loaded()}").as_posix()
 
     def _refresh_mask_outputs(force=False):
         # Always suggest masked output based on threshold (unless user already typed a custom one and force=False)
@@ -7823,10 +7933,12 @@ def ard_cube_tools():
 
     mask_threshold_w.observe(_on_threshold_change, names="value")
 
-    def _ensure_nc_suffix(path_str: str) -> str:
+    def _ensure_cube_suffix(path_str: str) -> str:
+        """Keep a .nc/.zarr extension as typed; anything else gets the loaded
+        cube's extension (format preserved: zarr in -> zarr out)."""
         p = Path(path_str)
-        if p.suffix.lower() != ".nc":
-            p = p.with_suffix(".nc")
+        if p.suffix.lower() not in (".nc", ".zarr"):
+            p = p.with_suffix(_ext_from_loaded())
         p.parent.mkdir(parents=True, exist_ok=True)
         return p.as_posix()
 
@@ -7853,7 +7965,7 @@ def ard_cube_tools():
         if not out_masked:
             out_masked = _suggest_masked_path(threshold)
             masked_out_w.value = out_masked
-        out_masked = _ensure_nc_suffix(out_masked)
+        out_masked = _ensure_cube_suffix(out_masked)
 
         out_clouds = None
         if export_clouds_w.value:
@@ -7861,12 +7973,11 @@ def ard_cube_tools():
             if not tmp:
                 tmp = _suggest_clouds_path()
                 clouds_out_w.value = tmp
-            out_clouds = _ensure_nc_suffix(tmp)
+            out_clouds = _ensure_cube_suffix(tmp)
 
         p_masked = Path(out_masked)
         existed_before = p_masked.exists()
-        old_mtime = p_masked.stat().st_mtime if existed_before else None
-        old_size = p_masked.stat().st_size if existed_before else None
+        old_mtime, old_size = _output_stat(p_masked) if existed_before else (None, None)
 
         _status(
             "Masking and exporting...",
@@ -7896,8 +8007,7 @@ def ard_cube_tools():
                     print("❌ Cloud masking failed: output file was not created.")
                 return
 
-            new_mtime = p_masked.stat().st_mtime
-            new_size = p_masked.stat().st_size
+            new_mtime, new_size = _output_stat(p_masked)
             if existed_before and (new_mtime == old_mtime) and (new_size == old_size):
                 with status_out:
                     print(
@@ -7908,7 +8018,7 @@ def ard_cube_tools():
                 return
 
             try:
-                with xr.open_dataset(p_masked) as _:
+                with open_cube(p_masked) as _:
                     pass
             except Exception as e:
                 with status_out:
@@ -7950,9 +8060,9 @@ def ard_cube_tools():
             ),
             threshold_row,
             exports_header,
-            _stacked_field(masked_out_box, "Output masked cube (NetCDF)"),
+            _stacked_field(masked_out_box, "Output masked cube (NetCDF/Zarr)"),
             export_clouds_row,
-            _stacked_field(clouds_out_box, "Output cloud layers (NetCDF)"),
+            _stacked_field(clouds_out_box, "Output cloud layers (NetCDF/Zarr)"),
             mask_and_export_btn,
         ],
         layout=widgets.Layout(width="100%", gap="10px"),
@@ -7976,7 +8086,7 @@ def ard_cube_tools():
     b1_cloud_out_fc_box = _attach_filechooser(
         browse_b1_cloud_out_btn,
         b1_cloud_out_w,
-        title="Select output NetCDF for cloud probability cube",
+        title="Select output cube (.nc or .zarr) for cloud probability cube",
         pattern=["*.nc", "*"],
         select_dirs=False,
     )
@@ -7994,10 +8104,12 @@ def ard_cube_tools():
     )
 
 
-    def _ensure_nc_suffix(path_str: str) -> str:
+    def _ensure_cube_suffix(path_str: str) -> str:
+        """Keep a .nc/.zarr extension as typed; anything else gets the loaded
+        cube's extension (format preserved: zarr in -> zarr out)."""
         p = Path(path_str)
-        if p.suffix.lower() != ".nc":
-            p = p.with_suffix(".nc")
+        if p.suffix.lower() not in (".nc", ".zarr"):
+            p = p.with_suffix(_ext_from_loaded())
         p.parent.mkdir(parents=True, exist_ok=True)
         return p.as_posix()
 
@@ -8014,10 +8126,10 @@ def ard_cube_tools():
 
         out_cloud = (b1_cloud_out_w.value or "").strip()
         if not out_cloud:
-            # default: same folder, *_cloud.nc
-            out_cloud = (Path(state["loaded_path"]).with_name(f"{Path(state['loaded_path']).stem}_cloud.nc")).as_posix()
+            # default: same folder, *_cloud + the loaded cube's extension
+            out_cloud = _suggest_clouds_path_from_loaded()
             b1_cloud_out_w.value = out_cloud
-        out_cloud = _ensure_nc_suffix(out_cloud)
+        out_cloud = _ensure_cube_suffix(out_cloud)
         b2_prob_in_w.value = out_cloud
         # Also pre-fill the visualization step so the user can compare masks
         # against RGB straight after building the cloud cube.
@@ -8045,8 +8157,7 @@ def ard_cube_tools():
             
         p_cloud = Path(out_cloud)
         existed_before = p_cloud.exists()
-        old_mtime = p_cloud.stat().st_mtime if existed_before else None
-        old_size = p_cloud.stat().st_size if existed_before else None
+        old_mtime, old_size = _output_stat(p_cloud) if existed_before else (None, None)
 
         _status(
             "Building cloud probability data cube...",
@@ -8079,8 +8190,7 @@ def ard_cube_tools():
                     print("❌ Build failed: output file was not created.")
                 return
 
-            new_mtime = p_cloud.stat().st_mtime
-            new_size = p_cloud.stat().st_size
+            new_mtime, new_size = _output_stat(p_cloud)
             if existed_before and (new_mtime == old_mtime) and (new_size == old_size):
                 with status_out:
                     print(
@@ -8091,7 +8201,7 @@ def ard_cube_tools():
                 return
 
             try:
-                with xr.open_dataset(p_cloud) as _:
+                with open_cube(p_cloud) as _:
                     pass
             except Exception as e:
                 with status_out:
@@ -8118,7 +8228,7 @@ def ard_cube_tools():
                         "In that case, binary mask(s) with threshold(s) can be generated in step (ii)."
                         "</div>"),
             _stacked_field(b1_thresholds_w, "Threshold(s) (Optional)"),
-            _stacked_field(b1_cloud_out_box, "Output cloud probability cube (NetCDF)"),
+            _stacked_field(b1_cloud_out_box, "Output cloud probability cube (NetCDF/Zarr)"),
             b1_build_btn,
         ],
         layout=widgets.Layout(width="100%", gap="8px"),
@@ -8133,7 +8243,7 @@ def ard_cube_tools():
     b2_prob_in_fc_box = _attach_filechooser(
         browse_b2_prob_in_btn,
         b2_prob_in_w,
-        title="Select cloud probability cube (NetCDF)",
+        title="Select cloud probability cube (.nc or .zarr)",
         pattern=["*.nc", "*"],
         select_dirs=False,
     )
@@ -8189,6 +8299,8 @@ def ard_cube_tools():
         if not prob_path:
             _status("❌ Please provide an input probability cube path.")
             return
+        prob_path = resolve_cube_path(prob_path)
+        b2_prob_in_w.value = str(Path(prob_path).as_posix())
 
         thresholds = _parse_thresholds_text(b2_thresholds_w.value)
         if thresholds is None:
@@ -8200,8 +8312,7 @@ def ard_cube_tools():
             _status(f"❌ File not found: {p.as_posix()}")
             return
 
-        old_mtime = p.stat().st_mtime
-        old_size = p.stat().st_size
+        old_mtime, old_size = _output_stat(p)
 
         _status(
             "Generating masks from probability map...",
@@ -8211,7 +8322,7 @@ def ard_cube_tools():
 
         try:
             # Load existing cloud cube
-            with xr.open_dataset(p) as ds:
+            with open_cube(p) as ds:
                 if "Cloud_Stack" not in ds.data_vars:
                     raise ValueError("NetCDF does not contain 'Cloud_Stack'.")
                 cloud = ds["Cloud_Stack"].load()
@@ -8251,12 +8362,12 @@ def ard_cube_tools():
             # --- Verify the file was actually overwritten (prevents false ✅).
             # On failure, append into status_out (never call _status, which
             # clears) so the tool's own error is never overwritten by success.
-            if not p.exists() or (p.stat().st_mtime == old_mtime and p.stat().st_size == old_size):
+            if not p.exists() or _output_stat(p) == (old_mtime, old_size):
                 with status_out:
                     print("❌ Mask generation failed: file was not overwritten.")
                 return
             try:
-                with xr.open_dataset(p) as _:
+                with open_cube(p) as _:
                     pass
             except Exception as e:
                 with status_out:
@@ -8288,7 +8399,7 @@ def ard_cube_tools():
                         "so you can apply different thresholds later without recomputing probabilities.<br>"
                         "<b>Warning:</b> This overwrites the input NetCDF (keeps cloud_prob, adds/updates mask bands)."
                         "</div>"),
-            _stacked_field(b2_prob_in_box, "Input probability cube (NetCDF)"),
+            _stacked_field(b2_prob_in_box, "Input probability cube (NetCDF/Zarr)"),
             _stacked_field(b2_thresholds_w, "Threshold(s)"),
             b2_generate_btn,
         ],
@@ -8310,7 +8421,7 @@ def ard_cube_tools():
     b3_cloud_fc_box = _attach_filechooser(
         browse_b3_cloud_btn,
         b3_cloud_path_w,
-        title="Select cloud cube (NetCDF with Cloud_Stack)",
+        title="Select cloud cube (.nc or .zarr with Cloud_Stack)",
         pattern=["*.nc", "*"],
         select_dirs=False,
     )
@@ -8342,7 +8453,7 @@ def ard_cube_tools():
     b3_masked_out_fc_box = _attach_filechooser(
         browse_b3_masked_out_btn,
         b3_masked_out_w,
-        title="Select output masked cube (NetCDF)",
+        title="Select output masked cube (.nc or .zarr)",
         pattern=["*.nc", "*"],
         select_dirs=False,
     )
@@ -8380,7 +8491,7 @@ def ard_cube_tools():
 
         thr = _extract_thr_suffix(b3_mask_band_w.value)
         p = Path(state["loaded_path"])
-        out = p.parent / f"{p.stem}_masked_{thr}.nc"
+        out = p.parent / f"{p.stem}_masked_{thr}{_ext_from_loaded()}"
         return out.as_posix()
 
     def _on_load_cloud_clicked(_):
@@ -8399,8 +8510,10 @@ def ard_cube_tools():
 
         cloud_path = (b3_cloud_path_w.value or "").strip()
         if not cloud_path:
-            _status("❌ Please select a cloud cube NetCDF path.")
+            _status("❌ Please select a cloud cube path (.nc or .zarr).")
             return
+        cloud_path = resolve_cube_path(cloud_path)
+        b3_cloud_path_w.value = str(Path(cloud_path).as_posix())
 
         p = Path(cloud_path)
         if not p.exists():
@@ -8410,7 +8523,7 @@ def ard_cube_tools():
         try:
             _status("Loading cloud cube (for masks)...", f"path = {p.as_posix()}")
 
-            with xr.open_dataset(p) as ds:
+            with open_cube(p) as ds:
                 if "Cloud_Stack" not in ds.data_vars:
                     raise ValueError("NetCDF does not contain 'Cloud_Stack'.")
                 cloud = ds["Cloud_Stack"]
@@ -8463,7 +8576,7 @@ def ard_cube_tools():
         lp = state.get("loaded_path")
         if not lp:
             return
-        ds_open = xr.open_dataset(lp, chunks="auto")
+        ds_open = open_cube(lp, chunks="auto")
         ds = ds_open.assign_coords(
             {name: coord.compute() for name, coord in ds_open.coords.items()}
         )
@@ -8502,13 +8615,12 @@ def ard_cube_tools():
             out_path = _suggest_masked_output_from_selection()
             b3_masked_out_w.value = out_path
 
-        out_path = _ensure_nc_suffix(out_path)
+        out_path = _ensure_cube_suffix(out_path)
         mask_layer = str(b3_mask_band_w.value)
 
         p_out = Path(out_path)
         existed_before = p_out.exists()
-        old_mtime = p_out.stat().st_mtime if existed_before else None
-        old_size = p_out.stat().st_size if existed_before else None
+        old_mtime, old_size = _output_stat(p_out) if existed_before else (None, None)
 
         _status(
             "Masking and exporting...",
@@ -8543,8 +8655,7 @@ def ard_cube_tools():
                     print("❌ Masking failed: output file was not created.")
                 return
 
-            new_mtime = p_out.stat().st_mtime
-            new_size = p_out.stat().st_size
+            new_mtime, new_size = _output_stat(p_out)
             if existed_before and (new_mtime == old_mtime) and (new_size == old_size):
                 with status_out:
                     print(
@@ -8555,7 +8666,7 @@ def ard_cube_tools():
                 return
 
             try:
-                with xr.open_dataset(p_out) as _:
+                with open_cube(p_out) as _:
                     pass
             except Exception as e:
                 with status_out:
@@ -8587,10 +8698,10 @@ def ard_cube_tools():
                 "Load a cloud cube, pick a mask band (not cloud_prob), then export a masked cube."
                 "</div>"
             ),
-            _stacked_field(b3_cloud_box, "Cloud data cube (NetCDF)"),
+            _stacked_field(b3_cloud_box, "Cloud data cube (NetCDF/Zarr)"),
             load_cloud_btn,
             _stacked_field(b3_mask_band_w, "Mask band"),
-            _stacked_field(b3_masked_out_box, "Output masked cube (NetCDF)"),
+            _stacked_field(b3_masked_out_box, "Output masked cube (NetCDF/Zarr)"),
             b3_mask_btn,
         ],
         layout=widgets.Layout(width="100%", gap="8px"),
@@ -8611,7 +8722,7 @@ def ard_cube_tools():
     viz_cloud_fc_box = _attach_filechooser(
         browse_viz_cloud_btn,
         viz_cloud_path_w,
-        title="Select cloud probability/mask cube (NetCDF with Cloud_Stack)",
+        title="Select cloud probability/mask cube (.nc or .zarr with Cloud_Stack)",
         pattern=["*.nc", "*"],
         select_dirs=False,
     )
@@ -8639,7 +8750,10 @@ def ard_cube_tools():
             return
 
         cloud_path = (viz_cloud_path_w.value or "").strip()
-        # Fall back to the loaded cube's default *_cloud.nc if it exists.
+        if cloud_path:
+            cloud_path = resolve_cube_path(cloud_path)
+            viz_cloud_path_w.value = str(Path(cloud_path).as_posix())
+        # Fall back to the loaded cube's default *_cloud.nc/.zarr if it exists.
         if not cloud_path and state.get("loaded_path"):
             cand = _suggest_clouds_path_from_loaded()
             if Path(cand).exists():
@@ -8647,7 +8761,7 @@ def ard_cube_tools():
                 viz_cloud_path_w.value = cloud_path
         if not cloud_path:
             with viz_out:
-                print("❌ Select a cloud cube NetCDF (with Cloud_Stack) to compare.")
+                print("❌ Select a cloud cube (.nc or .zarr, with Cloud_Stack) to compare.")
             return
 
         p = Path(cloud_path)
@@ -8674,7 +8788,7 @@ def ard_cube_tools():
                     )
 
             # Cloud cube is small; load it fully so no file handle lingers.
-            with xr.open_dataset(p) as ds:
+            with open_cube(p) as ds:
                 if "Cloud_Stack" not in ds.data_vars:
                     raise ValueError("Selected NetCDF has no 'Cloud_Stack'.")
                 cloud = ds["Cloud_Stack"].load()
@@ -8722,7 +8836,7 @@ def ard_cube_tools():
                 "deleting good pixels."
                 "</div>"
             ),
-            _stacked_field(viz_cloud_box, "Cloud probability/mask cube (NetCDF)"),
+            _stacked_field(viz_cloud_box, "Cloud probability/mask cube (NetCDF/Zarr)"),
             viz_btn,
             viz_out,
         ],
@@ -8803,7 +8917,7 @@ def ard_cube_tools():
     cr_out_fc_box = _attach_filechooser(
         browse_cr_out_btn,
         cr_out_w,
-        title="Select output NetCDF for co-registered cube",
+        title="Select output cube (.nc or .zarr) for co-registered cube",
         pattern=["*.nc", "*"],
         select_dirs=False,
     )
@@ -8864,7 +8978,7 @@ def ard_cube_tools():
         if not out_path:
             out_path = _suggest_cr_path()
             cr_out_w.value = out_path
-        out_path = _ensure_nc_suffix(out_path)
+        out_path = _ensure_cube_suffix(out_path)
 
         try:
             time_period = _parse_time_period(cr_time_period_w.value)
@@ -8874,8 +8988,7 @@ def ard_cube_tools():
 
         p_out = Path(out_path)
         existed_before = p_out.exists()
-        old_mtime = p_out.stat().st_mtime if existed_before else None
-        old_size = p_out.stat().st_size if existed_before else None
+        old_mtime, old_size = _output_stat(p_out) if existed_before else (None, None)
 
         _status(
             "Co-registering and exporting...",
@@ -8905,15 +9018,14 @@ def ard_cube_tools():
                     print("❌ Co-registration failed: output file was not created.")
                 return
 
-            new_mtime = p_out.stat().st_mtime
-            new_size = p_out.stat().st_size
+            new_mtime, new_size = _output_stat(p_out)
             if existed_before and (new_mtime == old_mtime) and (new_size == old_size):
                 with status_out:
                     print("❌ Co-registration failed: output file was not updated.")
                 return
 
             try:
-                with xr.open_dataset(p_out) as _:
+                with open_cube(p_out) as _:
                     pass
             except Exception as e:
                 with status_out:
@@ -9159,7 +9271,7 @@ def ard_cube_tools():
     def _suggest_sr_path_from_loaded():
         if state.get("loaded_path"):
             p = Path(state["loaded_path"])
-            return (p.parent / f"{p.stem}_sr.nc").as_posix()
+            return (p.parent / f"{p.stem}_sr{_ext_from_loaded()}").as_posix()
         return "./results/cube_sr.nc"
 
     sr_mode_w = widgets.Dropdown(
@@ -9197,7 +9309,7 @@ def ard_cube_tools():
     sr_out_fc_box = _attach_filechooser(
         browse_sr_out_btn,
         sr_out_w,
-        title="Select output NetCDF for super-resolved cube",
+        title="Select output cube (.nc or .zarr) for super-resolved cube",
         pattern=["*.nc", "*"],
         select_dirs=False,
     )
@@ -9266,12 +9378,11 @@ def ard_cube_tools():
         if not out_path:
             out_path = _suggest_sr_path_from_loaded()
             sr_out_w.value = out_path
-        out_path = _ensure_nc_suffix(out_path)
+        out_path = _ensure_cube_suffix(out_path)
 
         p_out = Path(out_path)
         existed_before = p_out.exists()
-        old_mtime = p_out.stat().st_mtime if existed_before else None
-        old_size = p_out.stat().st_size if existed_before else None
+        old_mtime, old_size = _output_stat(p_out) if existed_before else (None, None)
 
         sr_var_name = state.get("loaded_var") or "Spectral_Temporal_Stack"
 
@@ -9302,8 +9413,7 @@ def ard_cube_tools():
                     print("❌ Super-resolution failed: output file was not created.")
                 return
 
-            new_mtime = p_out.stat().st_mtime
-            new_size = p_out.stat().st_size
+            new_mtime, new_size = _output_stat(p_out)
 
             if existed_before and (new_mtime == old_mtime) and (new_size == old_size):
                 with status_out:
@@ -9315,7 +9425,7 @@ def ard_cube_tools():
 
             # Ensure file is readable
             try:
-                with xr.open_dataset(p_out) as _:
+                with open_cube(p_out) as _:
                     pass
             except Exception as e:
                 with status_out:
@@ -9342,7 +9452,7 @@ def ard_cube_tools():
             widgets.HTML("<div style='font-size:12px; color:#666;'>Super resolves the loaded data cube. Select one of the three modes below.</div>"),
             _stacked_field(sr_mode_w, "Mode"),
             sr_desc_html,
-            _stacked_field(sr_out_box, "Output NetCDF"),
+            _stacked_field(sr_out_box, "Output cube (NetCDF/Zarr)"),
             sr_compress_w,
             sr_compress_warn_html,
             sr_run_btn,
@@ -9370,7 +9480,7 @@ def ard_cube_tools():
     tools_box = widgets.VBox(
         [
             widgets.HTML("<b>Tools</b>"),
-            widgets.HTML("<div style='font-size:12px; color:#666;'>Each tool exports its result to NetCDF (no COG export here).</div>"),
+            widgets.HTML("<div style='font-size:12px; color:#666;'>Each tool exports its result in the loaded cube's format - NetCDF or Zarr (no COG export here).</div>"),
             mask_tool_acc,
             cr_tool_acc,
             sr_tool_acc,
@@ -9515,8 +9625,14 @@ def ard_cube_tools():
     def _on_load_clicked(_):
         path = (load_path_w.value or "").strip()
         if not path:
-            _status("❌ Please select a NetCDF path.")
+            _status("❌ Please select a NetCDF (.nc) or Zarr (.zarr) cube path.")
             return
+        # A file picked INSIDE a .zarr store (e.g. zarr.json) resolves to the
+        # store root, so the file chooser can be used for Zarr cubes too.
+        resolved = resolve_cube_path(path)
+        if resolved != path:
+            path = resolved
+            load_path_w.value = str(Path(path).as_posix())
         p = Path(path)
         if not p.exists():
             _status(f"❌ File not found: {p.as_posix()}")
@@ -9538,7 +9654,7 @@ def ard_cube_tools():
             # Open lazily (Dask-backed): large cubes are read on demand instead of
             # being copied into RAM. The handle must stay open for later reads, so
             # this is deliberately not a closing `with` block.
-            ds_open = xr.open_dataset(p, chunks="auto")
+            ds_open = open_cube(p, chunks="auto")
             # Keep small coordinates in memory; only the data variables stay lazy
             # (chunked non-dimension coords otherwise break boolean-indexer ops).
             ds = ds_open.assign_coords(
@@ -9549,7 +9665,7 @@ def ard_cube_tools():
             layers = _raster_layer_names(ds)
             if not layers:
                 raise ValueError(
-                    "NetCDF contains no raster layers (data variables with "
+                    "Cube contains no raster layers (data variables with "
                     f"'y'/'x' dims). Found data_vars: {list(ds.data_vars)}"
                 )
 
@@ -9592,7 +9708,7 @@ def ard_cube_tools():
                     )
                     layer_lines.append(f"   - {_layer_display_name(name)}  ({dims})")
                 _status(
-                    f"ℹ️ This NetCDF contains {len(layers)} layers:",
+                    f"ℹ️ This cube contains {len(layers)} layers:",
                     *layer_lines,
                     "Select the layer to work on in the 'Layer' dropdown, "
                     "then click 'Load selected layer'.",
@@ -9605,7 +9721,7 @@ def ard_cube_tools():
         path_posix = state.get("pending_path")
         var_name = layer_select_w.value
         if ds is None or not path_posix:
-            _status("❌ Load a NetCDF cube first.")
+            _status("❌ Load a cube first.")
             return
         if not var_name:
             _status("❌ Please select a layer to load.")

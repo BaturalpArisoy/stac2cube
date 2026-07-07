@@ -12,6 +12,90 @@ import itertools
 
 
 
+def is_zarr_path(path) -> bool:
+    """True when ``path`` names a Zarr store (by the ``.zarr`` extension)."""
+    return str(path).lower().rstrip("/\\").endswith(".zarr")
+
+
+def resolve_cube_path(path):
+    """Normalize a user-picked cube path.
+
+    A Zarr store is a directory, but file choosers select files - so a user
+    browsing "into" ``cube.zarr`` picks an inner file like ``zarr.json``.
+    If any parent directory of ``path`` ends in ``.zarr``, return that store
+    root; otherwise return ``path`` unchanged.
+    """
+    p = Path(str(path))
+    for parent in [p] + list(p.parents):
+        if parent.name.lower().endswith(".zarr"):
+            return str(parent)
+    return str(path)
+
+
+def open_cube(path, chunks=None):
+    """Open a cube from disk, dispatching on the path extension.
+
+    ``*.zarr`` -> :func:`xarray.open_zarr` (always lazy/dask-backed, chunked
+    as stored); anything else -> :func:`xarray.open_dataset` (NetCDF), with
+    ``chunks`` passed through unchanged so existing eager/lazy behavior is
+    preserved.
+
+    This is the single entry point every pipeline component uses to read a
+    cube from a path, so NetCDF and Zarr cubes are interchangeable everywhere.
+    Note one storage-level difference: Zarr attributes are JSON, so attrs
+    written as numpy arrays/scalars (e.g. ``bbox``, ``transform``,
+    ``y.resolution``) come back as plain Python lists/floats. Consumers must
+    not rely on numpy-only methods of attr values (use ``np.asarray(...)`` /
+    ``float(...)``).
+    """
+    import warnings
+
+    if is_zarr_path(path):
+        with warnings.catch_warnings():
+            # Same two informational zarr-v3 warnings suppressed in
+            # _write_zarr; values read back identically (verified).
+            warnings.filterwarnings(
+                "ignore", message=".*does not have a Zarr V3 specification.*"
+            )
+            warnings.filterwarnings("ignore", message=".*[Cc]onsolidated metadata.*")
+            ds = xr.open_zarr(path)
+        # open_zarr leaves non-dimension coordinates (e.g. cloud_percentage)
+        # dask-backed; a dask boolean coord cannot be used as a drop-indexer
+        # (cloud_filter's .where(..., drop=True) raises). Coordinates are tiny,
+        # so materialize them - matching how NetCDF coords arrive in memory -
+        # while the data variables stay lazy.
+        out = ds.assign_coords(
+            {name: coord.compute() for name, coord in ds.coords.items()}
+        )
+        # assign_coords drops the dataset's closer (verified: _close becomes
+        # None), which would turn every `with open_cube(...) as ds:` into a
+        # handle leak. Re-attach it so close() keeps working.
+        try:
+            out.set_close(ds._close)
+        except AttributeError:
+            out._close = ds._close
+
+        # NetCDF stores the numeric-array attrs (bbox, transform) as ndarrays;
+        # Zarr's JSON attrs return plain lists with identical values. Convert
+        # back so downstream behavior - including attr text written into
+        # exports (e.g. COG metadata tags) - is identical for both containers.
+        def _restore_array_attrs(attrs):
+            for key in ("bbox", "transform"):
+                v = attrs.get(key)
+                if (
+                    isinstance(v, list)
+                    and v
+                    and all(isinstance(x, (int, float)) for x in v)
+                ):
+                    attrs[key] = np.asarray(v)
+
+        _restore_array_attrs(out.attrs)
+        for var in out.variables.values():
+            _restore_array_attrs(var.attrs)
+        return out
+    return xr.open_dataset(path, chunks=chunks)
+
+
 def _is_dask_backed(obj) -> bool:
     if isinstance(obj, xr.DataArray):
         return dask.is_dask_collection(obj.data)

@@ -6,7 +6,7 @@ import numpy as np
 import xarray as xr
 import sys
 from tqdm.auto import tqdm
-from .export_cfg import export_stac
+from .export_cfg import export_stac, open_cube
 from .clip import compute_cloud_percentage
 import rioxarray as rio
 import cv2
@@ -224,7 +224,7 @@ def get_cloud_layers(
         daterange = stac_parameters["daterange"]
 
         # Use the exact timestamps from the initial cube
-        with xr.open_dataset(source_cube) as ds:
+        with open_cube(source_cube) as ds:
             if "Spectral_Temporal_Stack" in ds:
                 reference_times = ds["Spectral_Temporal_Stack"].time.values
             else:
@@ -310,7 +310,7 @@ def get_cloud_layers(
     bbox = stac.bbox
 
     if update:
-        with xr.open_dataset(update) as ds:
+        with open_cube(update) as ds:
             stac_existing = ds["Cloud_Stack"].load()
         stac, missing_times = find_missing_times(stac_existing, stac)
         if not missing_times:
@@ -486,12 +486,12 @@ def mask_stac_clouds(stac, cloud, mask_layer, output=None, compress=False):
     _opened = []
     try:
         if isinstance(stac, (str, os.PathLike)):
-            _ds = xr.open_dataset(stac)
+            _ds = open_cube(stac)
             _opened.append(_ds)
             stac = _ds.Spectral_Temporal_Stack
 
         if isinstance(cloud, (str, os.PathLike)):
-            _ds = xr.open_dataset(cloud)
+            _ds = open_cube(cloud)
             _opened.append(_ds)
             cloud = _ds.Cloud_Stack
 
@@ -597,7 +597,7 @@ def cloud_filter(inp, max_cloud):
     - if inp is an xr.DataArray: filter directly
     """
     if isinstance(inp, str):
-        da = xr.open_dataset(inp)["Spectral_Temporal_Stack"]
+        da = open_cube(inp)["Spectral_Temporal_Stack"]
     elif isinstance(inp, xr.Dataset):
         da = inp["Spectral_Temporal_Stack"]
     else:  # assume xr.DataArray

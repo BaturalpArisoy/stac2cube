@@ -3,20 +3,23 @@ import xarray as xr
 import pyproj
 import numpy as np
 
+from .export_cfg import open_cube
+
 # from .vector_refiner import proj_2_geo
 
 
 def get_stac_parameters(stac_existing):
 
     if isinstance(stac_existing, (str, os.PathLike)):
-        stac_existing = xr.open_dataset(stac_existing)
+        stac_existing = open_cube(stac_existing)
         if "Spectral_Temporal_Stack" in list(stac_existing.data_vars):
             stac_existing = stac_existing.Spectral_Temporal_Stack
         elif "Cloud_Stack" in list(stac_existing.data_vars):
             stac_existing = stac_existing.Cloud_Stack
 
-    # Polygon
-    bbox = stac_existing.bbox
+    # Polygon. np.asarray: NetCDF stores the attr as an ndarray, Zarr (JSON
+    # attrs) returns a plain list - normalize before .tolist().
+    bbox = np.asarray(stac_existing.bbox)
     bbox = bbox.tolist()
     # Full geometry # update-clip raster
     # if hasattr(stac_existing, "geometry"):
@@ -46,8 +49,9 @@ def get_stac_parameters(stac_existing):
     else:
         # Mission
         mission = stac_existing.mission
-        # Resolution
-        resolution = abs(stac_existing.y.resolution).item()
+        # Resolution (float(): the attr is a numpy scalar from NetCDF but a
+        # plain Python float from Zarr's JSON attrs, which has no .item())
+        resolution = float(abs(stac_existing.y.resolution))
         # Spectral bands
         spectral_bands = stac_existing.spectral_bands
         # Indices
@@ -72,7 +76,7 @@ def get_stac_parameters(stac_existing):
 
 def update_stac(stac_existing, stac_updated):
 
-    stac_existing = xr.open_dataset(stac_existing)
+    stac_existing = open_cube(stac_existing)
     if "Spectral_Temporal_Stack" in list(stac_existing.data_vars):
         stac_existing = stac_existing.Spectral_Temporal_Stack
     elif "Cloud_Stack" in list(stac_existing.data_vars):
