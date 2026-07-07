@@ -35,6 +35,14 @@ Pointing it at the parent `interactive` folder also works.
 > If `model_dir` is wrong/missing, the run fails with a clear
 > `Could not find the SEN2SRLite model ...` error.
 
+## `compress`
+
+Lossless zlib compression of the output NetCDF. Leave it `false` (default).
+
+> **Warning:** compression shrinks the output file a further ~20-40%
+> (scene-dependent), but the export step takes roughly **10x longer**. Enable
+> it only for archiving, when disk space matters more than compute time.
+
 ---
 
 ## Example config
@@ -45,7 +53,8 @@ Pointing it at the parent `interactive` folder also works.
     "input_path": "/dss/.../test.nc",
     "output_path": "/dss/.../test_superres.nc",
     "model_type": null,
-    "model_dir": "/dss/.../stac2cube/interactive/model"
+    "model_dir": "/dss/.../stac2cube/interactive/model",
+    "compress": false
   }
 }
 ```

@@ -9053,6 +9053,28 @@ def ard_cube_tools():
     sr_out_row = widgets.HBox([browse_sr_out_btn, sr_out_w], layout=widgets.Layout(width="100%", gap="6px", align_items="center"))
     sr_out_box = widgets.VBox([sr_out_row, sr_out_fc_box], layout=widgets.Layout(width="100%", gap="4px"))
 
+    sr_compress_w = widgets.Checkbox(
+        value=False,
+        description="Lossless compression (zlib)",
+        indent=False,
+        layout=widgets.Layout(width="auto"),
+    )
+    sr_compress_warn_html = widgets.HTML(
+        "<div style='font-size:12px; color:#b00020;'>"
+        "⚠️ <b>Warning:</b> compression shrinks the output file a further "
+        "~20-40% (scene-dependent), but the export step takes roughly "
+        "<b>10x longer</b>. Enable it only for archiving, when disk space "
+        "matters more than your time.</div>"
+    )
+    sr_compress_warn_html.layout.display = "none"
+
+    def _on_sr_compress_change(change):
+        if change.get("name") != "value":
+            return
+        sr_compress_warn_html.layout.display = "" if sr_compress_w.value else "none"
+
+    sr_compress_w.observe(_on_sr_compress_change, names="value")
+
     sr_run_btn = widgets.Button(
         description="Super-resolve and Export",
         button_style="success",
@@ -9109,6 +9131,7 @@ def ard_cube_tools():
             "processed — not the progress of super-resolving each individual image. "
             "A single time step can take a while, so the bar may sit still for a bit. "
             "That's expected, not a bug.",
+            "",
         )
 
         try:
@@ -9119,6 +9142,7 @@ def ard_cube_tools():
                     output_path=out_path,
                     var_name=sr_var_name,
                     model_type=("rgbn" if mode == "rgbn" else "full_spectral"),
+                    compress=bool(sr_compress_w.value),
                 )
 
             # --- Verify export actually happened (prevents false ✅) ---
@@ -9168,6 +9192,8 @@ def ard_cube_tools():
             _stacked_field(sr_mode_w, "Mode"),
             sr_desc_html,
             _stacked_field(sr_out_box, "Output NetCDF"),
+            sr_compress_w,
+            sr_compress_warn_html,
             sr_run_btn,
         ],
         layout=widgets.Layout(width="100%", gap="8px"),

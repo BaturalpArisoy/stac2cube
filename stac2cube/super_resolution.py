@@ -781,6 +781,8 @@ def super_resolve_cube(
         # NameError because tf0 was only set in the time-series branch.
         tf0 = da_super_all.rio.transform()
 
+    print("Super-resolving is done, now exporting...", flush=True)
+
     # ===========================
     # OPTIONAL: compute indices (only if provided in attrs)
     # ===========================
@@ -870,15 +872,41 @@ def super_resolve_cube(
         # 65534 int16 steps must resolve at least 1e-4 (S2's native precision)
         if np.isfinite(vmin) and np.isfinite(vmax) and (vmax - vmin) <= 6.5:
             scale = max((vmax - vmin) / (2**16 - 2), 1e-12)
-            # float32 scale/offset so readers decode back to float32, not float64
-            var_encoding.update(
-                {
-                    "dtype": "int16",
-                    "scale_factor": np.float32(scale),
-                    "add_offset": np.float32((vmax + vmin) / 2.0),
-                    "_FillValue": np.int16(-32768),
-                }
-            )
+            offset = (vmax + vmin) / 2.0
+            fill = np.int16(-32768)
+            # Pack to int16 here, slab by slab, instead of via encoding
+            # dtype/scale_factor: xarray's encode-time packing materializes
+            # two extra full-size float copies of the cube (peak ~3.5x cube
+            # size), which OOM-kills large scenes at export. Slab packing
+            # peaks at ~1.5x (float cube + int16 copy) and the backend then
+            # writes half the bytes.
+            packed = np.empty(vals.shape, np.int16)
+            slab_elems = 32 * 1024 * 1024  # ~128 MB float32 temp per slab
+            rows_per_slab = max(1, slab_elems // max(1, vals.shape[-1]))
+            for idx in np.ndindex(vals.shape[:-2]):
+                for r in range(0, vals.shape[-2], rows_per_slab):
+                    s = (*idx, slice(r, r + rows_per_slab))
+                    tmp = (vals[s] - np.float32(offset)) / np.float32(scale)
+                    np.rint(tmp, out=tmp)
+                    nan_mask = np.isnan(tmp)
+                    tmp[nan_mask] = 0.0
+                    np.clip(tmp, -32767, 32767, out=tmp)
+                    ints = tmp.astype(np.int16)
+                    ints[nan_mask] = fill
+                    packed[s] = ints
+            packed_da = ds_out[var_name].copy(data=packed)
+            # CF unpacking attrs (float32 so readers decode to float32, not
+            # float64). _FillValue goes in attrs, not encoding: the netCDF4
+            # backend pops it at variable creation, while encoding._FillValue
+            # would trigger a mask/fill pass that copies the whole cube again.
+            packed_da.attrs["scale_factor"] = np.float32(scale)
+            packed_da.attrs["add_offset"] = np.float32(offset)
+            packed_da.attrs["_FillValue"] = fill
+            # a leftover encoding._FillValue (e.g. inherited from an input
+            # file) would clash with the attrs one and abort the write
+            packed_da.encoding.pop("_FillValue", None)
+            ds_out[var_name] = packed_da
+            ds_out[var_name].encoding["grid_mapping"] = "spatial_ref"
         else:
             print(
                 "Note: data range too wide (or non-finite) for int16 packing "
