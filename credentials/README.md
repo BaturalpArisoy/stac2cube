@@ -73,6 +73,11 @@ type them in your code.
 
 ---
 
+**OPTIONALLY:** <br>Protecting this configuration from feature repository pulls is recommended, otherwise the changes will be lost!
+```bash
+git update-index --skip-worktree credentials/cdse_key
+```
+
 ## Frequently asked
 
 **Do I have to do this every time?**

@@ -55,6 +55,13 @@ In **each** file, update:
 > A leftover `<...>` placeholder here makes sbatch fail with
 > `Invalid directive found in batch script`.
 
+<br>
+
+**FINALLY:** <br>Protecting these configurations from feature repository pulls is recommended, otherwise the changes will be lost!
+```bash
+git update-index --skip-worktree slurm/config_cpu.cmd slurm/config_gpu.cmd
+```
+
 ### 1.3 Choose your python environment (local vs shared env)
 
 #### Option A - Local micromamba env (`-n stac2cube`)
