@@ -204,10 +204,17 @@ PARAM_HELP_HTML = {
     If <b>None</b>: no temporal composite (the full time series is kept).<br>
     Setting a temporal composite disables <code>stats</code>.<br><br>
     """,
-    "output": """
-    <b>Output</b><br>
-    <b>NetCDF + Output file set</b> → generates single file multispectral + multidate data cube<br>
-    <b>COGs + Output directory set</b> → generates multispectral GeoTiffs per each selected date
+    "export_mode": """
+    <b>Which format should I pick?</b><br>
+    <b>NetCDF (.nc)</b> - one single file. Works with every Analysis Ready Data
+    (ARD) cube tool here and is easy to copy or share. A solid all-round default.<br><br>
+    <b>Zarr (.zarr)</b> - a chunked folder. Also works with every ARD cube tool,
+    and is the quickest to read and write for very large cubes. To share it, zip
+    the folder first.<br><br>
+    <b>Cloud Optimized GeoTIFFs</b> - a folder with one GeoTIFF per date. The
+    bands are already mapped, so you can drag them straight into QGIS (or another
+    GIS) and view them right away. NOT accepted by the ARD cube tools. Best when
+    your goal is viewing or sharing individual scenes.
     """,
     "fps": """
     <b>FPS (frames per second)</b><br>
@@ -573,14 +580,18 @@ def datacube_builder(missions_func=missions):
             "" if export_mask_w.value is True else "none"
         )
 
+    def _export_mask_user_controlled():
+        """Export mask is the user's to set under 'No masking' (preset 1) and
+        'Free settings' (preset 3); the 'Mask clouds' preset keeps it greyed."""
+        return _cloud_preset_state["n"] in (1, 3)
+
     def _sync_export_mask_path_enabled():
-        """Path field is editable only in Free Settings (manual) mode with export
-        on; presets keep it greyed. Auto-fill it when it becomes relevant."""
-        manual = (_cloud_preset_state["n"] == 4)
+        """Path field is editable when the user controls Export mask (No masking /
+        Free settings) and it is on; otherwise greyed. Auto-fill when relevant."""
         on = (export_mask_w.value is True) and (cloud_masking_w.value is True)
         if on and not (cloud_mask_output_w.value or "").strip():
             cloud_mask_output_w.value = _auto_mask_binary_suggestion()
-        cloud_mask_output_w.disabled = not (manual and on)
+        cloud_mask_output_w.disabled = not (_export_mask_user_controlled() and on)
 
     def _sync_keep_clouds_enabled(change=None):
         """Mask-or-Keep AND Export-mask both need cloud detection on (they use the
@@ -610,56 +621,43 @@ def datacube_builder(missions_func=missions):
     # exclusive - one is always selected - rendered as checkboxes per design.
     # -------------------------------------------------------------------------
     def _make_preset_row(text_html):
+        # The label is the checkbox's own description (HTML enabled), so clicking
+        # the TEXT toggles the box - not just the little square. The description
+        # sits in a <label> tied to the input, which is what makes it clickable.
         cb = widgets.Checkbox(
-            value=False, indent=False,
-            layout=widgets.Layout(width="auto", flex="0 0 auto"),
+            value=False,
+            indent=False,
+            description=text_html,
+            layout=widgets.Layout(width="100%"),
         )
-        cb.style.description_width = "0px"
-        # The checkbox square sits a few px below the top of its widget, so a
-        # top-aligned label reads as floating above the box. Nudge the first text
-        # line down to meet the square (keeps the box by the first line for
-        # wrapped multi-line options).
-        lbl = widgets.HTML(
-            f"<div style='font-size:12px; color:#374151; line-height:1.4; "
-            f"margin-top:3px;'>{text_html}</div>"
-        )
-        row = widgets.HBox(
-            [cb, lbl],
-            layout=widgets.Layout(width="100%", align_items="flex-start", gap="4px"),
-        )
-        return cb, row
+        cb.description_allow_html = True
+        # Wide label column so a short sentence wraps under the option title
+        # instead of being clipped to one line.
+        cb.style.description_width = "330px"
+        return cb, cb
 
     cloud_preset1_cb, _cp1_row = _make_preset_row(
-        "<b>No masking</b><br>"
-        "I want to mask the scenes with my own custom thresholds using "
-        "<b>s2cloudless</b> later, or I am not even interested in masking clouds "
-        "at all."
+        "<b>No Masking</b> - Keep all pixels. Select this if you want use s2cloudless masking later. Each scene is tagged with a cloud % "
+        "so you can filter cloudy dates, saving you to apply s2cloudless on obviously fully cloudy scenes. Optionally "
+        "export a binary mask to apply later."
     )
     cloud_preset2_cb, _cp2_row = _make_preset_row(
-        "<b>Mask clouds</b><br>"
-        "I just wanna get my clouds masked as fast as possible and don't really "
-        "care about custom thresholds!"
+        "<b>Mask Clouds</b> - Remove cloudy pixels automatically (SCL). The quick "
+        "way to a clean cube."
     )
     cloud_preset3_cb, _cp3_row = _make_preset_row(
-        "<b>Just cloud percentage, no masking</b><br>"
-        "I would love to generate natural time-series animation by keeping the clouds but, I wanna "
-        "calculate the cloud percentage of the scenes to at least filter the data. "
-        "I can also use the exported binary mask file to mask the clouds later in Data Cube Editor."
-    )
-    cloud_preset4_cb, _cp4_row = _make_preset_row(
-        "<b>Free Settings</b><br>"
-        "Dude, I know what I am doing, let me change the parameters..."
+        "<b>Free Settings</b> - Dude, I know what I am doing..."
     )
 
     _cloud_preset_cbs = [
-        cloud_preset1_cb, cloud_preset2_cb, cloud_preset3_cb, cloud_preset4_cb,
+        cloud_preset1_cb, cloud_preset2_cb, cloud_preset3_cb,
     ]
     _cloud_preset_label = widgets.HTML(
         "<div style='font-weight:600; font-size:13px; color:#374151;'>"
-        "Select one of the options below:</div>"
+        "Choose how to handle clouds:</div>"
     )
     _cloud_preset_box = widgets.VBox(
-        [_cloud_preset_label, _cp1_row, _cp2_row, _cp3_row, _cp4_row],
+        [_cloud_preset_label, _cp1_row, _cp2_row, _cp3_row],
         layout=widgets.Layout(width="100%", gap="6px"),
     )
 
@@ -689,25 +687,31 @@ def datacube_builder(missions_func=missions):
         _sync_export_mask_visibility()
 
     def _apply_cloud_preset(n):
-        if n == 4:
-            _set_cloud_params_disabled(False)  # unlock; keep current values
+        if n == 3:
+            _set_cloud_params_disabled(False)  # Free settings: unlock, keep values
             return
-        # Set Cloud Detection, clamped to what the mission offers (only None when
-        # masking is unavailable -> leave it; presets 2/3 then simply don't mask).
+        # Both remaining presets turn SCL cloud detection ON: preset 1 to compute
+        # the cloud % while KEEPING every pixel, preset 2 to actually mask. Clamp
+        # to what the mission offers (only None when masking is unavailable -> the
+        # preset then simply can't detect / mask).
         valid = [v for _, v in cloud_masking_w.options]
-        want_mask = n in (2, 3)
-        if want_mask and (True in valid):
+        if True in valid:
             cloud_masking_w.value = True
         elif False in valid:
             cloud_masking_w.value = False
-        keep_clouds_w.value = "keep" if n == 3 else "mask"
+        keep_clouds_w.value = "keep" if n == 1 else "mask"
         max_cc_w.value = 100
-        # Binary mask export: on only for "just cloud percentage" (preset 3),
-        # where clouds are kept and a mask is what lets you filter/mask later.
-        export_mask_w.value = (n == 3)
-        if n == 3:
-            cloud_mask_output_w.value = _auto_mask_binary_suggestion()
+        # Binary mask export defaults OFF for both; under "No masking" the user may
+        # switch it on (it stays interactive), so they can produce a mask to apply
+        # in the Data Cube Editor later.
+        export_mask_w.value = False
         _set_cloud_params_disabled(True)
+        if n == 1:
+            # "No masking": free the Export-mask toggle (only when the mission can
+            # actually detect clouds), so it is the one raw control the user keeps.
+            export_mask_w.disabled = not (cloud_masking_w.value is True)
+            _sync_export_mask_visibility()
+            _sync_export_mask_path_enabled()
 
     def _select_cloud_preset(n, apply=True):
         _cloud_preset_state["n"] = n
@@ -830,9 +834,9 @@ def datacube_builder(missions_func=missions):
     # -------------------------------------------------------------------------
     export_mode_w = widgets.Dropdown(
         options=[
-            ("NetCDF (single .nc file)", "netcdf"),
-            ("Cloud Optimized Geotiffs (select folder)", "cogs"),
-            ("Zarr (chunked .zarr store, streams lazily - works with all tools)", "zarr"),
+            ("NetCDF (accepted for ARD Cube Tools)", "netcdf"),
+            ("Zarr (accepted for ARD Cube Tools)", "zarr"),
+            ("Geotiffs, Cloud Optimized (select a folder, NOT accepted for ARD Cube Tools)", "cogs"),
         ],
         value="netcdf",
         description="Export mode:",
@@ -4317,13 +4321,13 @@ def datacube_builder(missions_func=missions):
 
     source_preset1_cb, _sp1_row = _make_preset_row(
         "<b>Excellent time-series but no probabilistic cloud masking</b><br>"
-        "I need full time-series without credentials &amp; login but I am not "
+        " - I need full time-series without credentials &amp; login but I am not "
         "interested in s2cloudless cloud masking but only Scene Classification "
         "Layer masking or no masking."
     )
     source_preset2_cb, _sp2_row = _make_preset_row(
         "<b>Good time-series that can be used for probabilistic cloud masking</b><br>"
-        "I need to use s2cloudless later with my own custom thresholds but I am "
+        " - I need to use s2cloudless later with my own custom thresholds but I am "
         "aware that some dates are missing, let's 'Check data availability' below."
     )
     _source_preset_cbs = [source_preset1_cb, source_preset2_cb]
@@ -4429,8 +4433,8 @@ def datacube_builder(missions_func=missions):
     export_mode_group = _field_group(
         "Export mode & Output",
         [
-            _stacked_field(export_mode_w, "Export mode"),
-            _with_help_left(output_input_box, "output", label_text="Output"),
+            _with_help_left(export_mode_w, "export_mode", label_text="Export mode"),
+            _stacked_field(output_input_box, "Output"),
             export_compress_w,
             export_compress_warn_html,
         ],
@@ -4472,16 +4476,12 @@ def datacube_builder(missions_func=missions):
                 layout=widgets.Layout(width="100%", gap="6px"),
             ),
             viz_out,
-            widgets.HTML(
-                "<div style='border-top:1px solid #e5e7eb; margin:6px 0 2px 0;'></div>"
-            ),
-            widgets.VBox(
+            # The animation maker is a separate tool from the viewer, so it lives
+            # in its own collapsed-by-default section (a custom collapse, not a
+            # nested ipywidgets Accordion, which would push a stray scrollbar).
+            _field_group(
+                "2) Animation (GIF export)",
                 [
-                    widgets.HTML("<b>2) Animation (GIF export)</b>"),
-                    widgets.HTML(
-                        "<div style='font-size:12px; color:#666;'>Renders the whole time series "
-                        "to an animated GIF on disk. Status is reported below the button.</div>"
-                    ),
                     gif_section_w,
                     gif_preset_box,
                     gif_band_box,
@@ -4493,7 +4493,10 @@ def datacube_builder(missions_func=missions):
                     viz_make_gif_btn,
                     anim_out,
                 ],
-                layout=widgets.Layout(width="100%", gap="6px"),
+                subtitle="Renders the whole time series to an animated GIF on disk. "
+                "Status is reported below the button.",
+                collapsible=True,
+                open=False,
             ),
             _collapse_row(viz_collapse_btn),
         ],
@@ -4687,7 +4690,6 @@ def datacube_builder(missions_func=missions):
             "cloud_preset1": cloud_preset1_cb,
             "cloud_preset2": cloud_preset2_cb,
             "cloud_preset3": cloud_preset3_cb,
-            "cloud_preset4": cloud_preset4_cb,
             "stats": stats_w,
             "aggregator": aggregator_w,
             "export_mode": export_mode_w,
@@ -4790,6 +4792,18 @@ def datacube_editor():
         It affects only the exported file - the interactive viewer and the
         animation still show the full time series.<br><br>
         If <b>None</b>: no temporal composite (the full time series is exported).
+        """,
+        "export_mode": """
+        <b>Which format should I pick?</b><br>
+        <b>NetCDF (.nc)</b> - one single file. Works with every Analysis Ready Data
+        (ARD) cube tool here and is easy to copy or share. A solid all-round default.<br><br>
+        <b>Zarr (.zarr)</b> - a chunked folder. Also works with every ARD cube tool,
+        and is the quickest to read and write for very large cubes. To share it, zip
+        the folder first.<br><br>
+        <b>Cloud Optimized GeoTIFFs</b> - a folder with one GeoTIFF per date. The
+        bands are already mapped, so you can drag them straight into QGIS (or another
+        GIS) and view them right away. NOT accepted by the ARD cube tools. Best when
+        your goal is viewing or sharing individual scenes.
         """,
         "fps": """
         <b>fps</b><br>
@@ -5843,9 +5857,9 @@ def datacube_editor():
     # the edits.
     export_mode_w = widgets.Dropdown(
         options=[
-            ("NetCDF (single .nc file)", "netcdf"),
-            ("Zarr (chunked .zarr store, streams lazily - good for very large cubes)", "zarr"),
-            ("Cloud Optimized Geotiffs (select folder)", "cogs"),
+            ("NetCDF (accepted for ARD Cube Tools)", "netcdf"),
+            ("Zarr (accepted for ARD Cube Tools)", "zarr"),
+            ("Geotiffs, Cloud Optimized (select a folder, NOT accepted for ARD Cube Tools)", "cogs"),
         ],
         value="netcdf",
         description="Mode:",
@@ -7313,7 +7327,7 @@ def datacube_editor():
     loading_box = widgets.VBox(
         [
             widgets.HTML("<b>Loading</b>"),
-            widgets.HTML("<div style='font-size:12px; color:#666;'>NetCDF only (Geotiffs are not supported as editor input).</div>"),
+            widgets.HTML("<div style='font-size:12px; color:#666;'>NetCDF and Zarr only (Geotiffs are not supported as editor input).</div>"),
             _stacked_field(load_input_box, "Data cube path"),
             widgets.HBox([load_cube_btn, reset_btn], layout=widgets.Layout(gap="8px", flex_flow="row wrap")),
             layer_select_box,
@@ -7619,7 +7633,7 @@ def datacube_editor():
             #widgets.HTML("<b>Export Options</b>"),
             widgets.HTML("<div style='font-size:12px; color:#666;'>Exports the current result in the desired format.</div>"),
             _stacked_field_with_help(aggregator_w, "Temporal Composite", "aggregator"),
-            _stacked_field(export_mode_w, "Export mode"),
+            _stacked_field_with_help(export_mode_w, "Export mode", "export_mode"),
             _stacked_field(export_input_box, "Output"),
             export_compress_w,
             export_compress_warn_html,
@@ -7686,17 +7700,12 @@ def datacube_editor():
                 layout=widgets.Layout(width="100%", gap="6px"),
             ),
             viz_out,
-            widgets.HTML(
-                "<div style='border-top:1px solid #e5e7eb; margin:6px 0 2px 0;'></div>"
-            ),
-            widgets.VBox(
+            # The animation maker is a separate tool from the viewer, so it lives
+            # in its own collapsed-by-default section (a custom collapse, not a
+            # nested ipywidgets Accordion, which would push a stray scrollbar).
+            _field_group(
+                "2) Animation (GIF export)",
                 [
-                    widgets.HTML("<b>2) Animation (GIF export)</b>"),
-                    widgets.HTML(
-                        "<div style='font-size:12px; color:#666;'>Renders the whole time series "
-                        "to an animated GIF on disk (requires a time dimension). Status is "
-                        "reported below the button.</div>"
-                    ),
                     gif_section_w,
                     gif_preset_box,
                     gif_band_box,
@@ -7708,7 +7717,10 @@ def datacube_editor():
                     viz_make_gif_btn,
                     anim_out,
                 ],
-                layout=widgets.Layout(width="100%", gap="6px"),
+                subtitle="Renders the whole time series to an animated GIF on disk "
+                "(requires a time dimension). Status is reported below the button.",
+                collapsible=True,
+                open=False,
             ),
 
         ],
@@ -8078,7 +8090,7 @@ def ard_cube_tools():
         "border-radius:6px; padding:10px 12px; margin:0 0 8px 0;'>"
         "<b>ℹ️</b> The 3 tools provided below are not chained. For each feature, load a "
         "separate data cube (NetCDF .nc or Zarr .zarr) with the loader below, then run "
-        "one of the 3 tools. Each tool keeps the loaded cube's format: zarr in -&gt; zarr out."
+        "one of the 3 tools. Each tool keeps the loaded cube's format: zarr in -&gt; zarr out , netcdf in -&gt; netcdf out ."
         "</div>"
     )
 
@@ -8198,7 +8210,7 @@ def ard_cube_tools():
     loading_box = widgets.VBox(
         [
             widgets.HTML("<b>Loading</b>"),
-            widgets.HTML("<div style='font-size:12px; color:#666;'>NetCDF only (COGs are not supported as input).</div>"),
+            widgets.HTML("<div style='font-size:12px; color:#666;'>NetCDF and Zarr only (Geotiffs are not supported as input).</div>"),
             _stacked_field(load_input_box, "Data cube path"),
             widgets.HBox([load_cube_btn], layout=widgets.Layout(gap="8px", flex_flow="row wrap")),
             layer_select_box,
@@ -8323,7 +8335,7 @@ def ard_cube_tools():
 
     def _ensure_cube_suffix(path_str: str) -> str:
         """Keep a .nc/.zarr extension as typed; anything else gets the loaded
-        cube's extension (format preserved: zarr in -> zarr out)."""
+        cube's extension (format preserved: zarr in -> zarr out, netcdf in -> netcdf out)."""
         p = Path(path_str)
         if p.suffix.lower() not in (".nc", ".zarr"):
             p = p.with_suffix(_ext_from_loaded())
@@ -9719,12 +9731,44 @@ def ard_cube_tools():
     )
     sr_compress_warn_html.layout.display = "none"
 
+    # Shown INSTEAD of the checkbox+warning when the loaded cube is Zarr: zlib
+    # is a NetCDF-only knob, and a Zarr store is always written with Zarr's own
+    # default codec, so the flag would be a silent no-op (verified: compress
+    # True vs False yields a bit-identical Zarr store). Greying the checkbox out
+    # keeps it from implying an effect it does not have.
+    sr_zarr_note_html = widgets.HTML(
+        "<div style='font-size:12px; color:#666;'>"
+        "ℹ️ Zarr stores are always compressed with Zarr's default codec, so the "
+        "zlib option does not apply to a Zarr output (it is a NetCDF-only "
+        "setting).</div>"
+    )
+    sr_zarr_note_html.layout.display = "none"
+
     def _on_sr_compress_change(change):
         if change.get("name") != "value":
             return
-        sr_compress_warn_html.layout.display = "" if sr_compress_w.value else "none"
+        # Never show the warning while the checkbox is disabled (Zarr case).
+        show = bool(sr_compress_w.value) and not sr_compress_w.disabled
+        sr_compress_warn_html.layout.display = "" if show else "none"
 
     sr_compress_w.observe(_on_sr_compress_change, names="value")
+
+    def _sync_sr_compress_for_format():
+        """zlib is NetCDF-only. When a Zarr cube is loaded, force the checkbox
+        off, disable it, hide its warning and show the Zarr note instead. For a
+        NetCDF cube (or none loaded) restore the normal checkbox behavior."""
+        lp = state.get("loaded_path")
+        if lp and is_zarr_path(lp):
+            sr_compress_w.value = False
+            sr_compress_w.disabled = True
+            sr_compress_warn_html.layout.display = "none"
+            sr_zarr_note_html.layout.display = ""
+        else:
+            sr_compress_w.disabled = lp is None
+            sr_zarr_note_html.layout.display = "none"
+            sr_compress_warn_html.layout.display = (
+                "" if (lp is not None and sr_compress_w.value) else "none"
+            )
 
     sr_run_btn = widgets.Button(
         description="Super-resolve and Export",
@@ -9843,6 +9887,7 @@ def ard_cube_tools():
             _stacked_field(sr_out_box, "Output cube (NetCDF/Zarr)"),
             sr_compress_w,
             sr_compress_warn_html,
+            sr_zarr_note_html,
             sr_run_btn,
         ],
         layout=widgets.Layout(width="100%", gap="8px"),
@@ -9868,7 +9913,7 @@ def ard_cube_tools():
     tools_box = widgets.VBox(
         [
             widgets.HTML("<b>Tools</b>"),
-            widgets.HTML("<div style='font-size:12px; color:#666;'>Each tool exports its result in the loaded cube's format - NetCDF or Zarr (no COG export here).</div>"),
+            widgets.HTML("<div style='font-size:12px; color:#666;'>Each tool exports its result in the loaded cube's format - NetCDF or Zarr (no Geotiff export here).</div>"),
             mask_tool_acc,
             cr_tool_acc,
             sr_tool_acc,
@@ -9975,6 +10020,10 @@ def ard_cube_tools():
         sr_mode_w.disabled = not enabled
         sr_out_w.disabled = not enabled
         browse_sr_out_btn.disabled = not enabled
+
+        # zlib checkbox: NetCDF-only, greyed out for a loaded Zarr cube (reads
+        # state['loaded_path'], which _finalize_load sets before calling this).
+        _sync_sr_compress_for_format()
 
         # run enabled only if loaded AND mode not under development
         if not enabled:
