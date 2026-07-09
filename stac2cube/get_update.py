@@ -69,6 +69,7 @@ def get_stac_parameters(stac_existing):
         "indices": indices,
         "daterange": daterange,
         "stac_api": stac_existing.attrs.get("stac_api", "element84"),
+        "resampling": stac_existing.attrs.get("resampling", "bilinear"),
     }
 
     return stac_parameters

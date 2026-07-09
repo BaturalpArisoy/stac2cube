@@ -1232,6 +1232,28 @@ def interactive_cloud_overlay_view(
         style={"description_width": "initial"},
         layout=widgets.Layout(width="360px"),
     )
+    # One percentile stretch shared by BOTH panels (same control as the other
+    # viewers): on cloudy scenes the bright clouds own the top percentiles and
+    # push the land into the dark bottom of the range. Lowering the high
+    # percentile saturates the clouds and gives the range back to the ground.
+    stretch_w = widgets.FloatRangeSlider(
+        value=(2.0, 98.0),
+        min=0.0,
+        max=100.0,
+        step=0.5,
+        description="Stretch (%):",
+        continuous_update=False,
+        readout_format=".1f",
+        style={"description_width": "initial"},
+        layout=widgets.Layout(width="380px"),
+    )
+    stretch_hint = widgets.HTML(
+        "<div style='font-size:11px; color:#6b7280; margin-left:4px;'>"
+        "Per-scene percentile clip applied to both panels. On cloudy scenes, "
+        "lower the high percentile so the bright clouds saturate and the "
+        "ground keeps the brightness range (default 2-98)."
+        "</div>"
+    )
     # Map layout control. "Vertical" stacks the two panels so each map spans the
     # whole output cell (biggest option on a laptop screen); "Horizontal" keeps
     # them side-by-side.
@@ -1243,6 +1265,25 @@ def interactive_cloud_overlay_view(
     )
 
     out = widgets.Output()
+
+    # Raw-frame cache: restyling interactions (stretch / opacity / layout) must
+    # not re-read the cube. The spectral cube may be lazy (dask-backed), so
+    # without this every slider move would re-read three bands from disk.
+    # Small FIFO bound keeps memory flat on long time series.
+    _raw_cache = {}
+    _RAW_CACHE_MAX = 8
+
+    def _get_rgb_raw(idx):
+        raw = _raw_cache.get(idx)
+        if raw is None:
+            raw = np.asarray(
+                rgb_mode.isel(time=idx).transpose("y", "x", "band").values,
+                dtype="float32",
+            )
+            while len(_raw_cache) >= _RAW_CACHE_MAX:
+                _raw_cache.pop(next(iter(_raw_cache)))
+            _raw_cache[idx] = raw
+        return raw
 
     def _fmt_axis(ax):
         ax.set_xlabel("Easting (10³ m)")
@@ -1259,6 +1300,9 @@ def interactive_cloud_overlay_view(
         idx = int(date_w.value)
         sel = band_w.value
         alpha = float(opacity_w.value)
+        p_lo, p_hi = (float(v) for v in stretch_w.value)
+        if p_hi <= p_lo:
+            p_lo, p_hi = 2.0, 98.0
         view = view_w.value
         t = rgb_mode.time.values[idx]
         date_str = time_values[idx].strftime("%d-%m-%Y")
@@ -1266,7 +1310,13 @@ def interactive_cloud_overlay_view(
         with out:
             clear_output(wait=True)
 
-            rgb_img = _render_frame_as_uint8(rgb_mode, "rgb", idx, scaling)
+            rgb_img = _render_frame_as_uint8(
+                rgb_mode,
+                "rgb",
+                idx,
+                dict(scaling, rgb_p_low=p_lo, rgb_p_high=p_hi),
+                raw=_get_rgb_raw(idx),
+            )
 
             # "full" stacks the panels vertically so each map fills the output
             # width; "normal" keeps them side-by-side at the base size.
@@ -1342,6 +1392,7 @@ def interactive_cloud_overlay_view(
     date_w.observe(_on_change, names="value")
     band_w.observe(_on_change, names="value")
     opacity_w.observe(_on_change, names="value")
+    stretch_w.observe(_on_change, names="value")
     view_w.observe(_on_change, names="value")
 
     controls = widgets.HBox(
@@ -1349,8 +1400,15 @@ def interactive_cloud_overlay_view(
         layout=widgets.Layout(gap="32px"),
     )
     controls2 = widgets.HBox(
-        [opacity_w, view_w],
-        layout=widgets.Layout(gap="32px", align_items="center"),
+        [
+            opacity_w,
+            widgets.VBox([stretch_w, stretch_hint], layout=widgets.Layout(gap="0px")),
+        ],
+        layout=widgets.Layout(gap="32px", align_items="flex-start"),
     )
-    display(widgets.VBox([controls, controls2, out]))
+    controls3 = widgets.HBox(
+        [view_w],
+        layout=widgets.Layout(align_items="center"),
+    )
+    display(widgets.VBox([controls, controls2, controls3, out]))
     plot_current()

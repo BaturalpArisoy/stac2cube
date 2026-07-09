@@ -2,7 +2,7 @@ import numpy as np
 import xarray as xr
 
 
-def cloud_mask(stac, mission, keep_clouds=False):
+def cloud_mask(stac, mission, keep_clouds=False, keep_layer=False):
     """Build the per-pixel cloud boolean from the scene-classification / QA layer
     and either remove the cloudy pixels (default) or leave the imagery untouched.
 
@@ -19,6 +19,10 @@ def cloud_mask(stac, mission, keep_clouds=False):
     but still want a per-scene cloud percentage to filter the fully-clouded
     scenes out. The percentage uses the SAME cloud classes as the masking, so the
     number means the same thing whether the clouds were removed or kept.
+
+    ``keep_layer`` keeps the classification layer (scl / qa_pixel) in the cube
+    instead of dropping it after use - set when the user explicitly requested
+    it as a band (e.g. to let shadow masking reuse it without re-downloading).
     """
     cfg = _mission_cfg(mission)
     layer_name = cfg[0]
@@ -49,8 +53,9 @@ def cloud_mask(stac, mission, keep_clouds=False):
     else:
         out = stac.where(~cloud_bool)
 
-    # Drop the cloud/classification band if it exists (it is not spectral data).
-    if layer_name is not None and layer_name in out:
+    # Drop the cloud/classification band if it exists (it is not spectral
+    # data) - unless the user explicitly asked to keep it in the cube.
+    if not keep_layer and layer_name is not None and layer_name in out:
         out = out.drop_vars(layer_name)
 
     return out, cloud_bool
@@ -85,6 +90,26 @@ def build_scl_mask_cube(stac, cloud_bool):
 
 
 def scale_factor(stac, mission, baselines, source=None):
+    # Categorical layers (SCL class codes, bit-packed QA words) must keep
+    # their raw values: reflectance gain/offset would destroy them (e.g. the
+    # PC L2A offset would turn SCL class 4 into (4-1000)*1e-4 = -0.0996).
+    # Pop them out, scale the spectral variables, then re-attach as float32
+    # (the later band-concat needs one uniform dtype).
+    categorical = {}
+    if isinstance(stac, xr.Dataset):
+        for name in ("scl", "qa_pixel", "qa_radsat", "qa_aerosol", "qa_temp"):
+            if name in stac.data_vars:
+                categorical[name] = stac[name].astype("float32")
+                stac = stac.drop_vars(name)
+
+    stac = _scale_values(stac, mission, baselines, source)
+
+    for name, da in categorical.items():
+        stac[name] = da
+    return stac
+
+
+def _scale_values(stac, mission, baselines, source=None):
     # Normalize short source aliases (mirror get_data) so the per-provider
     # Sentinel-2 L2A offset logic below triggers regardless of how it was called.
     _source_aliases = {"e84": "element84", "tb": "terrabyte", "pc": "planetary_computer"}

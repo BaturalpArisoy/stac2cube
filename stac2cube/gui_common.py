@@ -364,9 +364,12 @@ GUI_CSS = """
 .stac2cube-subpanel-green { border-left-color: #16a34a; }
 .stac2cube-subpanel-amber { border-left-color: #d97706; }
 
-/* Keep accordion panels and nested widget boxes from overflowing the card */
+/* Keep accordion panels and nested widget boxes from overflowing the card
+   (.p-* names are ipywidgets 7, .jupyter-widget-Collapse* are ipywidgets 8). */
 .stac2cube-card .p-Accordion-child,
 .stac2cube-card .p-Accordion-child > .p-Widget,
+.stac2cube-card .jupyter-widget-Collapse,
+.stac2cube-card .jupyter-widget-Collapse-contents,
 .stac2cube-card .widget-vbox,
 .stac2cube-card .widget-hbox {
     min-width: 0 !important;
@@ -455,14 +458,18 @@ button.stac2cube-help-btn:focus {
     font-size: 12px !important;
 }
 
-/* ipywidgets 8 (Lumino) Accordion headers. The default renderer paints these
-   header bars (Basic Parameters / Advanced / Result / Visualization ...) a cool
-   flat gray that clashes with the earthy/sage palette. We retint them to a sage
-   header so the native widgets match the themed cards. The clickable header
-   element is '.lm-AccordionPanel-title' (titleClassName in the bundle); the
-   container is '.jupyter-widget-Accordion'. Lumino adds '.lm-mod-expanded' to
-   the title when its panel is open. If a future ipywidgets/renderer renames
-   these classes, the rules simply no-op (no harm). */
+/* ipywidgets Accordion headers. The default renderer paints these header bars
+   (Basic Parameters / Advanced / Result / Visualization ...) a cool flat gray
+   that clashes with the earthy/sage palette. We retint them to a sage header
+   so the native widgets match the themed cards.
+   ipywidgets 8 renders an Accordion as '.jupyter-widget-Accordion' holding one
+   '.jupyter-widget-Collapse' per section: the clickable bar is
+   '.jupyter-widget-Collapse-header' and the open section's Collapse carries
+   '.jupyter-widget-Collapse-open' (class names read from the installed
+   @jupyter-widgets/jupyterlab-manager bundle). The '.lm-AccordionPanel-title'
+   selectors cover a possible future Lumino-based accordion renderer; unknown
+   class names simply no-op (no harm). */
+.stac2cube-root .jupyter-widget-Collapse-header,
 .stac2cube-root .lm-AccordionPanel-title {
     background: #e4e8d6 !important;
     color: #3f4a36 !important;
@@ -470,13 +477,36 @@ button.stac2cube-help-btn:focus {
     border-radius: 8px !important;
     font-weight: 600 !important;
 }
+.stac2cube-root .jupyter-widget-Collapse-header:hover,
 .stac2cube-root .lm-AccordionPanel-title:hover {
     background: #dde2cd !important;
+    color: #3f4a36 !important;
 }
+.stac2cube-root .jupyter-widget-Collapse-open > .jupyter-widget-Collapse-header,
 .stac2cube-root .lm-AccordionPanel-title.lm-mod-expanded {
     background: #d9dfc6 !important;
     border-bottom-left-radius: 0 !important;
     border-bottom-right-radius: 0 !important;
+}
+
+/* Vivid accordion variant: a fresh, welcoming green used for sections the
+   user should notice (e.g. the ARD "Visualization" section). Applied by
+   adding the 'stac2cube-acc-vivid' class to an Accordion; same graceful
+   no-op if a future renderer renames the classes. */
+.stac2cube-root .stac2cube-acc-vivid .jupyter-widget-Collapse-header,
+.stac2cube-root .stac2cube-acc-vivid .lm-AccordionPanel-title {
+    background: #86efac !important;
+    color: #14532d !important;
+    border: 1px solid #4ade80 !important;
+}
+.stac2cube-root .stac2cube-acc-vivid .jupyter-widget-Collapse-header:hover,
+.stac2cube-root .stac2cube-acc-vivid .lm-AccordionPanel-title:hover {
+    background: #6ee7a0 !important;
+    color: #14532d !important;
+}
+.stac2cube-root .stac2cube-acc-vivid .jupyter-widget-Collapse-open > .jupyter-widget-Collapse-header,
+.stac2cube-root .stac2cube-acc-vivid .lm-AccordionPanel-title.lm-mod-expanded {
+    background: #6ee7a0 !important;
 }
 </style>
 """

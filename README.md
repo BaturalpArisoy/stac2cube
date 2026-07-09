@@ -29,6 +29,8 @@ For Sentinel-2, the ARD cubes are built with three main components:
 
 -   **Cloud masking** based on user-defined thresholds. This lets users control how strict cloud detection should be and export multiple cloud-masked cubes. Traditional options like filtering by max_cc (STAC metadata) and masking with the Scene Classification Layer (SCL) are also supported for faster processing.
 
+    -   **Cloud shadow masking**  following the [Google Earth Engine s2cloudless tutorial](https://developers.google.com/earth-engine/tutorials/community/sentinel-2-s2cloudless): clouds are projected along the anti-solar direction using the per-scene mean solar azimuth from the STAC metadata, and dark non-water NIR pixels inside that projection are flagged as shadow. Returns cloud, shadow and combined masks on the exact cube grid, with optional masking of the cube.
+
 -   **Co-registration** to reduce scene-to-scene X/Y misalignment (often around 1-2 pixels). Small sub-pixel shifts (below 10 m) can still remain.
 
 -   **Super-resolution** of both 10-meters and 20-meters bands to 2.5 m.

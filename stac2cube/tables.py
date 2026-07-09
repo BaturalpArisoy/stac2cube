@@ -40,6 +40,11 @@ def missions():
             "nir09",
             "swir16",
             "swir22",
+            # Scene Classification Layer as an optional data band. Always
+            # loaded with nearest resampling and exempt from reflectance
+            # scaling; keeping it lets shadow/cloud tools reuse it later
+            # without re-downloading.
+            "scl",
         ],
         "indices": [
             "ndvi",

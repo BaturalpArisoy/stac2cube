@@ -43,6 +43,9 @@ def get_stac_layers(
     clip_raster=None,
     cloud_masking=None,
     keep_clouds=None,
+    shadow_masking=None,
+    nir_dark_threshold=0.18,
+    shadow_proj_distance=1.0,
     cloud_mask_output=None,
     return_cloud_mask=False,
     indices=None,
@@ -53,6 +56,7 @@ def get_stac_layers(
     animation=None,
     update=None,
     source=None,
+    resampling_method=None,
     q=None,
     compress=False,
 ):
@@ -68,6 +72,36 @@ def get_stac_layers(
         mission = "landsat_c2_l2"
     if mission == "cop_dem":
         mission = "cop_dem_glo_30"
+
+    # --- Cloud shadow masking preconditions -----------------------------------
+    # Shadows are projected FROM the detected clouds along the anti-solar
+    # direction, so shadow masking is meaningless without cloud detection and
+    # needs the nir band for the dark-pixel test (GEE s2cloudless approach).
+    if shadow_masking:
+        if update:
+            raise ValueError(
+                "shadow_masking is not supported in update mode. Update the cube "
+                "first, then apply get_shadow_layers to it."
+            )
+        if mission != "sentinel_2_l2a":
+            raise ValueError(
+                "shadow_masking is available for Sentinel-2 L2A cubes only."
+            )
+        if cloud_masking is not True:
+            raise ValueError(
+                "shadow_masking requires cloud_masking=True (shadows are "
+                "projected from the detected clouds)."
+            )
+        if aggregator:
+            raise ValueError(
+                "shadow_masking cannot be combined with an aggregator (it needs "
+                "the time dimension and per-scene solar geometry)."
+            )
+        if not bands or "nir" not in [str(b).lower() for b in bands]:
+            raise ValueError(
+                "shadow_masking needs the 'nir' band among the requested bands "
+                "(dark-pixel test of the GEE method)."
+            )
 
     # --- Native multi-feature batching ---------------------------------------
     # When a polygon FILE containing more than one feature is supplied (i.e. not
@@ -106,6 +140,9 @@ def get_stac_layers(
                     clip_raster=clip_raster,
                     cloud_masking=cloud_masking,
                     keep_clouds=keep_clouds,
+                    shadow_masking=shadow_masking,
+                    nir_dark_threshold=nir_dark_threshold,
+                    shadow_proj_distance=shadow_proj_distance,
                     cloud_mask_output=cmo_i,
                     return_cloud_mask=return_cloud_mask,
                     indices=list(indices) if indices else indices,
@@ -116,6 +153,7 @@ def get_stac_layers(
                     animation=animation,
                     update=update,
                     source=source,
+                    resampling_method=resampling_method,
                     q=q,
                     compress=compress,
                 )
@@ -164,6 +202,8 @@ def get_stac_layers(
             indices = indices.tolist()
         if source is None:
             source = stac_parameters.get("stac_api", "element84")
+        if resampling_method is None:
+            resampling_method = stac_parameters.get("resampling", "bilinear")
         # NOTE: do NOT force output=update here anymore.
         # This allows update mode to return an in-memory updated cube when output=None.
     else:
@@ -181,9 +221,27 @@ def get_stac_layers(
     # if not isinstance(polygon, list):
     #    polygon = proj_check(polygon)
 
+    if resampling_method is None:
+        resampling_method = "bilinear"
+
+    # Did the user explicitly request the classification layer as a band?
+    # cloud_masking auto-appends it for internal use and normally drops it
+    # after masking; an explicit request means "keep it in the cube" (e.g. so
+    # shadow masking can reuse it without re-downloading). It is loaded with
+    # "nearest" resampling regardless of resampling_method (see get_stac).
+    _class_layer = {"sentinel_2_l2a": "scl", "landsat_c2_l2": "qa_pixel"}.get(mission)
+    user_requested_scl = bool(bands) and _class_layer is not None and any(
+        str(b).lower() == _class_layer for b in bands
+    )
+    # Shadow masking needs the SCL classes on the final (clipped) grid, so the
+    # layer rides along through the pipeline and - unless the user explicitly
+    # asked for it as a band - is dropped again right after the shadow step.
+    keep_class_layer = user_requested_scl or bool(shadow_masking)
+
     stac, baselines, tiles = get_stac(
         mission, polygon, resolution, daterange, bands, max_cc, cloud_masking,
         source=source or "element84",
+        resampling=resampling_method,
     )
     crs = stac.spatial_ref.projected_crs_name
     transform = stac.rio.transform()
@@ -194,7 +252,18 @@ def get_stac_layers(
     if cloud_masking is True:
         # keep_clouds=True -> pixels stay intact, only the cloud % is derived from
         # the returned per-pixel cloud boolean (cloud_bool). Default removes them.
-        stac, cloud_bool = cloud_mask(stac, mission, keep_clouds=bool(keep_clouds))
+        #
+        # With shadow masking on, cloud removal is DEFERRED: GEE computes the
+        # dark-pixel test on the full (unmasked) image, and dark pixels under
+        # thin clouds legitimately support the shadow smoothing. Pixels stay
+        # intact here and cloud AND shadow are masked together right after the
+        # shadow step (verified bit-identical to get_shadow_layers).
+        _defer_cloud_removal = bool(shadow_masking) and not bool(keep_clouds)
+        stac, cloud_bool = cloud_mask(
+            stac, mission,
+            keep_clouds=bool(keep_clouds) or _defer_cloud_removal,
+            keep_layer=keep_class_layer,
+        )
 
     # Scale factor
     stac = scale_factor(stac, mission, baselines, source=source or "element84")
@@ -239,6 +308,7 @@ def get_stac_layers(
     if not update:
         stac.attrs["spectral_bands"] = bands
         stac.attrs["mission"] = mission
+        stac.attrs["resampling"] = resampling_method
         _source_aliases = {"e84": "element84", "tb": "terrabyte", "pc": "planetary_computer"}
         stac.attrs["stac_api"] = _source_aliases.get(source or "element84", source or "element84")
         if mission in ("sentinel_2_l2a", "sentinel_2_l1c"):
@@ -278,14 +348,73 @@ def get_stac_layers(
         stac["time"] = stac["time"].dt.floor("D")
 
         if cloud_masking is True:
+            # ---- Cloud shadow detection (GEE s2cloudless approach) ----------
+            # Runs on the final (clipped, day-floored) grid: clouds are the SCL
+            # cloud boolean, shadows are dark non-water pixels inside each
+            # cloud's anti-solar projection (per-scene mean solar azimuth from
+            # the STAC metadata). Reads the nir + scl pixels eagerly - the one
+            # part of a lazy build that must compute now.
+            shadow_bool = None
+            cb_aligned = None
+            if shadow_masking and cloud_bool is not None:
+                # Imported at call time: shadow_masking imports cloud_masking,
+                # which imports this module - a top-level import would be
+                # circular at package load.
+                from .shadow_masking import detect_shadow_stack, solar_azimuths_for_days
+
+                if not q:
+                    print("Detecting cloud shadows (reading nir + scl)...", flush=True)
+
+                cb_aligned = cloud_bool.sel(y=stac["y"], x=stac["x"]).assign_coords(
+                    time=stac["time"]
+                )
+                nir_np = np.asarray(
+                    stac.sel(band="nir").transpose("time", "y", "x").values,
+                    dtype="float32",
+                )
+                scl_np = np.nan_to_num(
+                    stac.sel(band="scl").transpose("time", "y", "x").values, nan=0
+                ).astype(np.int16)
+                azimuths = solar_azimuths_for_days(
+                    polygon, stac["time"].values, source or "element84"
+                )
+                res_m = float(abs(stac.y.values[1] - stac.y.values[0]))
+                shadow_np = detect_shadow_stack(
+                    cb_aligned.transpose("time", "y", "x").values,
+                    nir_np,
+                    scl_np,
+                    azimuths,
+                    res_m,
+                    nir_dark_threshold=nir_dark_threshold,
+                    proj_distance=shadow_proj_distance,
+                )
+                shadow_bool = xr.DataArray(
+                    shadow_np.astype(bool),
+                    dims=("time", "y", "x"),
+                    coords={"time": stac["time"], "y": stac["y"], "x": stac["x"]},
+                )
+                if not keep_clouds:
+                    # Deferred cloud removal (see cloud_mask call above): cloud
+                    # and shadow pixels are masked out together, GEE-style.
+                    stac = stac.where(~(cb_aligned | shadow_bool))
+                stac.attrs["shadow_params"] = (
+                    f"cloud_source=scl, nir_dark_threshold={nir_dark_threshold}, "
+                    f"proj_distance_km={shadow_proj_distance}"
+                )
+
             # Cloud % is measured against the observable AOI footprint: pixels
             # missing in every scene (incl. anything outside a non-rectangular
             # clip) are excluded from both numerator and denominator, so only
             # real clouds count. The count always comes from the SCL/QA cloud
             # boolean (not from NaN holes) so that per-date swath/tile gaps -
             # genuine NO_DATA, not cloud - are never miscounted as cloud. This
-            # holds in both remove-clouds and keep-clouds mode.
-            pct = compute_cloud_percentage(stac, cloud_mask=cloud_bool)
+            # holds in both remove-clouds and keep-clouds mode. With shadow
+            # masking on, the percentage counts cloud OR shadow (the flagged,
+            # unusable fraction).
+            _pct_mask = cloud_bool
+            if shadow_bool is not None:
+                _pct_mask = cb_aligned | shadow_bool
+            pct = compute_cloud_percentage(stac, cloud_mask=_pct_mask)
             if pct is not None:
                 stac = stac.assign_coords(
                     cloud_percentage=("time", np.asarray(pct.data))
@@ -295,9 +424,30 @@ def get_stac_layers(
             # either a path is given (write it now - SLURM / NetCDF-during-build)
             # or the caller wants it in memory (return_cloud_mask - the GUI holds
             # it and writes it on export). This is what lets a kept-clouds cube be
-            # masked / filtered / co-registered later.
+            # masked / filtered / co-registered later. With shadow masking on,
+            # shadow_mask and cloudshadow_mask bands are appended so the file
+            # follows the Cloud_Stack convention of get_shadow_layers.
             if cloud_bool is not None and (cloud_mask_output or return_cloud_mask):
                 mask_cube = build_scl_mask_cube(stac, cloud_bool)
+                if shadow_bool is not None:
+                    _sh = (
+                        shadow_bool.astype("uint8")
+                        .expand_dims(band=["shadow_mask"])
+                        .transpose("time", "band", "y", "x")
+                    )
+                    _comb = (
+                        (cb_aligned | shadow_bool)
+                        .astype("uint8")
+                        .expand_dims(band=["cloudshadow_mask"])
+                        .transpose("time", "band", "y", "x")
+                    )
+                    # coords="minimal": non-band coords (spatial_ref,
+                    # cloud_percentage) exist only on the SCL band's cube and
+                    # are carried over instead of failing the concat.
+                    mask_cube = xr.concat(
+                        [mask_cube, _sh, _comb], dim="band", coords="minimal"
+                    )
+                    mask_cube.name = "Cloud_Stack"
                 # Self-contained georeferencing so it can be exported later.
                 mask_cube.attrs["crs"] = crs
                 mask_cube.attrs["transform"] = stac.rio.transform()
@@ -312,6 +462,22 @@ def get_stac_layers(
                     )
                     if not q:
                         print(f"Binary cloud mask exported: {cloud_mask_output}", flush=True)
+
+            # The scl band rode along only for the shadow step - drop it again
+            # unless the user explicitly requested it, and keep the band-list
+            # attr truthful either way.
+            if (
+                shadow_masking
+                and not user_requested_scl
+                and "band" in stac.dims
+                and "scl" in [str(b) for b in stac.band.values]
+            ):
+                stac = stac.sel(
+                    band=[b for b in stac.band.values if str(b) != "scl"]
+                )
+                stac.attrs["spectral_bands"] = [
+                    b for b in stac.attrs.get("spectral_bands", []) if b != "scl"
+                ]
 
     stac.attrs["crs"] = crs
     stac.attrs["transform"] = transform

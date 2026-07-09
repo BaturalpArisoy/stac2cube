@@ -33,6 +33,8 @@ from stac2cube import (
     cloud_filter,
     get_stac_layers,
     get_cloud_layers,
+    get_shadow_layers,
+    add_shadow_masks_to_cloud_stack,
     coregister_cube,
     get_stac_parameters,
     mask_from_probability,
@@ -186,6 +188,40 @@ PARAM_HELP_HTML = {
     scenes and can still filter out the fully-clouded dates by cloud %.<br><br>
     Currently SCL-only (Sentinel-2 L2A).
     """,
+    "nir_dark_threshold": """
+    <b>NIR Dark Threshold</b><br>
+    A cloud shadow candidate is a pixel darker than this value in the
+    near-infrared band (reflectance, 0-1). Water and no-data pixels are
+    excluded automatically.<br><br>
+    <b>Lower</b> (e.g. 0.15): stricter - only very dark shadows are masked,
+    fewer false positives.<br>
+    <b>Higher</b> (e.g. 0.25): catches lighter shadows, but dark surfaces
+    (asphalt, dense city, dark soil) start being masked too.<br><br>
+    Default: <code>0.18</code>.
+    """,
+    "shadow_proj_distance": """
+    <b>Projection Distance (km)</b><br>
+    How far each detected cloud is projected in the direction opposite the sun
+    to search for its shadow. The shadow distance depends on cloud height:
+    higher clouds cast shadows further away.<br><br>
+    <b>1 km</b> (default): good for low/mid clouds, fewest false
+    positives.<br>
+    <b>Larger</b> (2-3 km): catches shadows of high clouds, but flags more dark
+    surfaces along the way.<br><br>
+    Shadows whose parent cloud lies <b>outside the data cube</b> cannot be
+    projected at any distance.
+    """,
+    "resampling_method": """
+    <b>Resampling Method</b><br>
+    How pixels are interpolated when the source imagery is resampled onto your
+    cube grid (e.g. 20 m bands to a 10 m cube).<br><br>
+    <b>bilinear</b> (default): smooth, recommended for better visual quality.<br>
+    <b>nearest</b>: keeps original pixel values, blockier look, recommended for analysis.<br>
+    <b>bicubic</b>: smoothest visual, slightly slower.<br><br>
+    The Scene Classification Layer (<code>scl</code>) is <b>always</b> loaded
+    with nearest resampling regardless of this choice - interpolating between
+    class codes would produce meaningless values.
+    """,
     "stats": """
     <b>stats</b><br>
     Examples (for a date range of 2020-01-01 to 2021-12-31):
@@ -306,6 +342,7 @@ def datacube_builder(missions_func=missions):
                 "cirrus": "60m",
                 "swir16": "20m",
                 "swir22": "20m",
+                "scl": "20m",
             }
         elif mission_name == "sentinel_1_rtc":
             return {"vh": "10m", "vv": "10m"}
@@ -332,6 +369,10 @@ def datacube_builder(missions_func=missions):
 
         def _res_rank(item):
             idx, band = item
+            # scl is a classification layer, not a spectral band - keep it at
+            # the very end of the list regardless of its native resolution.
+            if str(band).lower() == "scl":
+                return (99999, idx)
             res = str(res_map.get(band, ""))
             m = re.match(r"^(\d+)m$", res)
             if m:
@@ -611,6 +652,87 @@ def datacube_builder(missions_func=missions):
     export_mask_w.observe(
         lambda c: (_sync_export_mask_visibility(), _sync_export_mask_path_enabled()),
         names="value",
+    )
+
+    # -------------------------------------------------------------------------
+    # Cloud Shadow Masking (GEE s2cloudless approach on the SCL cloud mask).
+    # Usable only when clouds are actually being MASKED (shadow is projected
+    # from the detected clouds - Rule 1) and the nir band is selected (the
+    # dark-pixel test needs it). Its two parameters stay greyed until shadow
+    # masking is switched on (Rule 2).
+    # -------------------------------------------------------------------------
+    shadow_masking_w = widgets.Checkbox(
+        value=False,
+        description="Mask cloud shadows",
+        indent=False,
+        disabled=True,
+    )
+    shadow_nir_dark_w = widgets.FloatText(
+        value=0.18,
+        step=0.01,
+        description="NIR dark threshold:",
+        layout=widgets.Layout(width="100%"),
+        style={"description_width": "160px"},
+        disabled=True,
+    )
+    shadow_proj_dist_w = widgets.FloatText(
+        value=1.0,
+        step=0.5,
+        description="Projection distance (km):",
+        layout=widgets.Layout(width="100%"),
+        style={"description_width": "160px"},
+        disabled=True,
+    )
+    # One-line reason why the checkbox is greyed, updated by the sync below.
+    shadow_gate_note = widgets.HTML("")
+
+    def _shadow_masking_allowed():
+        """Rule 1 + band requirement + mission capability, with the reason."""
+        if mission_dd.value != "sentinel_2_l2a":
+            return False, "Available for Sentinel-2 L2A only."
+        if not (cloud_masking_w.value is True and keep_clouds_w.value == "mask"):
+            return False, (
+                "Requires <b>Mask Clouds</b> (select the Mask Clouds preset, or "
+                "set Cloud Detection True + Mask or Keep = Mask clouds)."
+            )
+        if "nir" not in [str(b).lower() for b in bands_w.value]:
+            return False, "Requires the <b>nir</b> band to be selected above."
+        return True, ""
+
+    def _sync_shadow_masking_enabled(change=None):
+        allowed, reason = _shadow_masking_allowed()
+        if not allowed and shadow_masking_w.value:
+            shadow_masking_w.value = False
+        shadow_masking_w.disabled = not allowed
+        shadow_gate_note.value = (
+            ""
+            if allowed
+            else f"<div style='font-size:12px; color:#9a3412;'>{reason}</div>"
+        )
+        # Rule 2: the two parameters open up only while shadow masking is on.
+        params_on = allowed and (shadow_masking_w.value is True)
+        shadow_nir_dark_w.disabled = not params_on
+        shadow_proj_dist_w.disabled = not params_on
+
+    shadow_masking_w.observe(_sync_shadow_masking_enabled, names="value")
+    bands_w.observe(_sync_shadow_masking_enabled, names="value")
+    cloud_masking_w.observe(_sync_shadow_masking_enabled, names="value")
+    keep_clouds_w.observe(_sync_shadow_masking_enabled, names="value")
+    mission_dd.observe(_sync_shadow_masking_enabled, names="value")
+    _sync_shadow_masking_enabled()  # initial state (greyed with reason)
+
+    # -------------------------------------------------------------------------
+    # Resampling method (Advanced): spectral bands are resampled onto the cube
+    # grid with this method; categorical layers (scl) are pinned to nearest
+    # inside get_stac regardless of the choice.
+    # -------------------------------------------------------------------------
+    resampling_w = widgets.Dropdown(
+        options=[("bilinear (default)", "bilinear"), ("nearest", "nearest"),
+                 ("bicubic", "bicubic")],
+        value="bilinear",
+        description="Resampling:",
+        layout=widgets.Layout(width="100%"),
+        style={"description_width": "120px"},
     )
 
     # -------------------------------------------------------------------------
@@ -2298,6 +2420,14 @@ def datacube_builder(missions_func=missions):
         cloud_masking = cloud_masking_w.value
         # Keep clouds only applies when cloud masking is on (needs the SCL layer).
         keep_clouds = (cloud_masking is True) and (keep_clouds_w.value == "keep")
+        # Shadow masking: the widget can only be True when its gate allows it
+        # (Mask Clouds + nir band + S2 L2A), but re-assert the conditions here
+        # so a stale widget state can never produce an invalid call.
+        shadow_masking = (
+            (shadow_masking_w.value is True)
+            and (cloud_masking is True)
+            and not keep_clouds
+        )
         source = source_w.value  # None for non-S2 missions
 
         export_mode = export_mode_w.value
@@ -2325,6 +2455,9 @@ def datacube_builder(missions_func=missions):
             "clip_raster": clip_raster,
             "cloud_masking": cloud_masking,
             "keep_clouds": keep_clouds,
+            "shadow_masking": shadow_masking,
+            "nir_dark_threshold": float(shadow_nir_dark_w.value),
+            "shadow_proj_distance": float(shadow_proj_dist_w.value),
             "return_cloud_mask": return_cloud_mask,
             "indices": indices,
             "output": output_for_get_stac,
@@ -2337,6 +2470,7 @@ def datacube_builder(missions_func=missions):
             "aggregator": None,
             "stats": stats,
             "source": source,
+            "resampling_method": resampling_w.value,
             "q": True,  # hidden in UI, keep output cleaner while progress bars still show where applicable
         }
 
@@ -4085,6 +4219,20 @@ def datacube_builder(missions_func=missions):
     # sub-panel so they read as separate fields on the olive group background.
     cloud_masking_children = [
         _cm_about,
+        widgets.HTML(
+            "<div style='font-size:12px; color:#1e40af; line-height:1.5; "
+            "background:#eff6ff; border:1px solid #bfdbfe; border-radius:8px; "
+            "padding:8px 10px; margin:0 0 8px 0;'>"
+            "This method is super fast. However, the user cannot change the "
+            "strength of the cloud detection and it often results in false "
+            "positives. If this matters to you, skip this section and use "
+            "s2cloudless probabilistic cloud masking with multiple custom "
+            "thresholds in <b>3. Analysis Ready Data Cube Tools -&gt; Cloud "
+            "and Shadow Masking Data Cube</b>. Optional cloud shadow masking "
+            "is also provided there and you will find much better "
+            "visualization tools to compare your results."
+            "</div>"
+        ),
         # "Select one of the options" + the four presets, in one boxed sub-panel.
         _subpanel([_cloud_preset_box], accent="blue"),
         # Breathing room between the preset selector and the raw parameters.
@@ -4113,9 +4261,84 @@ def datacube_builder(missions_func=missions):
         open=False,
     )
 
+    # -------------------------------------------------------------------------
+    # Cloud Shadow Masking group: collapsed by default, directly under Cloud
+    # Detection & Masking. Plain-language intro (incl. the two honest
+    # limitations), the enable checkbox with its gate note, and the two
+    # parameters - each with a '?' help toggle - greyed until enabled.
+    # -------------------------------------------------------------------------
+    _shadow_about_html = widgets.HTML(
+        "<div style='font-size:12px; color:#1e40af; line-height:1.5; "
+        "background:#eff6ff; border:1px solid #bfdbfe; border-radius:8px; "
+        "padding:8px 10px; margin:0 0 8px 0;'>"
+        "Cloud shadow detection quality heavily depends on the cloud "
+        "detection. For better shadow detection, use this tool with "
+        "s2cloudless cloud detection in <b>3. Analysis Ready Data Cube "
+        "Tools</b>! Also better visualization tools there :)"
+        "</div>"
+        "<div style='font-size:12px; color:#374151; line-height:1.5;'>"
+        "Cloud shadow detection is done using the detected clouds, a non-water "
+        "NIR darkness threshold and the Sun's direction of the scene. The "
+        "method is provided by Google.<br><br>"
+        "<b>Good to know:</b>"
+        "<ul style='margin:2px 0 2px 18px; padding:0;'>"
+        "<li>It works best on <b>large areas</b> (landscape scale). On very "
+        "small areas most shadows come from clouds outside your cube.</li>"
+        "<li>It <b>cannot</b> mask a shadow whose cloud is not present in the "
+        "scene - the projection needs the cloud itself.</li>"
+        "<li>Over dense cities, dark surfaces (asphalt, building shade) may be "
+        "masked as cloud shadow too.</li>"
+        "</ul>"
+        "</div>"
+    )
+    shadow_masking_group = _field_group(
+        "Cloud Shadow Masking",
+        [
+            _shadow_about_html,
+            _subpanel(
+                [shadow_masking_w, shadow_gate_note], accent="blue"
+            ),
+            widgets.HTML("<div style='height:8px;'></div>"),
+            _param_panel(
+                "NIR Dark Threshold",
+                _boxed(shadow_nir_dark_w),
+                help_html=PARAM_HELP_HTML.get("nir_dark_threshold", ""),
+            ),
+            _param_panel(
+                "Projection Distance",
+                _boxed(shadow_proj_dist_w),
+                help_html=PARAM_HELP_HTML.get("shadow_proj_distance", ""),
+            ),
+        ],
+        collapsible=True,
+        open=False,
+    )
+
+    resampling_group = _field_group(
+        "Resampling Method",
+        [
+            widgets.HTML(
+                "<div style='font-size:12px; color:#475569; margin:0 0 6px 0;'>"
+                "Affects both upsampling and downsampling - e.g. building a "
+                "20 m cube resamples the native 10 m bands with this method, "
+                "and a 10 m cube resamples the native 20 m bands with it."
+                "</div>"
+            ),
+            _param_panel(
+                "Spectral Band Resampling",
+                _boxed(resampling_w),
+                help_html=PARAM_HELP_HTML.get("resampling_method", ""),
+            ),
+        ],
+        collapsible=True,
+        open=False,
+    )
+
     advanced_box = widgets.VBox(
         [
             cloud_masking_group,
+            shadow_masking_group,
+            resampling_group,
             stats_box,
             _collapse_row(advanced_collapse_btn),
         ],
@@ -8298,6 +8521,29 @@ def ard_cube_tools():
         layout=widgets.Layout(width="170px"),
     )
 
+    # Optional cloud SHADOW masking for the automated workflow: shadows are
+    # projected from the s2cloudless mask at the same threshold, and the
+    # masked cube removes cloud AND shadow pixels. The two parameters stay
+    # greyed until shadow masking is switched on.
+    auto_shadow_w = widgets.Checkbox(
+        value=False,
+        description="Also mask cloud shadows",
+        indent=False,
+    )
+    auto_nir_dark_w = widgets.FloatText(
+        value=0.18, step=0.01, layout=widgets.Layout(width="200px"), disabled=True
+    )
+    auto_proj_dist_w = widgets.FloatText(
+        value=1.0, step=0.5, layout=widgets.Layout(width="200px"), disabled=True
+    )
+
+    def _sync_auto_shadow(change=None):
+        on = bool(auto_shadow_w.value)
+        auto_nir_dark_w.disabled = not on
+        auto_proj_dist_w.disabled = not on
+
+    auto_shadow_w.observe(_sync_auto_shadow, names="value")
+
     def _suggest_clouds_path():
         base = _stem_from_loaded()
         outdir = _dir_from_loaded()
@@ -8375,6 +8621,24 @@ def ard_cube_tools():
                 clouds_out_w.value = tmp
             out_clouds = _ensure_cube_suffix(tmp)
 
+        shadow_on = bool(auto_shadow_w.value)
+        if shadow_on:
+            # Shadow detection needs the nir band of the loaded cube.
+            _loaded_bands = []
+            try:
+                _loaded_bands = [
+                    str(b).lower() for b in state["loaded_obj"]["band"].values
+                ]
+            except Exception:
+                pass
+            if "nir" not in _loaded_bands:
+                _status(
+                    "❌ Cloud shadow masking needs the 'nir' band in the loaded "
+                    "cube (dark-pixel test). Rebuild the cube with nir, or "
+                    "untick 'Also mask cloud shadows'."
+                )
+                return
+
         p_masked = Path(out_masked)
         existed_before = p_masked.exists()
         old_mtime, old_size = _output_stat(p_masked) if existed_before else (None, None)
@@ -8383,20 +8647,76 @@ def ard_cube_tools():
             "Masking and exporting...",
             f"masking (input) = {state['loaded_path']}",
             f"threshold = {threshold}",
+            f"shadow masking = {shadow_on}",
             f"output_masked = {out_masked}",
             f"output_clouds = {out_clouds if out_clouds else 'None'}",
         )
+
+        # Release our persistent handle on the loaded cube: the tools below
+        # open the same file themselves, and two concurrent netCDF/HDF5
+        # handles to one file crash the kernel on Windows (same avoidance as
+        # the manual Mask-out step; the handle is reopened in finally).
+        _prev_loaded_ds = state.get("loaded_ds")
+        if _prev_loaded_ds is not None:
+            try:
+                _prev_loaded_ds.close()
+            except Exception:
+                pass
+            state["loaded_ds"] = None
 
         try:
             # Run your tool (exports inside)
             with status_out:
                 # keep the lines you've already printed, then run the tool so its prints show here
-                get_cloud_layers(
-                    masking=state["loaded_path"],
-                    output_clouds=out_clouds,
-                    output_masked=out_masked,
-                    threshold=threshold,
-                )
+                if not shadow_on:
+                    get_cloud_layers(
+                        masking=state["loaded_path"],
+                        output_clouds=out_clouds,
+                        output_masked=out_masked,
+                        threshold=threshold,
+                    )
+                else:
+                    # 1) probability + binary mask at the threshold (in memory)
+                    _cloud_stack = get_cloud_layers(
+                        input_cube=state["loaded_path"],
+                        threshold=threshold,
+                    )
+                    # 2) shadows from that exact mask band; mask cloud AND
+                    #    shadow out of the cube in one go.
+                    _shadow_stack, _ = get_shadow_layers(
+                        state["loaded_path"],
+                        cloud=_cloud_stack,
+                        threshold=threshold,
+                        nir_dark_threshold=float(auto_nir_dark_w.value),
+                        proj_distance=float(auto_proj_dist_w.value),
+                        masking=True,
+                        output_masked=out_masked,
+                    )
+                    # 3) optional cloud-layers export: probability + mask +
+                    #    the two shadow bands, matching the manual workflow's
+                    #    file layout (shadow_mask_<thr> / cloudshadow_mask_<thr>).
+                    if out_clouds:
+                        _new = _shadow_stack.sel(
+                            band=["shadow_mask", "cloudshadow_mask"]
+                        ).assign_coords(
+                            band=[
+                                f"shadow_mask_{threshold}",
+                                f"cloudshadow_mask_{threshold}",
+                            ]
+                        )
+                        _comb = xr.concat(
+                            [_cloud_stack, _new.sel(time=_cloud_stack.time)],
+                            dim="band",
+                            coords="minimal",
+                        ).transpose("time", "band", "y", "x")
+                        _comb.name = "Cloud_Stack"
+                        export_stac(
+                            _comb,
+                            out_clouds,
+                            _comb.attrs.get("crs"),
+                            _comb.attrs.get("transform"),
+                            var_name="Cloud_Stack",
+                        )
 
             # --- Verify export actually happened (prevents false ✅).
             # NOTE: on failure we print into status_out (append) instead of
@@ -8435,11 +8755,19 @@ def ard_cube_tools():
 
         except Exception as e:
             _status(f"❌ {type(e).__name__}: {e}")
+        finally:
+            # Restore the session handle (defined in the manual Mask-out
+            # section below; safe here because it only runs on click).
+            try:
+                _reopen_loaded_cube_handle()
+            except Exception:
+                pass
 
     mask_and_export_btn.on_click(_on_mask_and_export_clicked)
 
     # Sub-accordions inside Tool 1
-    # --- Pretty layout for Tool 1a ---
+    # --- Pretty layout for Tool 1a: three boxed sub-panels (cloud masking /
+    # optional shadow masking / exporting setup) instead of a flat list.
     threshold_row = widgets.HBox(
         [
             widgets.HTML("<div style='font-weight:500;'>Threshold (%):</div>"),
@@ -8448,9 +8776,6 @@ def ard_cube_tools():
         layout=widgets.Layout(width="100%", gap="8px", align_items="center"),
     )
 
-    exports_header = widgets.HTML("<div style='font-weight:700; margin-top:4px;'>Exporting Setup:</div>")
-
-    
     mask_a_box = widgets.VBox(
         [
             widgets.HTML(
@@ -8458,11 +8783,37 @@ def ard_cube_tools():
                 "Masks out the loaded data cube with a single known threshold value.<br> Optionally, exports time series of 'cloud probability + selected threshold binary maps', <br> Cloud probability time series can be used at in step (ii) of the manual workflow to experiment with different thresholds without re-computing probabilities."
                 "</div>"
             ),
-            threshold_row,
-            exports_header,
-            _stacked_field(masked_out_box, "Output masked cube (NetCDF/Zarr)"),
-            export_clouds_row,
-            _stacked_field(clouds_out_box, "Output cloud layers (NetCDF/Zarr)"),
+            _field_group("Cloud Masking", [threshold_row]),
+            _field_group(
+                "Cloud Shadow Masking (Optional)",
+                [
+                    auto_shadow_w,
+                    _field_with_help(
+                        auto_nir_dark_w,
+                        "NIR dark threshold",
+                        PARAM_HELP_HTML.get("nir_dark_threshold", ""),
+                    ),
+                    _field_with_help(
+                        auto_proj_dist_w,
+                        "Projection distance (km)",
+                        PARAM_HELP_HTML.get("shadow_proj_distance", ""),
+                    ),
+                ],
+                subtitle=(
+                    "Projects each detected cloud along the Sun's direction and "
+                    "masks the dark pixels it explains. Works best on large "
+                    "areas; shadows of clouds outside the scene cannot be "
+                    "detected."
+                ),
+            ),
+            _field_group(
+                "Exporting Setup",
+                [
+                    _stacked_field(masked_out_box, "Output masked cube (NetCDF/Zarr)"),
+                    export_clouds_row,
+                    _stacked_field(clouds_out_box, "Output cloud layers (NetCDF/Zarr)"),
+                ],
+            ),
             mask_and_export_btn,
         ],
         layout=widgets.Layout(width="100%", gap="10px"),
@@ -8531,8 +8882,9 @@ def ard_cube_tools():
             b1_cloud_out_w.value = out_cloud
         out_cloud = _ensure_cube_suffix(out_cloud)
         b2_prob_in_w.value = out_cloud
-        # Also pre-fill the visualization step so the user can compare masks
-        # against RGB straight after building the cloud cube.
+        # Also pre-fill the shadow step and the visualization step so the user
+        # can continue with the freshly built cloud cube without re-browsing.
+        s3_cloud_path_w.value = out_cloud
         viz_cloud_path_w.value = out_cloud
 
         raw_thr = (b1_thresholds_w.value or "").strip()
@@ -8808,6 +9160,246 @@ def ard_cube_tools():
     b2_acc = widgets.Accordion(children=[b2_box], selected_index=None)
     b2_acc.set_title(0, "ii) (Optional) Generate Masks from Probability Map")
     b2_acc.layout = widgets.Layout(width="99%")
+
+    # -----------------------------------------------------------------
+    # iii) (Optional) Build Cloud Shadow Mask
+    # Projects shadows from ONE selected binary cloud mask band (sun
+    # direction + dark-NIR test) and appends shadow_mask_<xx> and
+    # cloudshadow_mask_<xx> bands to the cloud cube, overwriting the file.
+    # Step (iv) can then mask with clouds only, shadows only, or both.
+    # -----------------------------------------------------------------
+    s3_cloud_path_w = widgets.Text(value="", layout=widgets.Layout(width="100%"))
+    browse_s3_cloud_btn = widgets.Button(icon="folder-open", description="", layout=widgets.Layout(width="36px"))
+    s3_cloud_fc_box = _attach_filechooser(
+        browse_s3_cloud_btn,
+        s3_cloud_path_w,
+        title="Select cloud cube (.nc or .zarr with Cloud_Stack)",
+        pattern=["*.nc", "*"],
+        select_dirs=False,
+    )
+    s3_cloud_row = widgets.HBox(
+        [browse_s3_cloud_btn, s3_cloud_path_w],
+        layout=widgets.Layout(width="100%", gap="6px", align_items="center"),
+    )
+    s3_cloud_box = widgets.VBox(
+        [s3_cloud_row, s3_cloud_fc_box], layout=widgets.Layout(width="100%", gap="4px")
+    )
+
+    s3_load_btn = widgets.Button(
+        description="Load cloud cube",
+        button_style="primary",
+        icon="upload",
+        layout=widgets.Layout(width="160px"),
+    )
+    s3_mask_band_w = widgets.Dropdown(
+        options=[], value=None, layout=widgets.Layout(width="60%"), disabled=True
+    )
+    s3_nir_dark_w = widgets.FloatText(
+        value=0.18, step=0.01, layout=widgets.Layout(width="200px")
+    )
+    s3_proj_dist_w = widgets.FloatText(
+        value=1.0, step=0.5, layout=widgets.Layout(width="200px")
+    )
+    s3_generate_btn = widgets.Button(
+        description="Generate and Overwrite",
+        button_style="success",
+        icon="play",
+        layout=widgets.Layout(width="210px"),
+    )
+
+    def _on_s3_load_cloud_clicked(_):
+        cloud_path = (s3_cloud_path_w.value or "").strip()
+        if not cloud_path:
+            _status("❌ Please select a cloud cube path (.nc or .zarr).")
+            return
+        cloud_path = resolve_cube_path(cloud_path)
+        s3_cloud_path_w.value = str(Path(cloud_path).as_posix())
+
+        p = Path(cloud_path)
+        if not p.exists():
+            _status(f"❌ File not found: {p.as_posix()}")
+            return
+
+        try:
+            _status("Loading cloud cube (for shadow projection)...", f"path = {p.as_posix()}")
+            with open_cube(p) as ds:
+                if "Cloud_Stack" not in ds.data_vars:
+                    raise ValueError("Cube does not contain 'Cloud_Stack'.")
+                cloud = ds["Cloud_Stack"]
+                if "band" not in cloud.dims:
+                    raise ValueError("Cloud_Stack has no 'band' dimension.")
+                bands = [str(b) for b in cloud["band"].values]
+
+            # Shadows are projected from a binary CLOUD mask band - the
+            # probability band and already-existing shadow bands are not
+            # valid projection sources.
+            cloud_bands = [
+                b for b in bands
+                if b != "cloud_prob"
+                and not b.startswith("shadow_mask")
+                and not b.startswith("cloudshadow_mask")
+            ]
+            if not cloud_bands:
+                raise ValueError(
+                    "No binary cloud mask bands found. Generate masks from the "
+                    "probability map in step (ii) first."
+                )
+
+            s3_mask_band_w.options = cloud_bands
+            s3_mask_band_w.value = cloud_bands[0]
+            s3_mask_band_w.disabled = False
+            _status("✅ Cloud cube loaded for shadow masking.", f"Cloud mask bands: {cloud_bands}")
+
+        except Exception as e:
+            _status(f"❌ {type(e).__name__}: {e}")
+
+    s3_load_btn.on_click(_on_s3_load_cloud_clicked)
+
+    def _on_s3_generate_clicked(_):
+        if state.get("loaded_path") is None:
+            _status("❌ Load the main data cube first (loader above).")
+            return
+        if state.get("loaded_var") != "Spectral_Temporal_Stack":
+            _status(
+                "❌ Shadow masking applies to the 'Spectral_Temporal_Stack' time series, "
+                f"but the loaded layer is '{state.get('loaded_var')}'.",
+                "Reload the cube and select the 'Spectral_Temporal_Stack' layer.",
+            )
+            return
+        if not s3_mask_band_w.value:
+            _status("❌ Load a cloud cube and select a cloud mask band first.")
+            return
+        _loaded_bands = []
+        try:
+            _loaded_bands = [str(b).lower() for b in state["loaded_obj"]["band"].values]
+        except Exception:
+            pass
+        if "nir" not in _loaded_bands:
+            _status(
+                "❌ Cloud shadow masking needs the 'nir' band in the loaded cube "
+                "(dark-pixel test)."
+            )
+            return
+
+        cloud_path = (s3_cloud_path_w.value or "").strip()
+        p = Path(resolve_cube_path(cloud_path))
+        if not p.exists():
+            _status(f"❌ File not found: {p.as_posix()}")
+            return
+
+        mask_band = str(s3_mask_band_w.value)
+        old_mtime, old_size = _output_stat(p)
+
+        _status(
+            "Building cloud shadow masks...",
+            f"data cube = {state['loaded_path']}",
+            f"cloud cube (overwrite) = {p.as_posix()}",
+            f"cloud mask band = {mask_band}",
+            f"nir_dark_threshold = {float(s3_nir_dark_w.value)}",
+            f"proj_distance = {float(s3_proj_dist_w.value)} km",
+        )
+
+        # Release the persistent handle on the loaded cube: the shadow tool
+        # opens the same file itself (two concurrent netCDF/HDF5 handles to
+        # one file crash the kernel on Windows). Reopened in finally.
+        _prev_loaded_ds = state.get("loaded_ds")
+        if _prev_loaded_ds is not None:
+            try:
+                _prev_loaded_ds.close()
+            except Exception:
+                pass
+            state["loaded_ds"] = None
+
+        try:
+            with status_out:
+                add_shadow_masks_to_cloud_stack(
+                    input_cube=state["loaded_path"],
+                    cloud=p.as_posix(),
+                    mask_band=mask_band,
+                    nir_dark_threshold=float(s3_nir_dark_w.value),
+                    proj_distance=float(s3_proj_dist_w.value),
+                )
+
+            # --- Verify the file was actually overwritten (prevents false ✅).
+            if not p.exists() or _output_stat(p) == (old_mtime, old_size):
+                with status_out:
+                    print("❌ Shadow mask generation failed: file was not overwritten.")
+                return
+            try:
+                with open_cube(p) as _:
+                    pass
+            except Exception as e:
+                with status_out:
+                    print(f"❌ Shadow mask generation failed: file is not readable ({type(e).__name__}: {e})")
+                return
+
+            # Refresh the Mask-out step's band list if it has this cloud cube
+            # loaded (the new shadow bands become selectable immediately).
+            try:
+                if state.get("cloud_path") and Path(state["cloud_path"]).resolve() == p.resolve():
+                    with open_cube(p) as ds:
+                        _bands_new = [str(b) for b in ds["Cloud_Stack"]["band"].values]
+                    _mask_bands = [b for b in _bands_new if b != "cloud_prob"]
+                    _cur = b3_mask_band_w.value
+                    b3_mask_band_w.options = _mask_bands
+                    b3_mask_band_w.value = _cur if _cur in _mask_bands else _mask_bands[0]
+                    state["cloud_mask_bands"] = _mask_bands
+            except Exception:
+                pass
+
+            # Pre-fill the visualization step for immediate comparison.
+            viz_cloud_path_w.value = p.as_posix()
+
+            _sfx = mask_band[len("cloud_mask_"):] if mask_band.startswith("cloud_mask_") else mask_band
+            state["current_result_path"] = p.as_posix()
+            _show_result_from_path(p.as_posix())
+            _status(
+                f"✅ Shadow masks generated and file overwritten: {p.as_posix()}",
+                f"New layers: shadow_mask_{_sfx}, cloudshadow_mask_{_sfx}",
+                "In step (iv) you can now mask with clouds only, shadows only, or both (cloudshadow).",
+            )
+
+        except Exception as e:
+            _status(f"❌ {type(e).__name__}: {e}")
+        finally:
+            try:
+                _reopen_loaded_cube_handle()
+            except Exception:
+                pass
+
+    s3_generate_btn.on_click(_on_s3_generate_clicked)
+
+    s3_box = widgets.VBox(
+        [
+            widgets.HTML(
+                "<div style='font-size:12px; color:#666;'>"
+                "Detects cloud shadows using a selected binary cloud mask band, the "
+                "Sun's direction of each scene and a dark-NIR test, then appends "
+                "<b>shadow_mask_xx</b> and <b>cloudshadow_mask_xx</b> layers "
+                "(xx = the mask's threshold).<br>"
+                "<b>Warning:</b> This overwrites the cloud data cube (keeps all "
+                "existing bands). In step (iv) you can then mask with clouds only, "
+                "shadows only, or both."
+                "</div>"
+            ),
+            _stacked_field(s3_cloud_box, "Cloud data cube (NetCDF/Zarr)"),
+            s3_load_btn,
+            _stacked_field(s3_mask_band_w, "Cloud mask band (shadows are projected from it)"),
+            _field_with_help(
+                s3_nir_dark_w, "NIR dark threshold",
+                PARAM_HELP_HTML.get("nir_dark_threshold", ""),
+            ),
+            _field_with_help(
+                s3_proj_dist_w, "Projection distance (km)",
+                PARAM_HELP_HTML.get("shadow_proj_distance", ""),
+            ),
+            s3_generate_btn,
+        ],
+        layout=widgets.Layout(width="100%", gap="8px"),
+    )
+    s3_acc = widgets.Accordion(children=[s3_box], selected_index=None)
+    s3_acc.set_title(0, "iii) (Optional) Build Cloud Shadow Mask")
+    s3_acc.layout = widgets.Layout(width="99%")
 
     
 
@@ -9095,7 +9687,9 @@ def ard_cube_tools():
             widgets.HTML(
                 "<div style='font-size:12px; color:#666;'>"
                 "Masks the <b>loaded data cube</b> using a selected binary mask band from a <b>Cloud_Stack</b> cube.<br>"
-                "Load a cloud cube, pick a mask band (not cloud_prob), then export a masked cube."
+                "Load a cloud cube, pick a mask band (not cloud_prob), then export a masked cube.<br>"
+                "With shadow layers from step (iii) you can mask <b>clouds only</b> (cloud_mask_xx), "
+                "<b>shadows only</b> (shadow_mask_xx) or <b>both</b> (cloudshadow_mask_xx)."
                 "</div>"
             ),
             _stacked_field(b3_cloud_box, "Cloud data cube (NetCDF/Zarr)"),
@@ -9108,7 +9702,7 @@ def ard_cube_tools():
     )
 
     b3_acc = widgets.Accordion(children=[b3_box], selected_index=None)
-    b3_acc.set_title(0, "iii) Mask out Data Cube (by single threshold value)")
+    b3_acc.set_title(0, "iv) Mask out Data Cube")
     b3_acc.layout = widgets.Layout(width="99%")
 
 
@@ -9243,8 +9837,11 @@ def ard_cube_tools():
         layout=widgets.Layout(width="100%", gap="8px"),
     )
     viz_acc = widgets.Accordion(children=[viz_box], selected_index=None)
-    viz_acc.set_title(0, "Compare Masks vs RGB (Visualization)")
+    viz_acc.set_title(0, "Visualization")
     viz_acc.layout = widgets.Layout(width="99%")
+    # Vivid green header (shared stylesheet) so the section that lets users
+    # SEE their masks stands out and welcomes them in.
+    viz_acc.add_class("stac2cube-acc-vivid")
 
 
 
@@ -9255,13 +9852,19 @@ def ard_cube_tools():
     # Tool 1b container
     mask_b_box = widgets.VBox(
         [
-            widgets.HTML("<div style='font-size:12px; color:#666;'>"
-                        "Manual workflow: build probability cube → (optional) generate binary masks → compare masks against RGB → apply one threshold to mask the cube."
-                        "</div>"),
+            widgets.HTML(
+                "<div style='font-size:12px; color:#1e40af; line-height:1.5; "
+                "background:#eff6ff; border:1px solid #bfdbfe; border-radius:8px; "
+                "padding:8px 10px; margin:0 0 4px 0;'>"
+                "Remember to use the <b>Visualization</b> section to compare "
+                "your cloud and shadow masks with the RGB image."
+                "</div>"
+            ),
             b1_acc,
             b2_acc,
-            viz_acc,
+            s3_acc,
             b3_acc,
+            viz_acc,
         ],
         layout=widgets.Layout(width="100%", gap="10px"),
     )
@@ -9281,7 +9884,7 @@ def ard_cube_tools():
         layout=widgets.Layout(width="100%", gap="8px"),
     )
     mask_tool_acc = widgets.Accordion(children=[mask_tool_box], selected_index=None)
-    mask_tool_acc.set_title(0, "1) Cloud Masking Data Cube")
+    mask_tool_acc.set_title(0, "1) Cloud and Shadow Masking Data Cube")
     mask_tool_acc.layout = widgets.Layout(width="99%")
 
     # --- Tool 2: Co-register Data Cube ---

@@ -75,6 +75,46 @@ _S2_CDSE_L2A = {
 }
 
 
+# Categorical layers (class codes / bit-packed QA). These must ALWAYS be
+# loaded with "nearest" resampling: interpolating between class codes
+# produces meaningless fractional classes (verified: bilinear SCL yields
+# values like 4.0625 at class boundaries), and interpolated bit-packed QA
+# words are garbage. Spectral bands keep the user-selected method.
+_CATEGORICAL_BANDS = {"scl", "qa_pixel", "qa_radsat", "qa_aerosol", "qa_temp"}
+
+# User-friendly aliases -> rasterio.enums.Resampling names.
+_RESAMPLING_ALIASES = {"bicubic": "cubic"}
+
+
+# STAC catalogue endpoints per mission (and, for Sentinel-2, per source).
+# Module-level so metadata-only helpers (e.g. get_solar_geometry) can reuse
+# the exact same endpoints as the pixel loader.
+_CATALOGUES = {
+    "sentinel_2_l2a": {
+        "element84": ("https://earth-search.aws.element84.com/v1/", "sentinel-2-l2a"),
+        "terrabyte": ("https://stac.terrabyte.lrz.de/public/api/", "sentinel-2-c1-l2a"),
+        "planetary_computer": ("https://planetarycomputer.microsoft.com/api/stac/v1", "sentinel-2-l2a"),
+        "cdse": ("https://stac.dataspace.copernicus.eu/v1", "sentinel-2-l2a"),
+    },
+    "sentinel_2_l1c": {
+        "element84": ("https://earth-search.aws.element84.com/v1/", "sentinel-2-l1c"),
+        "cdse": ("https://stac.dataspace.copernicus.eu/v1", "sentinel-2-l1c"),
+    },
+    "cop_dem_glo_30": (
+        "https://stac.terrabyte.lrz.de/public/api/",
+        "cop-dem-glo-30",
+    ),
+    "landsat_c2_l2": (
+        "https://planetarycomputer.microsoft.com/api/stac/v1",
+        "landsat-c2-l2",
+    ),
+    "sentinel_1_rtc": (
+        "https://planetarycomputer.microsoft.com/api/stac/v1",
+        "sentinel-1-rtc",
+    ),
+}
+
+
 def _s2_baseline(item):
     """Sentinel-2 processing baseline as a float.
 
@@ -99,34 +139,12 @@ def get_stac(
     max_cc: int,
     cloud_masking: bool,
     source: str = "element84",
+    resampling: str = "bilinear",
 ):
     _source_aliases = {"e84": "element84", "tb": "terrabyte", "pc": "planetary_computer"}
     source = _source_aliases.get(source, source)
 
-    catalogues = {
-        "sentinel_2_l2a": {
-            "element84": ("https://earth-search.aws.element84.com/v1/", "sentinel-2-l2a"),
-            "terrabyte": ("https://stac.terrabyte.lrz.de/public/api/", "sentinel-2-c1-l2a"),
-            "planetary_computer": ("https://planetarycomputer.microsoft.com/api/stac/v1", "sentinel-2-l2a"),
-            "cdse": ("https://stac.dataspace.copernicus.eu/v1", "sentinel-2-l2a"),
-        },
-        "sentinel_2_l1c": {
-            "element84": ("https://earth-search.aws.element84.com/v1/", "sentinel-2-l1c"),
-            "cdse": ("https://stac.dataspace.copernicus.eu/v1", "sentinel-2-l1c"),
-        },
-        "cop_dem_glo_30": (
-            "https://stac.terrabyte.lrz.de/public/api/",
-            "cop-dem-glo-30",
-        ),
-        "landsat_c2_l2": (
-            "https://planetarycomputer.microsoft.com/api/stac/v1",
-            "landsat-c2-l2",
-        ),
-        "sentinel_1_rtc": (
-            "https://planetarycomputer.microsoft.com/api/stac/v1",
-            "sentinel-1-rtc",
-        ),
-    }
+    catalogues = _CATALOGUES
 
     if resolution is not None:
         resolution = resolution
@@ -239,9 +257,27 @@ def get_stac(
         if mission == "landsat_c2_l2":
             bands.append("qa_pixel")
 
+    canonical_bands = list(bands) if bands else []
     band_map = _get_band_map(mission, source)
     if band_map is not None:
         bands = [band_map.get(band, band) for band in bands]
+
+    # --- resampling strategy ------------------------------------------------
+    # Normalize/validate the user's method, then build a per-band config:
+    # spectral bands use the requested method, categorical layers (SCL / QA)
+    # are pinned to "nearest" regardless of that choice.
+    resampling = _RESAMPLING_ALIASES.get(str(resampling).lower(), str(resampling).lower())
+    from rasterio.enums import Resampling as _Resampling
+
+    if resampling not in _Resampling.__members__:
+        raise ValueError(
+            f"Unknown resampling method '{resampling}'. Valid options: "
+            f"{sorted(_Resampling.__members__)} (alias: 'bicubic' -> 'cubic')."
+        )
+    resampling_cfg = {"*": resampling}
+    for canon, mapped in zip(canonical_bands, bands or []):
+        if str(canon).lower() in _CATEGORICAL_BANDS:
+            resampling_cfg[mapped] = "nearest"
 
     # Pre-filter duplicate items for sentinel_2_l1c based on processing baseline
     if mission == "sentinel_2_l1c":
@@ -264,7 +300,10 @@ def get_stac(
         bands=bands,
         crs=crs,
         resolution=resolution,
-        resampling="bilinear",
+        # Per-band dict: the user's method (default "bilinear") for spectral
+        # bands, "nearest" pinned for categorical layers - odc-stac resolves
+        # each band against this mapping with "*" as the fallback.
+        resampling=resampling_cfg,
         chunks={},
         groupby="solar_day",
         bbox=bbox,
@@ -523,6 +562,78 @@ def _catalogue_search(catalog, collection, bbox, daterange, query, mission,
         tiles = None
 
     return items, crs, stac_mission, tiles
+
+
+def get_solar_geometry(mission, polygon, daterange, source="element84", max_cc=None):
+    """Per-solar-day mean solar geometry from STAC item metadata (no pixels).
+
+    Queries the same catalogue endpoint as :func:`get_stac` and reads the mean
+    solar angles the providers store on every Sentinel-2 item:
+
+      * element84 / CDSE:        ``view:sun_azimuth`` / ``view:sun_elevation``
+      * planetary_computer / tb: ``s2:mean_solar_azimuth`` / ``s2:mean_solar_zenith``
+        (elevation derived as 90 - zenith)
+
+    Returns ``{"YYYY-MM-DD": {"sun_azimuth": float, "sun_elevation": float}}``.
+    When several items share a solar day (tile overlap) the angles are
+    averaged - they differ by well under a degree within one orbit.
+    Days where neither property exists are OMITTED (never guessed); the
+    caller must handle missing days explicitly.
+    """
+    _source_aliases = {"e84": "element84", "tb": "terrabyte", "pc": "planetary_computer"}
+    source = _source_aliases.get(source, source)
+
+    mission_cat = _CATALOGUES[mission]
+    if isinstance(mission_cat, dict):
+        if source not in mission_cat:
+            raise ValueError(
+                f"Unknown source '{source}' for {mission}. "
+                f"Valid options: {list(mission_cat.keys())}."
+            )
+        url, collection = mission_cat[source]
+    else:
+        url, collection = mission_cat
+
+    if isinstance(polygon, list):
+        bbox = polygon
+    else:
+        bbox = polygon_2_bbox(polygon)
+
+    # Item search only - no asset access, so no signing / S3 env needed.
+    catalog = pystacclient.open(url)
+    query = None
+    if max_cc is not None:
+        query = {"eo:cloud_cover": {"gte": 0, "lte": max_cc}}
+    results = catalog.search(
+        bbox=bbox, collections=[collection], datetime=daterange, query=query
+    )
+
+    per_day = {}
+    for item in results.item_collection():
+        p = item.properties
+        azimuth = p.get("view:sun_azimuth")
+        if azimuth is None:
+            azimuth = p.get("s2:mean_solar_azimuth")
+        elevation = p.get("view:sun_elevation")
+        if elevation is None:
+            zenith = p.get("s2:mean_solar_zenith")
+            if zenith is not None:
+                elevation = 90.0 - float(zenith)
+        if azimuth is None:
+            continue  # no angle metadata on this item - skip, never guess
+        day = p.get("datetime", "")[:10]
+        per_day.setdefault(day, []).append(
+            (float(azimuth), float(elevation) if elevation is not None else np.nan)
+        )
+
+    out = {}
+    for day, vals in per_day.items():
+        arr = np.asarray(vals, dtype=float)
+        out[day] = {
+            "sun_azimuth": float(np.mean(arr[:, 0])),
+            "sun_elevation": float(np.nanmean(arr[:, 1])) if not np.all(np.isnan(arr[:, 1])) else None,
+        }
+    return out
 
 
 def _get_band_map(mission: str, source: str = None):
