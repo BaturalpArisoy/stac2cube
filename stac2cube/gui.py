@@ -408,14 +408,72 @@ def datacube_builder(missions_func=missions):
         }
         return radar if mission_name == "sentinel_1_rtc" else common
 
-    def _index_options_with_fullname(mission_name: str, index_list):
-        name_map = _index_fullname_map(mission_name)
-        options = []
-        for idx in index_list:
-            full = name_map.get(idx)
-            label = f"{idx} ({full})" if full else str(idx)
-            options.append((label, idx))
-        return options
+    # Required bands per index, mirroring calculate_spectral_index() in
+    # get_spectral_indices.py. Values are conceptual band slots translated to
+    # mission-specific band names (e.g. swir1 -> swir16 on Sentinel-2) by
+    # _index_required_band_slots() below. Keep in sync with that module.
+    _OPTICAL_INDEX_BANDS = {
+        "ndvi": ["red", "nir"],
+        "ndwi": ["green", "nir"],
+        "savi": ["red", "nir"],
+        "ndmi": ["nir", "swir1"],
+        "nbr": ["nir", "swir2"],
+        "mndwi": ["green", "swir1"],
+        "ndbi": ["nir", "swir1"],
+        "evi": ["blue", "red", "nir"],
+        "ndre1": ["nir", "rededge1"],
+        "ndsi": ["green", "swir1"],
+    }
+    _SAR_INDEX_BANDS = {
+        "vh/vv": ["vh", "vv"],
+        "vv/vh": ["vv", "vh"],
+        "rvi": ["vh", "vv"],
+    }
+
+    def _index_required_band_slots(mission_name: str, idx):
+        """Mission-specific band requirements for one index.
+
+        Returns a list of "slots"; each slot is a tuple of band names of which
+        ANY ONE satisfies the requirement (e.g. Sentinel-2 NIR accepts "nir"
+        or the "nir08" fallback). Returns None for indices whose requirements
+        are not tracked here, so they are never greyed out by mistake. Mirrors
+        the _require_band() calls in calculate_spectral_index().
+        """
+        idx = str(idx).lower()
+        is_s2 = mission_name.startswith("sentinel_2")
+        is_ls = mission_name.startswith("landsat")
+        req = (
+            _SAR_INDEX_BANDS if mission_name == "sentinel_1_rtc"
+            else _OPTICAL_INDEX_BANDS
+        ).get(idx)
+        if req is None:
+            return None
+        slots = []
+        for concept in req:
+            if concept == "nir" and is_s2:
+                slots.append(("nir", "nir08"))
+            elif concept == "swir1":
+                slots.append(
+                    ("swir16",) if is_s2
+                    else ("swir1",) if is_ls
+                    else ("swir1", "swir16")
+                )
+            elif concept == "swir2":
+                slots.append(
+                    ("swir22",) if is_s2
+                    else ("swir2",) if is_ls
+                    else ("swir2", "swir22")
+                )
+            else:
+                slots.append((concept,))
+        return slots
+
+    def _index_requirements_text(mission_name: str, idx):
+        """Human-readable required-bands list, e.g. 'red, nir/nir08'."""
+        slots = _index_required_band_slots(mission_name, idx)
+        if not slots:
+            return ""
+        return ", ".join("/".join(s) for s in slots)
 
     def _daterange_mode_placeholder(mode_value: str):
         if mode_value == "seasonal_all":
@@ -521,6 +579,11 @@ def datacube_builder(missions_func=missions):
         value=False,
         description="Use a seasonal date range (repeating across years)",
         indent=False,
+        # Full row width: without it the checkbox keeps ipywidgets' default
+        # ~300px inline width and ellipsizes the label ("..."). 99% not 100%:
+        # at 100% the widget's internal margins overflow the Time Period group
+        # by a sliver and draw a useless horizontal scrollbar.
+        layout=widgets.Layout(width="99%"),
     )
 
     bands_w = widgets.SelectMultiple(
@@ -532,14 +595,81 @@ def datacube_builder(missions_func=missions):
         style={"description_width": "120px"},
     )
 
-    indices_w = widgets.SelectMultiple(
-        options=[],
-        value=(),
-        description="Indices:",
-        rows=8,
-        layout=widgets.Layout(width="100%", height="220px"),
-        style={"description_width": "120px"},
+    # Indices are individual checkbox rows (not a SelectMultiple like the
+    # bands) so that each index can be greyed out on its own when the bands it
+    # needs are not selected above - ipywidgets cannot disable single options
+    # inside a SelectMultiple.
+    _index_rows = {}  # index name -> its Checkbox row
+
+    # overflow "hidden auto" = x hidden, y auto: scroll vertically when the
+    # list outgrows max_height, but clip the classic 1px horizontal sliver
+    # that would otherwise draw a useless horizontal scrollbar across the box.
+    # (ipywidgets 8 has no Layout.overflow_y trait, only the shorthand.)
+    indices_w = widgets.VBox(
+        [],
+        layout=widgets.Layout(width="100%", max_height="260px", overflow="hidden auto"),
     )
+
+    def _index_row_html(mission_name, idx, missing_slots=None):
+        full = _index_fullname_map(mission_name).get(str(idx))
+        label = f"<b>{idx}</b>" + (f" ({full})" if full else "")
+        req = _index_requirements_text(mission_name, idx)
+        if req:
+            label += f" - {req}"
+        if missing_slots:
+            miss = ", ".join("/".join(s) for s in missing_slots)
+            return (
+                f"<span style='color:#9ca3af;'>{label} "
+                f"<i>(missing: {miss})</i></span>"
+            )
+        return label
+
+    def _refresh_index_availability(*_):
+        """Grey out (and untick) indices whose required bands are not selected."""
+        m_name = mission_dd.value
+        selected = {str(b).lower() for b in bands_w.value}
+        for idx, cb in _index_rows.items():
+            slots = _index_required_band_slots(m_name, idx)
+            if slots is None:
+                # Requirements not tracked for this index: keep it selectable.
+                missing = []
+            else:
+                missing = [s for s in slots if not any(b in selected for b in s)]
+            if missing and cb.value:
+                cb.value = False
+            cb.disabled = bool(missing)
+            cb.description = _index_row_html(m_name, idx, missing or None)
+
+    def _set_index_options(mission_name, index_list):
+        _index_rows.clear()
+        if not index_list:
+            indices_w.children = (
+                widgets.HTML(
+                    "<i style='color:#6b7280;'>No indices available for this "
+                    "mission.</i>"
+                ),
+            )
+            return
+        for idx in index_list:
+            cb = widgets.Checkbox(
+                value=False,
+                indent=False,
+                description="",
+                layout=widgets.Layout(width="100%"),
+            )
+            # The label is the checkbox's own description (HTML enabled), so
+            # clicking the text toggles the box, and a wide label column lets
+            # long index names wrap instead of being clipped.
+            cb.description_allow_html = True
+            cb.style.description_width = "330px"
+            _index_rows[str(idx)] = cb
+        indices_w.children = tuple(_index_rows.values())
+        _refresh_index_availability()
+
+    def _selected_index_values():
+        return [
+            idx for idx, cb in _index_rows.items() if cb.value and not cb.disabled
+        ]
 
     bands_all_btn = widgets.Button(
         description="All bands", layout=widgets.Layout(width="110px")
@@ -742,33 +872,52 @@ def datacube_builder(missions_func=missions):
     # "taken care of"); option 4 unlocks them for manual editing. Mutually
     # exclusive - one is always selected - rendered as checkboxes per design.
     # -------------------------------------------------------------------------
-    def _make_preset_row(text_html):
-        # The label is the checkbox's own description (HTML enabled), so clicking
-        # the TEXT toggles the box - not just the little square. The description
-        # sits in a <label> tied to the input, which is what makes it clickable.
+    def _make_preset_row(title_html, desc_html=None):
+        # Only the option TITLE is the checkbox's description (HTML enabled),
+        # so clicking the title toggles the box - not just the little square.
+        # The explanation is a separate, non-clickable HTML line underneath,
+        # indented to sit flush under the title and wrapping freely at any
+        # panel width. (The old single wide label forced a fixed 330px column
+        # that overflowed narrow panels with a horizontal scrollbar.)
         cb = widgets.Checkbox(
             value=False,
             indent=False,
-            description=text_html,
+            description=title_html,
             layout=widgets.Layout(width="100%"),
         )
         cb.description_allow_html = True
-        # Wide label column so a short sentence wraps under the option title
-        # instead of being clipped to one line.
-        cb.style.description_width = "330px"
-        return cb, cb
+        cb.style.description_width = "initial"
+        children = [cb]
+        if desc_html:
+            children.append(
+                widgets.HTML(
+                    "<div style='font-size:12px; color:#6b7280; line-height:1.4; "
+                    f"margin:-4px 0 0 26px;'>{desc_html}</div>"
+                )
+            )
+        row = widgets.VBox(
+            children,
+            # x hidden: clip the 1px flex sliver instead of drawing a useless
+            # horizontal scrollbar across the row.
+            layout=widgets.Layout(width="100%", overflow="hidden"),
+        )
+        return cb, row
 
     cloud_preset1_cb, _cp1_row = _make_preset_row(
-        "<b>No Masking</b> - Keep all pixels. Select this if you want use s2cloudless masking later. Each scene is tagged with a cloud % "
-        "so you can filter cloudy dates, saving you to apply s2cloudless on obviously fully cloudy scenes. Optionally "
-        "export a binary mask to apply later."
+        "<b>No Masking</b>",
+        "Keep all pixels. Select this if you want use s2cloudless masking "
+        "later. Each scene is tagged with a cloud % so you can filter cloudy "
+        "dates, saving you to apply s2cloudless on obviously fully cloudy "
+        "scenes. Optionally export a binary mask to apply later.",
     )
     cloud_preset2_cb, _cp2_row = _make_preset_row(
-        "<b>Mask Clouds</b> - Remove cloudy pixels automatically (SCL). The quick "
-        "way to a clean cube."
+        "<b>Mask Clouds</b>",
+        "Remove cloudy pixels automatically (SCL). The quick way to a clean "
+        "cube.",
     )
     cloud_preset3_cb, _cp3_row = _make_preset_row(
-        "<b>Free Settings</b> - Dude, I know what I am doing..."
+        "<b>Free Settings</b>",
+        "Dude, I know what I am doing...",
     )
 
     _cloud_preset_cbs = [
@@ -780,7 +929,7 @@ def datacube_builder(missions_func=missions):
     )
     _cloud_preset_box = widgets.VBox(
         [_cloud_preset_label, _cp1_row, _cp2_row, _cp3_row],
-        layout=widgets.Layout(width="100%", gap="6px"),
+        layout=widgets.Layout(width="100%", gap="6px", overflow="hidden"),
     )
 
     _cloud_preset_guard = {"busy": False}
@@ -2413,7 +2562,7 @@ def datacube_builder(missions_func=missions):
                 "ʕ•ᴥ•ʔ Mr. Bear noticed that you haven't selected any band and "
                 "strongly asking you to select at least one band to continue."
             )
-        indices = list(indices_w.value) if len(indices_w.value) > 0 else None
+        indices = _selected_index_values() or None
         stats = list(stats_w.value) if len(stats_w.value) > 0 else None
 
         clip_raster = bool(clip_raster_w.value)
@@ -2725,7 +2874,7 @@ def datacube_builder(missions_func=missions):
         max_cc = None if max_cc_w.disabled else int(max_cc_w.value)
 
         bands = list(bands_w.value) if len(bands_w.value) > 0 else None
-        indices = list(indices_w.value) if len(indices_w.value) > 0 else None
+        indices = _selected_index_values() or None
         stats = list(stats_w.value) if len(stats_w.value) > 0 else None
 
         clip_raster = bool(clip_raster_w.value)
@@ -3189,11 +3338,9 @@ def datacube_builder(missions_func=missions):
         bands_all_btn.disabled = len(bands) == 0
         bands_none_btn.disabled = len(bands) == 0
 
-        # Indices
+        # Indices (checkbox rows; availability follows the band selection)
         indices = _to_list_or_empty(meta.get("indices"))
-        indices_w.options = _index_options_with_fullname(m_name, indices)
-        indices_w.value = ()
-        indices_w.disabled = len(indices) == 0
+        _set_index_options(m_name, indices)
         indices_all_btn.disabled = len(indices) == 0
         indices_none_btn.disabled = len(indices) == 0
 
@@ -3377,13 +3524,14 @@ def datacube_builder(missions_func=missions):
         bands_w.value = ()
 
     def _select_all_indices(_):
-        values = []
-        for opt in indices_w.options:
-            values.append(opt[1] if isinstance(opt, tuple) and len(opt) == 2 else opt)
-        indices_w.value = tuple(values)
+        # Only the indices whose required bands are selected can be ticked.
+        for cb in _index_rows.values():
+            if not cb.disabled:
+                cb.value = True
 
     def _clear_indices(_):
-        indices_w.value = ()
+        for cb in _index_rows.values():
+            cb.value = False
 
     def _select_all_stats(_):
         if not stats_w.disabled:
@@ -3547,6 +3695,8 @@ def datacube_builder(missions_func=missions):
     bands_none_btn.on_click(_clear_bands)
     indices_all_btn.on_click(_select_all_indices)
     indices_none_btn.on_click(_clear_indices)
+    # Re-grey the index rows whenever the band selection changes.
+    bands_w.observe(_refresh_index_availability, names="value")
     stats_all_btn.on_click(_select_all_stats)
     stats_none_btn.on_click(_clear_stats)
 
@@ -3682,7 +3832,10 @@ def datacube_builder(missions_func=missions):
                 [indices_all_btn, indices_none_btn], layout=widgets.Layout(gap="6px")
             ),
         ],
-        subtitle="Spectral indices to compute.",
+        subtitle=(
+            "Spectral indices to compute. Each index lists the bands it needs; "
+            "an index is greyed out until those bands are selected above."
+        ),
         collapsible=True,
         open=False,
     )
@@ -4543,15 +4696,15 @@ def datacube_builder(missions_func=missions):
     _SOURCE_PRESET_VALUE = {1: "planetary_computer", 2: "element84"}
 
     source_preset1_cb, _sp1_row = _make_preset_row(
-        "<b>Excellent time-series but no probabilistic cloud masking</b><br>"
-        " - I need full time-series without credentials &amp; login but I am not "
+        "<b>Excellent time-series but no probabilistic cloud masking</b>",
+        "I need full time-series without credentials &amp; login but I am not "
         "interested in s2cloudless cloud masking but only Scene Classification "
-        "Layer masking or no masking."
+        "Layer masking or no masking.",
     )
     source_preset2_cb, _sp2_row = _make_preset_row(
-        "<b>Good time-series that can be used for probabilistic cloud masking</b><br>"
-        " - I need to use s2cloudless later with my own custom thresholds but I am "
-        "aware that some dates are missing, let's 'Check data availability' below."
+        "<b>Good time-series that can be used for probabilistic cloud masking</b>",
+        "I need to use s2cloudless later with my own custom thresholds but I am "
+        "aware that some dates are missing, let's 'Check data availability' below.",
     )
     _source_preset_cbs = [source_preset1_cb, source_preset2_cb]
     _source_preset_label = widgets.HTML(
@@ -4561,7 +4714,7 @@ def datacube_builder(missions_func=missions):
     )
     _source_preset_box = widgets.VBox(
         [_source_preset_label, _sp1_row, _sp2_row],
-        layout=widgets.Layout(width="100%", gap="6px"),
+        layout=widgets.Layout(width="100%", gap="6px", overflow="hidden"),
     )
 
     _source_preset_guard = {"busy": False}
@@ -4686,19 +4839,19 @@ def datacube_builder(missions_func=missions):
     visualization_box = widgets.VBox(
         [
             viz_feature_box,
-            widgets.VBox(
-                [
-                    widgets.HTML("<b>1) Interactive View</b>"),
-                    widgets.HTML(
-                        "<div style='font-size:12px; color:#666;'>Explore the cube scene by scene: "
-                        "presets (RGB, false color, indices), any single band in grey levels, or a "
-                        "custom R/G/B band combination. The viewer opens below.</div>"
-                    ),
-                    viz_dropdown_btn,
-                ],
-                layout=widgets.Layout(width="100%", gap="6px"),
+            # Same collapsible group styling as the Animation section below,
+            # but open by default - the viewer is the primary tool here.
+            _field_group(
+                "1) Interactive View",
+                # The output area the viewer renders into lives INSIDE the
+                # group, so collapsing the header hides the opened map too.
+                [viz_dropdown_btn, viz_out],
+                subtitle="Explore the cube scene by scene: presets (RGB, false "
+                "color, indices), any single band in grey levels, or a custom "
+                "R/G/B band combination. The viewer opens below.",
+                collapsible=True,
+                open=True,
             ),
-            viz_out,
             # The animation maker is a separate tool from the viewer, so it lives
             # in its own collapsed-by-default section (a custom collapse, not a
             # nested ipywidgets Accordion, which would push a stray scrollbar).
@@ -4904,6 +5057,7 @@ def datacube_builder(missions_func=missions):
             "daterange": daterange_w,
             "bands": bands_w,
             "indices": indices_w,
+            "index_checkboxes": _index_rows,
             "clip_raster": clip_raster_w,
             "max_cc": max_cc_w,
             "cloud_masking": cloud_masking_w,
@@ -7910,19 +8064,19 @@ def datacube_editor():
 
     visualization_box = widgets.VBox(
         [
-            widgets.VBox(
-                [
-                    widgets.HTML("<b>1) Interactive View</b>"),
-                    widgets.HTML(
-                        "<div style='font-size:12px; color:#666;'>Explore the cube scene by scene: "
-                        "presets (RGB, false color, indices), any single band in grey levels, or a "
-                        "custom R/G/B band combination. The viewer opens below.</div>"
-                    ),
-                    viz_dropdown_btn,
-                ],
-                layout=widgets.Layout(width="100%", gap="6px"),
+            # Same collapsible group styling as the Animation section below,
+            # but open by default - the viewer is the primary tool here.
+            _field_group(
+                "1) Interactive View",
+                # The output area the viewer renders into lives INSIDE the
+                # group, so collapsing the header hides the opened map too.
+                [viz_dropdown_btn, viz_out],
+                subtitle="Explore the cube scene by scene: presets (RGB, false "
+                "color, indices), any single band in grey levels, or a custom "
+                "R/G/B band combination. The viewer opens below.",
+                collapsible=True,
+                open=True,
             ),
-            viz_out,
             # The animation maker is a separate tool from the viewer, so it lives
             # in its own collapsed-by-default section (a custom collapse, not a
             # nested ipywidgets Accordion, which would push a stray scrollbar).
