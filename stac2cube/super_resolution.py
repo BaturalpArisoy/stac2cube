@@ -34,12 +34,26 @@ FULL_REQUIRED = {
 }
 
 # SEN2SR-required *model input order* (IMPORTANT)
+# The standalone RGBN model takes the raw CNN input order (R,G,B,N - its
+# mlm.json is correct). The full model's referencex4 wrapper instead expects
+# Sentinel-2 NATURAL order (B02..B12): it hard-codes positions [0,1,2,6] as
+# the 10-m natives and [3,4,5,7,8,9] as the 20-m bands, and extracts R,G,B,N
+# for the internal CNN itself. Its mlm.json documents the internal CNN order
+# (RGBN-first), which is WRONG for the wrapper: feeding that order sent native
+# nir through the destructive 20-m branch (decimate+re-SR; lowpass corr with
+# true nir 0.836 vs 0.998) and rededge3 through the RGBN branch. Verified via
+# hard-constraint fingerprints on the model's own example data (2026-07-09).
 RGBN_MODEL_ORDER = ["red", "green", "blue", "nir"]
 FULL_MODEL_ORDER = [
-    "red", "green", "blue", "nir",
+    "blue", "green", "red",
     "rededge1", "rededge2", "rededge3",
-    "nir08", "swir16", "swir22",
+    "nir", "nir08", "swir16", "swir22",
 ]
+
+# SEN2SRLite_Reference_RSWIR_x2 (20-m bands -> 10-m) input order: natural
+# order, same as FULL_MODEL_ORDER (referencex2 hard-codes the same positional
+# split as referencex4; its mlm.json band list is wrong the same way).
+X2_MODEL_ORDER = list(FULL_MODEL_ORDER)
 
 
 def _bands_in_cube_order(da: xr.DataArray, band_set: set[str]) -> list[str]:
@@ -456,8 +470,8 @@ def super_resolve_cube(
     input_path,
     output_path: str | None = None,
     var_name="Spectral_Temporal_Stack",
-    nan_pixel_buffer: int = 8,
-    model_type: str | None = None,  # NEW: None | "rgbn" | "full_spectral"
+    nan_pixel_buffer: int | None = None,  # NaN-mask dilation in OUTPUT pixels; None = per-mode default
+    model_type: str | None = None,  # None | "rgbn" | "full_spectral" | "20to10"
     model_dir: str | None = None,   # folder containing the 'model' dir (e.g. interactive/)
     batch_size: int | None = None,  # patches per forward pass; None = auto
     precision: str = "auto",        # "auto" | "fp32" | "fp16" | "bf16"
@@ -471,8 +485,20 @@ def super_resolve_cube(
       - None (default): auto-detect using attrs["spectral_bands"]
           * if spectral_bands are ONLY within [blue, green, red, nir] -> rgbn
           * otherwise -> full_spectral
-      - "rgbn": use SEN2SRLite-RGBN
-      - "full_spectral": use SEN2SRLite (requires all 10 bands)
+      - "rgbn": use SEN2SRLite-RGBN (10-m RGBN -> 2.5-m)
+      - "full_spectral": use SEN2SRLite (requires all 10 bands; -> 2.5-m)
+      - "20to10": use SEN2SRLite_Reference_RSWIR_x2. Enhances the six 20-m
+        bands (rededge1, rededge2, rededge3, nir08, swir16, swir22) to true
+        10-m detail, guided by the four native 10-m bands. Requires the same
+        10 bands as "full_spectral", stored on a 10-m grid (the cube must be
+        built at 10-m resolution). The 10-m bands pass through unchanged; the
+        output grid is identical to the input grid (no pixel-size change).
+
+    nan_pixel_buffer:
+      Radius (in OUTPUT pixels) by which the NaN/cloud mask is dilated to
+      remove SR halo artifacts around masked areas. None (default) picks 8 for
+      the 2.5-m modes and 2 for "20to10" - the same 20-m physical buffer in
+      both cases.
 
     batch_size:
       Number of 128x128 patches super-resolved per model call. None picks a
@@ -525,11 +551,14 @@ def super_resolve_cube(
     }
 
     RGBN_MODEL_ORDER = ["red", "green", "blue", "nir"]
+    # Both wrapped models (referencex4 and referencex2) expect Sentinel-2
+    # NATURAL order (B02..B12) - see the module-level constants' note.
     FULL_MODEL_ORDER = [
-        "red", "green", "blue", "nir",
+        "blue", "green", "red",
         "rededge1", "rededge2", "rededge3",
-        "nir08", "swir16", "swir22",
+        "nir", "nir08", "swir16", "swir22",
     ]
+    X2_MODEL_ORDER = list(FULL_MODEL_ORDER)
 
     def _parse_list_attr(v):
         if v is None:
@@ -596,10 +625,6 @@ def super_resolve_cube(
             ext = ".nc"
         output_path = f"{base}_sr{ext}"
 
-    old_res = 10.0
-    new_res = 2.5
-    edge_crop_px = 8
-
     if isinstance(input_path, xr.DataArray):
         raise ValueError(
             "This version expects a NetCDF/Zarr cube path so it can read CF georef from metadata."
@@ -648,13 +673,29 @@ def super_resolve_cube(
             model_type_used = "full_spectral"
     else:
         mt = str(model_type).strip().lower()
-        if mt not in ("rgbn", "full_spectral"):
-            raise ValueError("model_type must be one of: None, 'rgbn', 'full_spectral'")
+        if mt not in ("rgbn", "full_spectral", "20to10"):
+            raise ValueError("model_type must be one of: None, 'rgbn', 'full_spectral', '20to10'")
         model_type_used = mt
 
     # ---------------------------
-    # select bands + model input order + model path
+    # select bands + model input order + model path + resolutions
     # ---------------------------
+    # The 2.5-m modes upscale the grid 4x; edge_crop_px=8 output px = 2 input
+    # px cropped to remove boundary artifacts. "20to10" keeps the grid size
+    # (the six 20-m bands gain detail on the existing 10-m grid), so the same
+    # 2-input-px crop is edge_crop_px=2.
+    old_res = 10.0
+    if model_type_used == "20to10":
+        new_res = 10.0
+        edge_crop_px = 2
+        default_nan_buffer = 2
+    else:
+        new_res = 2.5
+        edge_crop_px = 8
+        default_nan_buffer = 8
+    if nan_pixel_buffer is None:
+        nan_pixel_buffer = default_nan_buffer
+
     if model_type_used == "rgbn":
         _validate_required_bands(spectral_set, RGBN_REQUIRED, model_type_used)
         bands_to_use = _bands_in_cube_order(dataarray, RGBN_REQUIRED)  # cube order for restore
@@ -662,6 +703,14 @@ def super_resolve_cube(
         model_path = _resolve_model_path([
             "model/SEN2SRLite-RGBN",
             "model/SEN2SRLite_RGBN",
+        ])
+    elif model_type_used == "20to10":
+        # needs the four 10-m natives as reference plus the six 20-m bands
+        _validate_required_bands(spectral_set, FULL_REQUIRED, model_type_used)
+        bands_to_use = _bands_in_cube_order(dataarray, FULL_REQUIRED)  # cube order for restore
+        model_band_order = X2_MODEL_ORDER
+        model_path = _resolve_model_path([
+            "model/SEN2SRLite_Reference_RSWIR_x2",
         ])
     else:
         _validate_required_bands(spectral_set, FULL_REQUIRED, model_type_used)
@@ -955,7 +1004,8 @@ def super_resolve_cube(
             ds_out[var_name].encoding.update(var_encoding)
         ds_out.to_netcdf(output_path)
         size_mb = os.path.getsize(output_path) / 1e6
+    target_str = "10-meters" if model_type_used == "20to10" else "2.5-meters"
     print(
-        f"Data cube is super-resolved to 2.5-meters! "
+        f"Data cube is super-resolved to {target_str}! "
         f"(model_type={model_type_used}, {size_mb:.1f} MB)"
     )

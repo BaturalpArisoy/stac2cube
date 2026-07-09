@@ -33,7 +33,7 @@ For Sentinel-2, the ARD cubes are built with three main components:
 
 -   **Co-registration** to reduce scene-to-scene X/Y misalignment (often around 1-2 pixels). Small sub-pixel shifts (below 10 m) can still remain.
 
--   **Super-resolution** of both 10-meters and 20-meters bands to 2.5 m.
+-   **Super-resolution** of both 10-meters and 20-meters bands to 2.5 meters. Another option is 20-meters bands super-resolution to 10-meter.
 
 The result is a data cube that is cloud-masked with customizable thresholds, spatially aligned across time, and available at higher spatial resolution. Details about the underlying algorithms and how to cite the used third-party tools can be found in the [Examples](#examples) section.
 

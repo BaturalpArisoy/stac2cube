@@ -10453,7 +10453,12 @@ def ard_cube_tools():
             "- Use this model only if you need to super resolve 20-meter bands.<br>"
             "- Even if you need to super-resolve one of the 20-meter bands, still need to include all of the required ones."
         ),
-        "20to10": "Under development :)",
+        "20to10": (
+            "- Required band setup -> <code>blue, green, red, nir, nir08, rededge1, rededge2, rededge3, swir16, swir22</code><br>"
+            "- Sharpens the six 20-m bands (rededge1/2/3, nir08, swir16, swir22) to true 10-m detail; the 10-m bands are used as reference and pass through unchanged.<br>"
+            "- The output keeps the cube's 10-m grid (no pixel-size change), so the cube must be built at 10-m resolution.<br>"
+            "- If exist, indices can be both 10 and 20-meter resolution ones, e.g., ndvi, ndwi, ndmi"
+        ),
     }
 
     sr_desc_html = widgets.HTML(
@@ -10540,12 +10545,8 @@ def ard_cube_tools():
         mode = sr_mode_w.value
         sr_desc_html.value = f"<div style='font-size:12px; color:#666;'>{SR_DESC[mode]}</div>"
 
-        # Disable run for under-development mode
-        if mode == "20to10":
-            sr_run_btn.disabled = True
-        else:
-            # enabled state will also depend on load status via _set_enabled_after_load
-            sr_run_btn.disabled = (state.get("loaded_path") is None)
+        # enabled state depends on load status via _set_enabled_after_load
+        sr_run_btn.disabled = (state.get("loaded_path") is None)
 
     sr_mode_w.observe(_on_sr_mode_change, names="value")
 
@@ -10559,10 +10560,6 @@ def ard_cube_tools():
             return
 
         mode = sr_mode_w.value
-        if mode == "20to10":
-            _status("ℹ️ 20-m Bands to 10-m is under development :)")
-            return
-
         out_path = (sr_out_w.value or "").strip()
         if not out_path:
             out_path = _suggest_sr_path_from_loaded()
@@ -10592,7 +10589,7 @@ def ard_cube_tools():
                     input_path=state["loaded_path"],
                     output_path=out_path,
                     var_name=sr_var_name,
-                    model_type=("rgbn" if mode == "rgbn" else "full_spectral"),
+                    model_type=mode,  # "rgbn" | "full_spectral" | "20to10"
                     compress=bool(sr_compress_w.value),
                 )
 
@@ -10782,11 +10779,7 @@ def ard_cube_tools():
         # state['loaded_path'], which _finalize_load sets before calling this).
         _sync_sr_compress_for_format()
 
-        # run enabled only if loaded AND mode not under development
-        if not enabled:
-            sr_run_btn.disabled = True
-        else:
-            sr_run_btn.disabled = (sr_mode_w.value == "20to10")
+        sr_run_btn.disabled = not enabled
 
 
     _set_enabled_after_load(False)
