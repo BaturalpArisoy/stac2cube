@@ -60,6 +60,17 @@ def get_stac_parameters(stac_existing):
         else:
             indices = None
 
+    # SCL cloud strategy. Legacy cubes predate the cloud_status attribute:
+    # fall back on the cloud_percentage coordinate - present means clouds were
+    # assessed (treat as masked), absent means clouds were never detected.
+    cloud_status = stac_existing.attrs.get("cloud_status")
+    if cloud_status is None:
+        cloud_status = (
+            "scl_masked"
+            if "cloud_percentage" in stac_existing.coords
+            else "clouds_not_detected"
+        )
+
     stac_parameters = {
         "mission": mission,
         "resolution": resolution,
@@ -70,6 +81,10 @@ def get_stac_parameters(stac_existing):
         "daterange": daterange,
         "stac_api": stac_existing.attrs.get("stac_api", "element84"),
         "resampling": stac_existing.attrs.get("resampling", "bilinear"),
+        "cloud_status": cloud_status,
+        # Shadow projection params (present only on scl_shadow_masked cubes).
+        "nir_dark_threshold": stac_existing.attrs.get("nir_dark_threshold"),
+        "shadow_proj_distance": stac_existing.attrs.get("shadow_proj_distance"),
     }
 
     return stac_parameters

@@ -139,7 +139,7 @@ def get_stac(
     max_cc: int,
     cloud_masking: bool,
     source: str = "element84",
-    resampling: str = "bilinear",
+    resampling: str = "nearest",
 ):
     _source_aliases = {"e84": "element84", "tb": "terrabyte", "pc": "planetary_computer"}
     source = _source_aliases.get(source, source)
@@ -300,7 +300,7 @@ def get_stac(
         bands=bands,
         crs=crs,
         resolution=resolution,
-        # Per-band dict: the user's method (default "bilinear") for spectral
+        # Per-band dict: the user's method (default "nearest") for spectral
         # bands, "nearest" pinned for categorical layers - odc-stac resolves
         # each band against this mapping with "*" as the fallback.
         resampling=resampling_cfg,

@@ -198,12 +198,56 @@ def get_stac_layers(
         # geometry = stac_parameters["geometry"] # update-clip raster
         bands = stac_parameters["spectral_bands"]
         indices = stac_parameters["indices"]
-        if not isinstance(indices, list):
+        if indices is None:
+            # Cube built without any spectral indices - nothing to restore.
+            indices = []
+        elif not isinstance(indices, list):
             indices = indices.tolist()
         if source is None:
             source = stac_parameters.get("stac_api", "element84")
         if resampling_method is None:
             resampling_method = stac_parameters.get("resampling", "bilinear")
+        # Reproduce the original cube's SCL cloud strategy on the new scenes,
+        # unless the caller overrode it explicitly. Without this, new scenes
+        # would miss the cloud_percentage coordinate (concat fails) or be
+        # masked/kept inconsistently with the existing scenes.
+        if cloud_masking is None:
+            cs = stac_parameters.get("cloud_status", "clouds_not_detected")
+            if cs == "clouds_detected":
+                cloud_masking = True
+                if keep_clouds is None:
+                    keep_clouds = True
+            elif cs == "scl_masked":
+                cloud_masking = True
+                if keep_clouds is None:
+                    keep_clouds = False
+            elif cs == "scl_shadow_masked":
+                # Reproduce cloud + shadow masking on the new scenes with the
+                # cube's original shadow params. Shadow always implies masking
+                # (keep_clouds=False). The precondition block near the top ran
+                # before this restore, so re-assert the shadow requirements here.
+                cloud_masking = True
+                keep_clouds = False
+                shadow_masking = True
+                _ndt = stac_parameters.get("nir_dark_threshold")
+                if _ndt is not None:
+                    nir_dark_threshold = float(_ndt)
+                _spd = stac_parameters.get("shadow_proj_distance")
+                if _spd is not None:
+                    shadow_proj_distance = float(_spd)
+                if aggregator:
+                    raise ValueError(
+                        "Cannot update a cloud-shadow-masked cube with an "
+                        "aggregator: shadow projection needs the time dimension "
+                        "and per-scene solar geometry."
+                    )
+                if not bands or "nir" not in [str(b).lower() for b in bands]:
+                    raise ValueError(
+                        "This cube was cloud-shadow-masked but its stored bands "
+                        "lack 'nir', which shadow projection requires."
+                    )
+            else:  # clouds_not_detected
+                cloud_masking = False
         # NOTE: do NOT force output=update here anymore.
         # This allows update mode to return an in-memory updated cube when output=None.
     else:
@@ -222,7 +266,7 @@ def get_stac_layers(
     #    polygon = proj_check(polygon)
 
     if resampling_method is None:
-        resampling_method = "bilinear"
+        resampling_method = "nearest"
 
     # Did the user explicitly request the classification layer as a band?
     # cloud_masking auto-appends it for internal use and normally drops it
@@ -309,6 +353,23 @@ def get_stac_layers(
         stac.attrs["spectral_bands"] = bands
         stac.attrs["mission"] = mission
         stac.attrs["resampling"] = resampling_method
+        # SCL cloud strategy, recorded so update mode can reproduce the exact
+        # same handling on newly added scenes (see get_stac_parameters and the
+        # update block above). keep_clouds is None/False -> pixels were masked.
+        if cloud_masking is True:
+            if shadow_masking and not keep_clouds:
+                # Cloud + shadow were projected and masked together. Store the
+                # two tunable shadow params numerically so update mode can
+                # reproduce the exact same projection on newly added scenes.
+                stac.attrs["cloud_status"] = "scl_shadow_masked"
+                stac.attrs["nir_dark_threshold"] = nir_dark_threshold
+                stac.attrs["shadow_proj_distance"] = shadow_proj_distance
+            else:
+                stac.attrs["cloud_status"] = (
+                    "clouds_detected" if keep_clouds else "scl_masked"
+                )
+        else:
+            stac.attrs["cloud_status"] = "clouds_not_detected"
         _source_aliases = {"e84": "element84", "tb": "terrabyte", "pc": "planetary_computer"}
         stac.attrs["stac_api"] = _source_aliases.get(source or "element84", source or "element84")
         if mission in ("sentinel_2_l2a", "sentinel_2_l1c"):

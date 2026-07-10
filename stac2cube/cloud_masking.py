@@ -299,6 +299,11 @@ def get_cloud_layers(
         bands=bands,
         max_cc=max_cc,
         clip_raster=clip_raster,
+        # s2cloudless is documented and calibrated for bilinearly-resampled
+        # reflectance. Pin bilinear explicitly so this does NOT inherit the
+        # global get_stac_layers default (now "nearest") - nearest-resampled
+        # bands would feed the detector off-spec inputs.
+        resampling_method="bilinear",
         q=True,
     )
 

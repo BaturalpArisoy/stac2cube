@@ -215,8 +215,8 @@ PARAM_HELP_HTML = {
     <b>Resampling Method</b><br>
     How pixels are interpolated when the source imagery is resampled onto your
     cube grid (e.g. 20 m bands to a 10 m cube).<br><br>
-    <b>bilinear</b> (default): smooth, recommended for better visual quality.<br>
-    <b>nearest</b>: keeps original pixel values, blockier look, recommended for analysis.<br>
+    <b>nearest</b> (default): keeps original pixel values, blockier look, recommended for analysis.<br>
+    <b>bilinear</b>: smooth, recommended for better visual quality.<br>
     <b>bicubic</b>: smoothest visual, slightly slower.<br><br>
     The Scene Classification Layer (<code>scl</code>) is <b>always</b> loaded
     with nearest resampling regardless of this choice - interpolating between
@@ -857,9 +857,9 @@ def datacube_builder(missions_func=missions):
     # inside get_stac regardless of the choice.
     # -------------------------------------------------------------------------
     resampling_w = widgets.Dropdown(
-        options=[("bilinear (default)", "bilinear"), ("nearest", "nearest"),
+        options=[("nearest (default)", "nearest"), ("bilinear", "bilinear"),
                  ("bicubic", "bicubic")],
-        value="bilinear",
+        value="nearest",
         description="Resampling:",
         layout=widgets.Layout(width="100%"),
         style={"description_width": "120px"},
@@ -8456,18 +8456,27 @@ def ard_cube_tools():
     # -----------------------------------------
     header = widgets.HTML("<div style='margin:0 0 4px 0; font-size:28px; font-weight:700;'>Analysis Ready Data Cube Tools</div>")
     subtitle = widgets.HTML(
-        "<div style='font-size:13px; color:#6b7280; margin:0 0 4px 0;'>"
-        "• Cloud masking • Co-registration • Super-resolution"
-        "</div>"
-    )
-
-    tools_info_box = widgets.HTML(
-        "<div style='font-size:13px; color:#1e3a8a; background:#eff6ff; "
-        "border:1px solid #bfdbfe; border-left:4px solid #3b82f6; "
-        "border-radius:6px; padding:10px 12px; margin:0 0 8px 0;'>"
-        "<b>ℹ️</b> The 3 tools provided below are not chained. For each feature, load a "
-        "separate data cube (NetCDF .nc or Zarr .zarr) with the loader below, then run "
-        "one of the 3 tools. Each tool keeps the loaded cube's format: zarr in -&gt; zarr out , netcdf in -&gt; netcdf out ."
+        "<div style='display:flex; flex-wrap:wrap; gap:10px; margin:14px 0 8px 0;'>"
+        # Step 1 - blue "load"
+        "<div style='flex:1 1 200px; background:#f8fafc; border:1px solid #e5e7eb; "
+        "border-left:4px solid #3b82f6; border-radius:8px; padding:8px 10px;'>"
+        "<div style='font-weight:700; color:#1e3a8a; font-size:13px;'>1 &nbsp; Load</div>"
+        "<div style='font-size:12px; color:#475569; margin-top:2px;'>Load a "
+        "<b>NetCDF</b> or <b>Zarr</b> data cube.</div></div>"
+        # Step 2 - green "select your tool"
+        "<div style='flex:1 1 200px; background:#f0fdf4; border:1px solid #dcfce7; "
+        "border-left:4px solid #16a34a; border-radius:8px; padding:8px 10px;'>"
+        "<div style='font-weight:700; color:#166534; font-size:13px;'>2 &nbsp; Select your tool</div>"
+        "<div style='font-size:12px; color:#475569; margin-top:2px;'>Select "
+        "<b>one</b> of the tools below. For each feature, you should load a "
+        "separate data cube.</div></div>"
+        # Step 3 - orange "execute and export"
+        "<div style='flex:1 1 200px; background:#fff7ed; border:1px solid #fed7aa; "
+        "border-left:4px solid #f97316; border-radius:8px; padding:8px 10px;'>"
+        "<div style='font-weight:700; color:#9a3412; font-size:13px;'>3 &nbsp; Execute &amp; Export</div>"
+        "<div style='font-size:12px; color:#475569; margin-top:2px;'>Each tool has its "
+        "own export system and keeps the loaded cube's format: zarr in -&gt; zarr out , "
+        "netcdf in -&gt; netcdf out .</div></div>"
         "</div>"
     )
 
@@ -10973,7 +10982,6 @@ def ard_cube_tools():
             css_patch,
             header,
             subtitle,
-            tools_info_box,
 
             loading_card,
             spacer_small,
