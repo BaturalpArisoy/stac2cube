@@ -274,6 +274,70 @@ def _with_help_left(widget, help_key, label_text=None):
     return _field_with_help(widget, label_text, PARAM_HELP_HTML.get(help_key, ""))
 
 
+def _band_resolution_map(mission_name: str):
+    if mission_name in {"sentinel_2_l2a", "sentinel_2_l1c"}:
+        return {
+            "coastal": "60m",
+            "blue": "10m",
+            "green": "10m",
+            "red": "10m",
+            "rededge1": "20m",
+            "rededge2": "20m",
+            "rededge3": "20m",
+            "nir": "10m",
+            "nir08": "20m",
+            "nir09": "60m",
+            "cirrus": "60m",
+            "swir16": "20m",
+            "swir22": "20m",
+            "scl": "20m",
+        }
+    elif mission_name == "sentinel_1_rtc":
+        return {"vh": "10m", "vv": "10m"}
+    elif mission_name == "landsat_c2_l2":
+        return {
+            "coastal": "30m",
+            "blue": "30m",
+            "green": "30m",
+            "red": "30m",
+            "nir": "30m",
+            "swir1": "30m",
+            "swir2": "30m",
+            "thermal": "30m",
+        }
+    return {}
+
+
+def _band_options_with_resolution(mission_name: str, band_list):
+    """
+    Sort by native resolution when possible (10m -> 20m -> 60m etc.),
+    preserving original order within same resolution.
+    """
+    res_map = _band_resolution_map(mission_name)
+    indexed = list(enumerate(band_list))
+
+    def _res_rank(item):
+        idx, band = item
+        # scl is a classification layer, not a spectral band - keep it at
+        # the very end of the list regardless of its native resolution.
+        if str(band).lower() == "scl":
+            return (99999, idx)
+        res = str(res_map.get(band, ""))
+        m = re.match(r"^(\d+)m$", res)
+        if m:
+            return (int(m.group(1)), idx)
+        return (9999, idx)
+
+    indexed_sorted = sorted(indexed, key=_res_rank)
+
+    options = []
+    for _, b in indexed_sorted:
+        res = res_map.get(b)
+        label = f"{b} ({res})" if res else str(b)
+        options.append((label, b))
+    return options
+
+
 def datacube_builder(missions_func=missions):
     
     # -------------------------------------------------------------------------
@@ -325,68 +389,6 @@ def datacube_builder(missions_func=missions):
             ),
             "disabled": False,
         }
-
-    def _band_resolution_map(mission_name: str):
-        if mission_name in {"sentinel_2_l2a", "sentinel_2_l1c"}:
-            return {
-                "coastal": "60m",
-                "blue": "10m",
-                "green": "10m",
-                "red": "10m",
-                "rededge1": "20m",
-                "rededge2": "20m",
-                "rededge3": "20m",
-                "nir": "10m",
-                "nir08": "20m",
-                "nir09": "60m",
-                "cirrus": "60m",
-                "swir16": "20m",
-                "swir22": "20m",
-                "scl": "20m",
-            }
-        elif mission_name == "sentinel_1_rtc":
-            return {"vh": "10m", "vv": "10m"}
-        elif mission_name == "landsat_c2_l2":
-            return {
-                "coastal": "30m",
-                "blue": "30m",
-                "green": "30m",
-                "red": "30m",
-                "nir": "30m",
-                "swir1": "30m",
-                "swir2": "30m",
-                "thermal": "30m",
-            }
-        return {}
-
-    def _band_options_with_resolution(mission_name: str, band_list):
-        """
-        Sort by native resolution when possible (10m -> 20m -> 60m etc.),
-        preserving original order within same resolution.
-        """
-        res_map = _band_resolution_map(mission_name)
-        indexed = list(enumerate(band_list))
-
-        def _res_rank(item):
-            idx, band = item
-            # scl is a classification layer, not a spectral band - keep it at
-            # the very end of the list regardless of its native resolution.
-            if str(band).lower() == "scl":
-                return (99999, idx)
-            res = str(res_map.get(band, ""))
-            m = re.match(r"^(\d+)m$", res)
-            if m:
-                return (int(m.group(1)), idx)
-            return (9999, idx)
-
-        indexed_sorted = sorted(indexed, key=_res_rank)
-
-        options = []
-        for _, b in indexed_sorted:
-            res = res_map.get(b)
-            label = f"{b} ({res})" if res else str(b)
-            options.append((label, b))
-        return options
 
     def _index_fullname_map(mission_name: str):
         common = {
@@ -5193,18 +5195,20 @@ def datacube_editor():
         If True, the date label is shown on the animation frames.
         """,
         "daterange_mode": """
-        <b>date range mode</b><br>
-        Choose how you want to define the requested update period.<br><br>
-        <b>1) Standard (single window)</b>: <code>["YYYY-MM-DD", "YYYY-MM-DD"]</code><br>
-        <b>2) Seasonal</b>: <code>["MM-DD", "MM-DD"]</code> (repeats across years)<br>
-        <b>3) Seasonal + year control</b>: <code>{"season": ["MM-DD", "MM-DD"], "years": [...]}</code><br><br>
+        <b>season mode</b><br>
+        Repeat a seasonal window (<code>MM-DD</code> to <code>MM-DD</code>) across years:<br><br>
+        <b>1) All available years</b>: <code>{"season": ["MM-DD", "MM-DD"], "years": "all"}</code><br>
+        <b>2) Year range</b>: <code>{"season": ["MM-DD", "MM-DD"], "years": "2019-2024"}</code><br>
+        <b>3) Selected years only</b>: <code>{"season": ["MM-DD", "MM-DD"], "years": [2019, 2021]}</code><br><br>
         The text box below is prefilled with an editable example for the selected mode.
         """,
         "update_cube": """
         <b>update data cube</b><br>
-        Uses <code>get_stac_layers(update=...)</code> with the loaded cube path to fetch only missing dates
-        and return an updated <code>Spectral_Temporal_Stack</code>.<br><br>
-        <b>Important:</b> This replaces the current working result with a refreshed time series.<br>
+        Uses <code>get_stac_layers(update=...)</code> with the loaded cube path to fetch only the
+        missing dates and/or missing bands and return an updated <code>Spectral_Temporal_Stack</code>.
+        The cube's cloud/shadow masking strategy is restored from its attributes, so new scenes and
+        new bands are masked (or kept) exactly like the stored data.<br><br>
+        <b>Important:</b> This replaces the current working result with the updated cube.<br>
         Use it first (or by itself), then continue with other editing features (slice, clip, stats, export).
         """,
     }
@@ -5507,8 +5511,14 @@ def datacube_editor():
 
         # Update widgets
         enable_update_w.disabled = not enabled
+        update_date_from_w.disabled = not enabled
+        update_date_to_w.disabled = not enabled
+        update_advanced_dates_w.disabled = not enabled
         update_daterange_mode_w.disabled = not enabled
         update_daterange_w.disabled = not enabled
+        # The band list stays disabled when the loaded cube has no missing
+        # bands to offer (the note below the list says why).
+        update_bands_w.disabled = (not enabled) or (len(update_bands_w.options) == 0)
 
         # Visualization
         viz_dropdown_btn.disabled = not enabled
@@ -5681,6 +5691,76 @@ def datacube_editor():
         allowed = _allowed_indices_for_mission(mission_name)
         indices_select_w.options = _index_options_with_fullname(allowed)
         indices_select_w.value = ()
+
+    def _allowed_bands_for_mission(mission_name):
+        """Bands offered by missions() for this mission ([] if none/unknown)."""
+        if not mission_name:
+            return []
+        try:
+            df = missions()
+            row = df.loc[df["name"] == mission_name]
+            if row.empty:
+                return []
+            vals = row.iloc[0]["bands"]
+        except Exception:
+            return []
+        if not vals:  # False or None
+            return []
+        return [str(v) for v in vals]
+
+    def _populate_update_bands_from_current():
+        """Fill the Band Update list with the bands the loaded cube's mission
+        offers but the cube does not contain yet."""
+        update_bands_w.options = []
+        update_bands_w.value = ()
+
+        da = state.get("loaded_original")
+        if da is None:
+            update_bands_note_html.value = ""
+            return
+        if state.get("loaded_var") == "Cloud_Stack":
+            update_bands_note_html.value = (
+                "<div style='font-size:12px; color:#6b7280;'>Band update is "
+                "available for Spectral_Temporal_Stack cubes only.</div>"
+            )
+            return
+
+        mission_name = _current_mission()
+        available = _allowed_bands_for_mission(mission_name)
+        try:
+            stored = [
+                str(b).lower()
+                for b in np.asarray(da.attrs.get("spectral_bands", [])).ravel()
+            ]
+        except Exception:
+            stored = []
+        if not stored and "band" in da.coords:
+            # Legacy cubes without the attr: fall back on the band coordinate
+            # (indices land in the stored list too, which is fine - they are
+            # not mission bands and never appear in `available`).
+            stored = [str(b).lower() for b in da.band.values]
+
+        if not available:
+            update_bands_note_html.value = (
+                "<div style='font-size:12px; color:#6b7280;'>No band table "
+                f"available for mission '{mission_name}'.</div>"
+            )
+            return
+
+        missing = [b for b in available if str(b).lower() not in stored]
+        if not missing:
+            update_bands_note_html.value = (
+                "<div style='font-size:12px; color:#6b7280;'>The cube already "
+                "contains every band its mission offers.</div>"
+            )
+            return
+
+        update_bands_w.options = _band_options_with_resolution(mission_name, missing)
+        update_bands_note_html.value = (
+            f"<div style='font-size:12px; color:#6b7280;'>{len(missing)} band"
+            f"{'s' if len(missing) != 1 else ''} available to add. Leave the "
+            "selection empty for a date-only update.</div>"
+        )
 
     def _update_gif_output_suggestion(force=False):
         new_suggestion = _auto_gif_output_suggestion()
@@ -6201,7 +6281,8 @@ def datacube_editor():
     stats_all_btn = widgets.Button(description="All stats", layout=widgets.Layout(width="95px"), disabled=True)
     stats_clear_btn = widgets.Button(description="Clear", layout=widgets.Layout(width="70px"), disabled=True)
 
-    # Update Data Cube (fetch missing dates from loaded cube path)
+    # Update Data Cube (fetch missing dates and/or missing bands for the
+    # loaded cube path)
     enable_update_w = widgets.Checkbox(
         value=False,
         description="Enable update data cube",
@@ -6209,25 +6290,56 @@ def datacube_editor():
         disabled=True,
     )
 
+    # -- Date Update: mirrors the builder's Time Period group (simple From/To
+    # pickers, with the seasonal modes behind an "advanced" checkbox).
+    update_date_from_w = widgets.DatePicker(
+        value=_date(2024, 4, 1),
+        layout=widgets.Layout(width="100%"),
+        disabled=True,
+    )
+    update_date_to_w = widgets.DatePicker(
+        value=_date(2024, 4, 10),
+        layout=widgets.Layout(width="100%"),
+        disabled=True,
+    )
+    update_advanced_dates_w = widgets.Checkbox(
+        value=False,
+        description="Use a seasonal date range (repeating across years)",
+        indent=False,
+        # Full row width, 99% not 100% (see the builder's advanced_dates_w).
+        layout=widgets.Layout(width="99%"),
+        disabled=True,
+    )
     update_daterange_mode_w = widgets.Dropdown(
         options=[
-            ("Standard (single window)", "standard"),
-            ("Seasonal (repeat across years)", "seasonal"),
-            ("Seasonal + year control", "seasonal_years"),
+            ("Seasonal (all available years)", "seasonal_all"),
+            ("Seasonal (year range)", "seasonal_range"),
+            ("Seasonal (selected years only)", "seasonal_selected"),
         ],
-        value="standard",
+        value="seasonal_all",
         description="",
         layout=widgets.Layout(width="99%"),
         disabled=True,
     )
 
     update_daterange_w = widgets.Text(
-        value='["2024-04-01", "2024-04-10"]',
+        value='{"season": ["04-01", "10-31"], "years": "all"}',
         description="",
-        placeholder='["2024-04-01", "2024-04-10"]',
+        placeholder='{"season": ["04-01", "10-31"], "years": "all"}',
         layout=widgets.Layout(width="99%"),
         disabled=True,
     )
+
+    # -- Band Update: bands the loaded cube's mission offers but the cube
+    # lacks (populated on load; empty selection = no band update).
+    update_bands_w = widgets.SelectMultiple(
+        options=[],
+        value=(),
+        rows=8,
+        layout=widgets.Layout(width="100%", height="180px"),
+        disabled=True,
+    )
+    update_bands_note_html = widgets.HTML("")
 
     # Export options. NetCDF / Zarr / COGs - editing shows the result in the
     # Result panel, so there is no separate "no export" mode; exporting saves
@@ -6652,13 +6764,14 @@ def datacube_editor():
     # Feature helpers
     # ---------------------------------------------------------------------
     def _daterange_mode_example(mode_value: str):
-        if mode_value == "standard":
-            return '["2024-04-01", "2024-04-10"]'
-        elif mode_value == "seasonal":
-            return '["04-01", "10-31"]'
-        elif mode_value == "seasonal_years":
-            return '{"season": ["04-01", "10-31"], "years": [2019, 2020, 2021]}'
-        return '["2024-04-01", "2024-04-10"]'
+        # Same seasonal modes/examples as the builder's Time Period group.
+        if mode_value == "seasonal_all":
+            return '{"season": ["04-01", "10-31"], "years": "all"}'
+        elif mode_value == "seasonal_range":
+            return '{"season": ["04-01", "10-31"], "years": "2019-2024"}'
+        elif mode_value == "seasonal_selected":
+            return '{"season": ["04-01", "10-31"], "years": [2019, 2021, 2023]}'
+        return '{"season": ["04-01", "10-31"], "years": "all"}'
 
     def _update_update_daterange_example(force=False):
         new_example = _daterange_mode_example(update_daterange_mode_w.value)
@@ -6818,11 +6931,32 @@ def datacube_editor():
         raise TypeError(f"Unsupported object type for cloud filtering: {type(obj)}")
 
     
+    def _resolve_update_daterange():
+        """Builder-style Time Period resolution: the simple From/To pickers, or
+        the seasonal text field when the 'advanced' checkbox is ticked. Returns
+        None when no dates are given - the update mechanism then defaults to
+        the cube's own time span (useful for a band-only update)."""
+        if update_advanced_dates_w.value:
+            return _parse_daterange_input(
+                update_daterange_mode_w.value, update_daterange_w.value
+            )
+        d_from = update_date_from_w.value
+        d_to = update_date_to_w.value
+        if d_from is None and d_to is None:
+            return None
+        if d_from is None or d_to is None:
+            raise ValueError("Please choose both a 'From' and a 'To' date.")
+        if d_from > d_to:
+            raise ValueError("The 'From' date is after the 'To' date - please swap them.")
+        return [d_from.isoformat(), d_to.isoformat()]
+
     def _apply_update_feature(obj):
         """
-        Update the loaded cube by requesting a new daterange via:
+        Update the loaded cube by requesting missing dates and/or bands via:
         - get_stac_layers(update=...) for Spectral_Temporal_Stack cubes
-        - get_cloud_layers(update=..., threshold=None) for Cloud_Stack cubes (probability only)
+          (dates + bands; the cloud/shadow strategy is restored from the attrs)
+        - get_cloud_layers(update=..., threshold=None) for Cloud_Stack cubes
+          (dates only, probability only)
         """
         if not enable_update_w.value:
             return obj, False, []
@@ -6831,9 +6965,13 @@ def datacube_editor():
         if not loaded_path:
             raise ValueError("No loaded cube path available for update.")
 
-        daterange = _parse_daterange_input(update_daterange_mode_w.value, update_daterange_w.value)
-        if not daterange:
-            raise ValueError("Please provide a daterange for Update Data Cube.")
+        daterange = _resolve_update_daterange()
+        add_bands = [str(b) for b in update_bands_w.value]
+        if not daterange and not add_bands:
+            raise ValueError(
+                "Please provide a daterange (Date Update) and/or select bands "
+                "to add (Band Update)."
+            )
 
         # Which kind of cube was loaded?
         loaded_var = state.get("loaded_var")
@@ -6847,6 +6985,14 @@ def datacube_editor():
         # Cloud cube update (Cloud_Stack) -> cloud probability only
         # ------------------------------------------------------------------
         if loaded_var == "Cloud_Stack":
+            if add_bands:
+                raise ValueError(
+                    "Band update is available for Spectral_Temporal_Stack cubes "
+                    "only. Clear the Band Update selection to update a "
+                    "Cloud_Stack cube."
+                )
+            if not daterange:
+                raise ValueError("Please provide a daterange for Update Data Cube.")
             # threshold is intentionally None: return probability only
             import inspect
 
@@ -6884,23 +7030,18 @@ def datacube_editor():
             return updated, True, msgs
 
         # ------------------------------------------------------------------
-        # Spectral cube update (existing behavior)
+        # Spectral cube update (missing dates and/or missing bands)
         # ------------------------------------------------------------------
-        loaded_ref = state.get("loaded_original")
-        cloud_masking_flag = False
-        try:
-            cloud_masking_flag = bool(
-                loaded_ref is not None and ("cloud_percentage" in loaded_ref.coords)
-            )
-        except Exception:
-            cloud_masking_flag = False
-
+        # cloud_masking is intentionally NOT passed: get_stac_layers restores
+        # the cube's exact cloud/shadow strategy from its attributes
+        # (cloud_status, shadow params), so new scenes AND new bands arrive
+        # masked - or kept - consistently with the stored data.
         updated = get_stac_layers(
             update=loaded_path,
             daterange=daterange,
+            bands=add_bands or None,
             max_cc=100,
             clip_raster=False,
-            cloud_masking=cloud_masking_flag,
             stats=None,
             aggregator=None,
             output=None,  # return in memory
@@ -6917,8 +7058,9 @@ def datacube_editor():
 
         msgs = [
             "update_data_cube applied (get_stac_layers(update=...))",
-            f"daterange={daterange}",
-            f"cloud_masking auto-detected from loaded cube: {cloud_masking_flag}",
+            f"daterange={daterange if daterange else 'cube time span (default)'}",
+            f"bands added: {', '.join(add_bands) if add_bands else 'none'}",
+            "cloud/shadow masking strategy restored from the cube's attributes",
             "Current working result was replaced with the updated Spectral_Temporal_Stack.",
         ]
         return updated, True, msgs
@@ -7200,6 +7342,16 @@ def datacube_editor():
 
         _populate_slice_widgets_from_current(select_all=True)
         _populate_indices_widget_from_current()
+        _populate_update_bands_from_current()
+        # Prefill the update From/To pickers with the cube's own span: a
+        # natural base to extend for new dates, and exactly right as-is for a
+        # band-only update (0 new dates, bands filled on every stored date).
+        try:
+            _t = loaded["time"].values
+            update_date_from_w.value = pd.Timestamp(_t.min()).date()
+            update_date_to_w.value = pd.Timestamp(_t.max()).date()
+        except Exception:
+            pass
         _set_editor_enabled(True)
         _refresh_gif_band_options()
         _update_gif_output_suggestion(force=True)
@@ -7300,6 +7452,7 @@ def datacube_editor():
                     state["loaded_var"] = None
                     state["loaded_original"] = None
                     state["current"] = None
+                    _populate_update_bands_from_current()  # clears the band list
                     _set_editor_enabled(False)
 
                     layer_select_w.options = _layer_dropdown_options(ds_loaded, layers)
@@ -7378,6 +7531,7 @@ def datacube_editor():
         enable_mask_clouds_w.value = False
         enable_clip_w.value = False
         enable_update_w.value = False
+        update_bands_w.value = ()
 
     def _on_edit_clicked(_):
         if state["current"] is None:
@@ -7964,32 +8118,87 @@ def datacube_editor():
 
 
 
-    # Update Data Cube feature
+    # Update Data Cube feature: two always-visible groups (Date Update / Band
+    # Update) below the enable checkbox, mirroring the builder's Time Period
+    # and Bands fields.
+    # The OR divider lives inside the simple box so it hides together with the
+    # From/To pickers when "Use a seasonal date range" is ticked (builder-style).
+    _upd_date_simple_box = widgets.VBox(
+        [
+            _stacked_field(update_date_from_w, "From"),
+            _stacked_field(update_date_to_w, "To"),
+            widgets.HTML(
+                "<div style='display:flex; align-items:center; gap:12px; margin:16px 0 12px 0;'>"
+                "<span style='flex:1; height:2px; background:#cbd5e1;'></span>"
+                "<span style='font-size:14px; font-weight:700; color:#6b7280; "
+                "letter-spacing:2px;'>OR</span>"
+                "<span style='flex:1; height:2px; background:#cbd5e1;'></span>"
+                "</div>"
+            ),
+        ],
+        layout=widgets.Layout(width="100%", gap="6px"),
+    )
+
+    # Daterange field with the red MM-DD hint between its label and the input
+    # box (exactly like the builder's advanced Time Period field).
+    _upd_dr_field = _stacked_field(update_daterange_w, "Daterange")
+    _upd_dr_field.children = [
+        _upd_dr_field.children[0],
+        widgets.HTML(
+            "<div style='font-size:12px; color:#b91c1c; margin:0;'>"
+            "season &rarr; <code>\"MM-DD\" - \"MM-DD\"</code></div>"
+        ),
+        _upd_dr_field.children[1],
+    ]
+    _upd_date_advanced_box = widgets.VBox(
+        [
+            _stacked_field_with_help(update_daterange_mode_w, "Season mode", "daterange_mode"),
+            _upd_dr_field,
+        ],
+        layout=widgets.Layout(width="100%", gap="6px", display="none"),
+    )
+
+    def _update_update_date_inputs_visibility(*_):
+        advanced = update_advanced_dates_w.value
+        _upd_date_simple_box.layout.display = "none" if advanced else ""
+        _upd_date_advanced_box.layout.display = "" if advanced else "none"
+
+    update_advanced_dates_w.observe(
+        lambda change: _update_update_date_inputs_visibility(), names="value"
+    )
+    _update_update_date_inputs_visibility()
+
+    update_date_group = _field_group(
+        "Date Update",
+        [_upd_date_simple_box, update_advanced_dates_w, _upd_date_advanced_box],
+        subtitle="Fetch the scenes missing from the cube in this period.",
+    )
+
+    update_band_group = _field_group(
+        "Band Update",
+        [update_bands_note_html, update_bands_w],
+        subtitle="Add mission bands the loaded cube does not contain yet.",
+    )
+
     update_feature_box = widgets.VBox(
         [
             _chainable_badge(False, "run on its own"),
-            #widgets.HTML("<b>Update Data Cube</b>"),
             widgets.HTML(
                 "<div style='font-size:12px; color:#666;'>"
-                "Fetch missing dates for the loaded date cube in the given date range. "
-                "Instead of re-building the entire data cube, it only computes the new scenes.<br>"
+                "Fetch missing dates and bands for the loaded data cube in the given date range. "
+                "Instead of re-building the entire data cube, it only computes the new scenes and bands.<br>"
                 "<b>This feature is recommended to be used alone without in sequence with other features.</b>"
                 "</div>"
             ),
-            widgets.VBox(
-                [
-                    enable_update_w,
-                    _stacked_field_with_help(update_daterange_mode_w, "Date Range Mode", "daterange_mode"),
-                    _stacked_field(update_daterange_w, "Daterange"),
-                ],
-                layout=widgets.Layout(width="100%", gap="6px"),
-            ),
+            enable_update_w,
+            update_date_group,
+            update_band_group,
         ],
         layout=widgets.Layout(width="100%", gap="8px"),
     )
 
     update_acc = widgets.Accordion(children=[update_feature_box], selected_index=None)
-    update_acc.set_title(0, "Update Data Cube")
+    update_acc.set_title(0, "Update Data Cube (Date and/or band)")
     update_acc.layout = widgets.Layout(width="99%")
 
 
@@ -8225,8 +8434,12 @@ def datacube_editor():
             "stats_select": stats_select_w,
             "edit_btn": edit_btn,
             "enable_update": enable_update_w,
+            "update_date_from": update_date_from_w,
+            "update_date_to": update_date_to_w,
+            "update_advanced_dates": update_advanced_dates_w,
             "update_daterange_mode": update_daterange_mode_w,
             "update_daterange": update_daterange_w,
+            "update_bands": update_bands_w,
             "aggregator": aggregator_w,
             "export_mode": export_mode_w,
             "export_target": export_target_w,

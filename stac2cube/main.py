@@ -1,6 +1,6 @@
 import os
 
-from .get_data import get_stac
+from .get_data import get_stac, _S2_BNUM_TO_COMMON
 from .vector_refiner import (
     proj_check,
     polygon_2_bbox,
@@ -196,13 +196,66 @@ def get_stac_layers(
         resolution = stac_parameters["resolution"]
         polygon = stac_parameters["polygon"]
         # geometry = stac_parameters["geometry"] # update-clip raster
+        user_bands = bands  # bands passed alongside update = bands to ADD
         bands = stac_parameters["spectral_bands"]
+        if not isinstance(bands, list):
+            # NetCDF stores the attr as an ndarray, Zarr returns a list.
+            bands = np.asarray(bands).tolist()
         indices = stac_parameters["indices"]
         if indices is None:
             # Cube built without any spectral indices - nothing to restore.
             indices = []
         elif not isinstance(indices, list):
             indices = indices.tolist()
+
+        # --- Band addition ---------------------------------------------------
+        # Bands passed alongside update are bands to ADD to the existing cube.
+        # The stored bands are always re-fetched too (the fresh lazy query
+        # needs them for the restored cloud/shadow strategy and for any newly
+        # found dates); update_stac then appends only the genuinely new bands
+        # to the dates already stored.
+        add_bands = []
+        if user_bands:
+            _stored = {str(b).lower() for b in bands}
+            _idx = {str(i).lower() for i in indices}
+            for b in user_bands:
+                bl = str(b).lower()
+                if mission == "sentinel_2_l2a":
+                    bl = _S2_BNUM_TO_COMMON.get(bl, bl)
+                if bl in _stored:
+                    if not q:
+                        print(f"Band '{bl}' is already in the cube - skipping.")
+                elif bl in _idx:
+                    if not q:
+                        print(
+                            f"'{bl}' is a spectral index already in the cube - skipping."
+                        )
+                elif bl not in add_bands:
+                    add_bands.append(bl)
+            bands = bands + add_bands
+
+        # --- Daterange ---------------------------------------------------------
+        # Default to the cube's own time span. When bands are being added the
+        # query MUST cover every existing date (otherwise the new bands would
+        # stay NaN on the uncovered dates), so a user-given range is widened
+        # to include the stored span.
+        stored_dr = stac_parameters["daterange"]
+        if daterange is None:
+            daterange = list(stored_dr)
+        elif add_bands:
+            _lo = min(np.datetime64(str(daterange[0])), np.datetime64(str(stored_dr[0])))
+            _hi = max(np.datetime64(str(daterange[1])), np.datetime64(str(stored_dr[1])))
+            _widened = [
+                np.datetime_as_string(_lo, unit="D"),
+                np.datetime_as_string(_hi, unit="D"),
+            ]
+            if _widened != [str(daterange[0]), str(daterange[1])] and not q:
+                print(
+                    f"Daterange widened to {_widened} so the added bands cover "
+                    "every stored date."
+                )
+            daterange = _widened
+
         if source is None:
             source = stac_parameters.get("stac_api", "element84")
         if resampling_method is None:
@@ -554,7 +607,7 @@ def get_stac_layers(
     # Done BEFORE export branching so update can also return in-memory result
     # when output=None.
     if update:
-        stac = update_stac(stac_existing=update, stac_updated=stac)
+        stac = update_stac(stac_existing=update, stac_updated=stac, new_bands=add_bands)
 
         # Re-attach CRS/transform metadata explicitly (safe after concat/update)
         stac.attrs["crs"] = crs
