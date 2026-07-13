@@ -666,8 +666,21 @@ def get_shadow_layers(
             export_stac(stack, output_shadows, crs, transform, compress=compress)
 
         if masking or output_masked is not None:
+            # Record the masking recipe so update mode can reproduce it. SCL
+            # clouds + shadow reuse the scl_shadow_masked status; s2cloudless (or
+            # a precomputed s2cloudless stack) + shadow use cloud_mask_<thr> plus
+            # the shadow params, mirroring how get_stac_layers stores them.
+            if cloud_source == "scl" and cloud is None:
+                _status = "scl_shadow_masked"
+            else:
+                _status = f"cloud_mask_{int(threshold)}"
+            _shadow_attrs = {
+                "nir_dark_threshold": nir_dark_threshold,
+                "shadow_proj_distance": proj_distance,
+            }
             masked = mask_stac_clouds(
-                cube, stack, "cloudshadow_mask", output_masked, compress=compress
+                cube, stack, "cloudshadow_mask", output_masked, compress=compress,
+                cloud_status=_status, shadow_attrs=_shadow_attrs,
             )
             if output_masked is None:
                 # The in-memory masked cube is lazy and still reads from the

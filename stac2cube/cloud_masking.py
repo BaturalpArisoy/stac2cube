@@ -217,18 +217,32 @@ def get_cloud_layers(
     #   - input_cube=<cube> -> derive dates only (probability / masks, no masking)
     reference_times = None
 
-    source_cube = masking or input_cube
-    if source_cube:
+    # `is not None`, not truthiness: masking/input_cube may be an in-memory
+    # DataArray, whose bool() is ambiguous.
+    source_cube = masking if masking is not None else input_cube
+    if source_cube is not None:
         stac_parameters = get_stac_parameters(source_cube)
         polygon = stac_parameters["polygon"]
         daterange = stac_parameters["daterange"]
 
-        # Use the exact timestamps from the initial cube
-        with open_cube(source_cube) as ds:
-            if "Spectral_Temporal_Stack" in ds:
-                reference_times = ds["Spectral_Temporal_Stack"].time.values
-            else:
-                reference_times = ds["time"].values
+        # Use the exact timestamps from the initial cube. Accept an in-memory
+        # cube too (update mode masks the freshly built new scenes directly,
+        # without a round-trip to disk); open_cube only handles paths.
+        if isinstance(source_cube, (str, os.PathLike)):
+            with open_cube(source_cube) as ds:
+                if "Spectral_Temporal_Stack" in ds:
+                    reference_times = ds["Spectral_Temporal_Stack"].time.values
+                else:
+                    reference_times = ds["time"].values
+        else:
+            _sc = source_cube
+            if isinstance(_sc, xr.Dataset):
+                _sc = (
+                    _sc["Spectral_Temporal_Stack"]
+                    if "Spectral_Temporal_Stack" in _sc
+                    else _sc[list(_sc.data_vars)[0]]
+                )
+            reference_times = _sc.time.values
 
     if update:
         stac_parameters = get_stac_parameters(update)
@@ -461,7 +475,7 @@ def get_cloud_layers(
     
 
     # ---- Masking (kept as before; typically not combined with update) ----
-    if masking:
+    if masking is not None:
         if threshold is None:
             raise ValueError("Error: 'threshold' must be set when 'masking' is used.")
         if isinstance(threshold, list):
@@ -470,20 +484,25 @@ def get_cloud_layers(
         thr = int(threshold)
         mask_layer = f"cloud_mask_{thr}"
 
-        if output_masked is None:
+        # Derive a default export path only when masking is a path. For an
+        # in-memory cube (update mode) leave output_masked=None so
+        # mask_stac_clouds returns the masked cube in memory.
+        if output_masked is None and isinstance(masking, (str, os.PathLike)):
             dirname, filename = os.path.split(masking)
             name, ext = os.path.splitext(filename)
             output_masked = os.path.join(dirname, f"{name}_masked_{thr}{ext}")
 
         return mask_stac_clouds(
-            masking, cloud_only_stack, mask_layer, output_masked, compress=compress
+            masking, cloud_only_stack, mask_layer, output_masked, compress=compress,
+            cloud_status=mask_layer,  # e.g. "cloud_mask_50" - self-encodes threshold
         )
 
     # Always return in-memory stack
     return cloud_only_stack
 
 
-def mask_stac_clouds(stac, cloud, mask_layer, output=None, compress=False):
+def mask_stac_clouds(stac, cloud, mask_layer, output=None, compress=False,
+                     cloud_status=None, shadow_attrs=None):
     # Track datasets we open here so we can close them before returning.
     # Leaving these handles open makes each repeated call stack another open
     # handle onto the same netCDF/HDF5 files, which on Windows can crash the
@@ -510,13 +529,25 @@ def mask_stac_clouds(stac, cloud, mask_layer, output=None, compress=False):
         masked_stac = stac.where(cloud_mask == 0)
 
         # Cloud percentage per time slice, measured against the observable AOI
-        # footprint: pixels missing in every scene (incl. anything outside a
-        # non-rectangular clip) are excluded from numerator and denominator.
-        pct = compute_cloud_percentage(masked_stac)
+        # footprint. Pass the mask boolean explicitly: without it the metric
+        # cannot tell a genuine swath/no-data gap from a cloud (both are NaN in
+        # the masked cube) and would count missing swaths as cloud, and it would
+        # depend on the date range. With the mask, gaps are excluded and the
+        # percentage matches a full build (see compute_cloud_percentage).
+        pct = compute_cloud_percentage(masked_stac, cloud_mask=(cloud_mask != 0))
         if pct is not None:
             masked_stac = masked_stac.assign_coords(
                 cloud_percentage=("time", np.asarray(pct.data))
             )
+
+        # Record how this cube was masked so update mode can reproduce it on new
+        # scenes (self-encoding threshold, e.g. cloud_status="cloud_mask_50";
+        # shadow_attrs carry the shadow params for the s2cloudless+shadow combo).
+        if cloud_status is not None:
+            masked_stac.attrs["cloud_status"] = cloud_status
+        if shadow_attrs:
+            for _k, _v in shadow_attrs.items():
+                masked_stac.attrs[_k] = _v
 
         if output is not None:
             # export_stac reads through the still-open source handles here,

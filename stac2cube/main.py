@@ -33,6 +33,34 @@ def _human_size(nbytes):
         size /= 1024.0
 
 
+def _mask_new_scenes_s2cloudless(
+    stac, threshold, shadow, nir_dark_threshold, proj_distance
+):
+    """Mask an in-memory (unmasked) L2A cube with s2cloudless for update mode.
+
+    ``stac`` holds only the newly added dates, so the L1C download + detector
+    (and optional shadow projection) run on those scenes alone. Returns the
+    masked Spectral_Temporal_Stack. Imported lazily: cloud_masking imports this
+    module, so a top-level import would be circular at package load.
+    """
+    if shadow:
+        from .shadow_masking import get_shadow_layers
+
+        _stack, masked = get_shadow_layers(
+            input_cube=stac,
+            cloud_source="s2cloudless",
+            threshold=threshold,
+            nir_dark_threshold=nir_dark_threshold,
+            proj_distance=proj_distance,
+            masking=True,
+        )
+        return masked
+
+    from .cloud_masking import get_cloud_layers
+
+    return get_cloud_layers(masking=stac, threshold=threshold, output_masked=None)
+
+
 def get_stac_layers(
     mission=None,
     polygon=None,
@@ -189,8 +217,18 @@ def get_stac_layers(
                 return results, masks
             return results
 
+    # s2cloudless update reproduction state (set in the cloud_status restore
+    # below). s2cloudless masking is a post-process, not part of the L2A query,
+    # so these drive a masking pass applied to the new scenes before the merge.
+    _s2c_update = False
+    _s2c_threshold = None
+    _s2c_shadow = False
+    _s2c_nir_dark = nir_dark_threshold
+    _s2c_proj = shadow_proj_distance
+
     if update:
         stac_parameters = get_stac_parameters(update)
+        existing_times = stac_parameters["times"]
 
         mission = stac_parameters["mission"]
         resolution = stac_parameters["resolution"]
@@ -299,6 +337,44 @@ def get_stac_layers(
                         "This cube was cloud-shadow-masked but its stored bands "
                         "lack 'nir', which shadow projection requires."
                     )
+            elif cs.startswith("cloud_mask_"):
+                # s2cloudless-masked cube. Masking is a POST-process (a separate
+                # L1C download + detector), not part of the L2A query, so build
+                # the new scenes UNMASKED here and mask them with s2cloudless
+                # below, before the merge. The threshold is self-encoded in the
+                # status name; the shadow params (if stored) mean s2cloudless +
+                # shadow was applied.
+                if add_bands:
+                    raise ValueError(
+                        "Band addition is not supported for s2cloudless-masked "
+                        "cubes yet - update dates only (clear the band selection)."
+                    )
+                if aggregator:
+                    raise ValueError(
+                        "Cannot update an s2cloudless-masked cube with an "
+                        "aggregator (masking needs the per-scene time dimension)."
+                    )
+                try:
+                    _s2c_threshold = int(cs.rsplit("_", 1)[1])
+                except (ValueError, IndexError):
+                    raise ValueError(
+                        f"Cannot read the s2cloudless threshold from "
+                        f"cloud_status={cs!r} (expected e.g. 'cloud_mask_50')."
+                    )
+                cloud_masking = False   # unmasked L2A build; masked below
+                _s2c_update = True
+                _spd = stac_parameters.get("shadow_proj_distance")
+                _ndt = stac_parameters.get("nir_dark_threshold")
+                _s2c_shadow = _spd is not None
+                if _s2c_shadow:
+                    _s2c_proj = float(_spd)
+                    if _ndt is not None:
+                        _s2c_nir_dark = float(_ndt)
+                    if not bands or "nir" not in [str(b).lower() for b in bands]:
+                        raise ValueError(
+                            "This cube was s2cloudless + shadow masked but its "
+                            "stored bands lack 'nir', which shadow needs."
+                        )
             else:  # clouds_not_detected
                 cloud_masking = False
         # NOTE: do NOT force output=update here anymore.
@@ -342,6 +418,29 @@ def get_stac_layers(
     )
     crs = stac.spatial_ref.projected_crs_name
     transform = stac.rio.transform()
+
+    # In update mode, restrict the fresh query to the dates the existing cube
+    # is MISSING before any masking / shadow / cloud% work runs. Those steps
+    # read pixels eagerly (shadow especially), so without this they would
+    # re-download and re-process every already-stored date only to discard it
+    # in update_stac. Skipped when adding bands (band addition needs the stored
+    # dates in the fresh query). Subsetting is safe for baselines (scale_factor
+    # re-aligns via .sel(time=...)) and leaves the new dates' cloud_percentage
+    # identical (a pixel is masked/observed per its own scene; the cross-scene
+    # footprint never flips a new date's count).
+    #
+    # _has_new_dates=False means the cube is already up to date. The masking
+    # passes below are then SKIPPED entirely: they would recompute stored dates
+    # (s2cloudless would re-run the L1C detector on existing scenes) only for
+    # update_stac to discard the result and return the cube unchanged.
+    _has_new_dates = True
+    if update and not add_bands:
+        _existing_days = np.asarray(existing_times).astype("datetime64[D]")
+        _fetched_days = stac["time"].values.astype("datetime64[D]")
+        _is_new = ~np.isin(_fetched_days, _existing_days)
+        _has_new_dates = bool(_is_new.any())
+        if _has_new_dates and not _is_new.all():
+            stac = stac.isel(time=np.nonzero(_is_new)[0])
 
     # Cloud masking
     cloud_bool = None
@@ -461,7 +560,11 @@ def get_stac_layers(
     if not aggregator:
         stac["time"] = stac["time"].dt.floor("D")
 
-        if cloud_masking is True:
+        # _has_new_dates guard: in update mode with nothing new to add, these
+        # passes (shadow projection, cloud%) read pixels eagerly and would
+        # re-download + re-process the stored dates only for update_stac to
+        # discard them and return the cube unchanged.
+        if cloud_masking is True and _has_new_dates:
             # ---- Cloud shadow detection (GEE s2cloudless approach) ----------
             # Runs on the final (clipped, day-floored) grid: clouds are the SCL
             # cloud boolean, shadows are dark non-water pixels inside each
@@ -607,6 +710,25 @@ def get_stac_layers(
     # Done BEFORE export branching so update can also return in-memory result
     # when output=None.
     if update:
+        if _s2c_update and _has_new_dates:
+            # Reproduce s2cloudless masking on the freshly built (unmasked) new
+            # scenes, then merge. The masking helpers read these attrs, which the
+            # update path does not otherwise set (the metadata block is fresh-
+            # build only).
+            stac.attrs.setdefault("mission", mission)
+            stac.attrs["spectral_bands"] = bands
+            stac.attrs["bbox"] = (
+                polygon if isinstance(polygon, list) else polygon_2_bbox(polygon)
+            )
+            stac.attrs["crs"] = crs
+            stac.attrs["transform"] = transform
+            stac = _mask_new_scenes_s2cloudless(
+                stac,
+                threshold=_s2c_threshold,
+                shadow=_s2c_shadow,
+                nir_dark_threshold=_s2c_nir_dark,
+                proj_distance=_s2c_proj,
+            )
         stac = update_stac(stac_existing=update, stac_updated=stac, new_bands=add_bands)
 
         # Re-attach CRS/transform metadata explicitly (safe after concat/update)

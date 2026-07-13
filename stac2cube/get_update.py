@@ -85,6 +85,9 @@ def get_stac_parameters(stac_existing):
         # Shadow projection params (present only on scl_shadow_masked cubes).
         "nir_dark_threshold": stac_existing.attrs.get("nir_dark_threshold"),
         "shadow_proj_distance": stac_existing.attrs.get("shadow_proj_distance"),
+        # Full stored time axis (day precision) - lets update mode subset the
+        # fresh query to the missing dates before any masking work.
+        "times": np.asarray(stac_existing.time.values),
     }
 
     return stac_parameters

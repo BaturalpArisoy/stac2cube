@@ -28,18 +28,27 @@ def compute_cloud_percentage(stac, aoi_mask=None, cloud_mask=None):
     Per-time cloud percentage computed against the AOI footprint.
 
     Semantics:
-      * AOI footprint = pixels inside ``aoi_mask`` (whole extent if None).
-      * Genuine-missing pixels -- NaN in *every* time step inside the AOI -- are
-        treated as no-data and excluded from BOTH numerator and denominator.
+      * AOI footprint = imaged land, intersected with ``aoi_mask`` if given.
+      * Genuine-missing pixels -- never imaged inside the AOI -- are treated as
+        no-data and excluded from BOTH numerator and denominator.
       * Numerator(t) = observable AOI pixels that are clouds at time t.
 
     Two ways to count clouds:
       * ``cloud_mask=None`` (default, masked cubes): clouds are the NaN pixels
         left behind by masking. Counted per band, denominator scaled by nbands.
-      * ``cloud_mask`` given (keep-clouds cubes): clouds are not NaN'd into the
-        cube, so the per-pixel cloud boolean (time, y, x) is supplied directly.
-        It is aligned to the (possibly clipped) cube grid by label; the cube's
-        observable footprint is still used as the denominator.
+      * ``cloud_mask`` given (keep-clouds AND masked cubes in the build/update
+        path): the per-pixel cloud boolean (time, y, x) is supplied directly and
+        aligned to the (possibly clipped) cube grid by label.
+
+    The observable footprint is "imaged at least once" where a pixel counts as
+    imaged on a date if it holds data OR is flagged cloud by ``cloud_mask``. The
+    cloud term is what makes the metric correct for MASKED cubes and independent
+    of the date range: a masked cloud pixel is NaN, so without it a pixel cloudy
+    on *every* date in the cube would be indistinguishable from no-data and be
+    dropped from the usable-land denominator, undercounting cloud% and making it
+    shift as dates are added/removed. Counting it via the cloud boolean keeps
+    persistently-cloudy land in the denominator. For keep-clouds cubes cloud
+    pixels keep their values, so the cloud term changes nothing there.
 
     For single-time cubes cloud and missing cannot be separated temporally, so
     all in-AOI NaN are counted as cloud (missing pixels assumed negligible).
@@ -53,11 +62,25 @@ def compute_cloud_percentage(stac, aoi_mask=None, cloud_mask=None):
     nbands = int(stac.sizes.get("band", 1))
     isnull = stac.isnull()
 
+    # Align the cloud boolean to the cube grid up front - it is also needed to
+    # build an honest footprint below. Clip may have dropped rows/cols; time is
+    # 1:1 in order, so re-stamp the cube's (floored) time.
+    if cloud_mask is not None:
+        cm = cloud_mask.sel(y=stac["y"], x=stac["x"])
+        cm = cm.assign_coords(time=stac["time"]).astype(bool)
+    else:
+        cm = None
+
     if stac.sizes["time"] > 1:
-        # Observable = valid at least once -> drops pixels missing in every scene
-        # (this also drops clipped-away pixels, which are NaN in every scene).
-        non_reduce = [d for d in ("time", "band") if d in stac.dims]
-        footprint = (~isnull).any(dim=non_reduce)  # (y, x)
+        # Imaged = holds data (~isnull) OR is flagged cloud. Cloud-flagged land
+        # is imaged land that merely happens to be NaN in a masked cube, so
+        # counting it keeps persistently-cloudy land in the footprint instead of
+        # mistaking it for no-data. Genuine no-data (never imaged, incl.
+        # clipped-away pixels) stays dropped.
+        imaged = (~isnull).any(dim="band") if "band" in isnull.dims else (~isnull)
+        if cm is not None:
+            imaged = imaged | cm
+        footprint = imaged.any(dim="time")  # (y, x)
     else:
         footprint = xr.DataArray(
             np.ones((stac.sizes["y"], stac.sizes["x"]), dtype=bool),
@@ -68,17 +91,13 @@ def compute_cloud_percentage(stac, aoi_mask=None, cloud_mask=None):
     if aoi_mask is not None:
         footprint = footprint & aoi_mask.astype(bool)
 
-    if cloud_mask is not None:
+    if cm is not None:
         # Count clouds from the SCL/QA boolean rather than from NaN holes. This is
         # what keeps a *partial* scene honest: when a polygon straddles a swath /
         # tile edge, the satellite images only part of the AOI on a given date and
-        # the rest is genuine NO_DATA (NaN here for sources that fill gaps with
-        # NaN, e.g. Planetary Computer). Those gap pixels are NOT clouds - SCL tags
+        # the rest is genuine NO_DATA. Those gap pixels are NOT clouds - SCL tags
         # them class 0 - so counting NaN would wrongly read a half-empty scene as
-        # ~50% cloud. Align cm to the cube grid (clip may have dropped rows/cols);
-        # time is 1:1 in order, so re-stamp the cube's (floored) time.
-        cm = cloud_mask.sel(y=stac["y"], x=stac["x"])
-        cm = cm.assign_coords(time=stac["time"]).astype(bool)
+        # ~50% cloud.
         sp_dims = [d for d in ("y", "x") if d in cm.dims]
 
         # Per-date genuine no-data: NaN in the cube but NOT flagged as cloud by cm.
