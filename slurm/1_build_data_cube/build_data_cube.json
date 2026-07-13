@@ -8,6 +8,7 @@
     "bands": ["blue", "green", "red", "nir"],
     "indices": ["ndvi", "ndwi"],
     "max_cc": 100,
+    "scene_cloud_coverage": null,
     "cloud_masking": true,
     "output": "/dss/.../test.nc",
     "clip_raster": false,

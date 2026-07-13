@@ -68,6 +68,7 @@ def get_stac_layers(
     daterange=None,
     bands=None,
     max_cc=None,
+    scene_cloud_coverage=None,
     clip_raster=None,
     cloud_masking=None,
     keep_clouds=None,
@@ -131,6 +132,39 @@ def get_stac_layers(
                 "(dark-pixel test of the GEE method)."
             )
 
+    # --- Scene-level cloud coverage filter preconditions ----------------------
+    # scene_cloud_coverage is the headless twin of the GUI Result panel's
+    # "Max cloud %" box: after the cube is built, only scenes whose
+    # cloud_percentage is <= the threshold are kept (and exported). Values
+    # >= 100 pass everything through, exactly like the GUI box.
+    if scene_cloud_coverage is not None:
+        try:
+            _scc = float(scene_cloud_coverage)
+        except (TypeError, ValueError):
+            raise ValueError(
+                "scene_cloud_coverage must be a number between 0 and 100."
+            )
+        if not (0.0 <= _scc <= 100.0):
+            raise ValueError(
+                "scene_cloud_coverage must be between 0 and 100 (percent)."
+            )
+        if update:
+            raise ValueError(
+                "scene_cloud_coverage is not supported in update mode: it would "
+                "permanently drop already-stored dates from the existing cube. "
+                "Update first, then filter with cloud_masking.cloud_filter."
+            )
+        if cloud_masking is not True:
+            raise ValueError(
+                "scene_cloud_coverage requires cloud_masking=True: the per-scene "
+                "cloud_percentage it filters on is derived from the detected "
+                "clouds (keep_clouds=True works too - detection without masking)."
+            )
+    # With a temporal aggregator, the composite must describe the SURVIVING
+    # scenes (GUI order: build -> filter -> composite), so the collapse is
+    # deferred until after the scene filter instead of running at build time.
+    _defer_agg = bool(aggregator) and scene_cloud_coverage is not None and float(scene_cloud_coverage) < 100.0
+
     # --- Native multi-feature batching ---------------------------------------
     # When a polygon FILE containing more than one feature is supplied (i.e. not
     # a bbox list and not update mode), generate one data cube per feature
@@ -165,6 +199,7 @@ def get_stac_layers(
                     # to the same list (e.g. cloud-mask band injection in get_stac)
                     bands=list(bands) if bands else bands,
                     max_cc=max_cc,
+                    scene_cloud_coverage=scene_cloud_coverage,
                     clip_raster=clip_raster,
                     cloud_masking=cloud_masking,
                     keep_clouds=keep_clouds,
@@ -538,7 +573,8 @@ def get_stac_layers(
 
     # Calculate stats image (optional)
     # Aggregator (optional): collapses time dimension
-    if aggregator:
+    # (deferred when a scene_cloud_coverage filter is active - see _defer_agg)
+    if aggregator and not _defer_agg:
         if aggregator == "mean":
             stac = stac.mean(dim="time", skipna=True)
         elif aggregator == "median":
@@ -557,7 +593,7 @@ def get_stac_layers(
         stac = clip_stac(stac, polygon, crs)  # delete write_crs in clip_stac
 
     # Finalizing
-    if not aggregator:
+    if not aggregator or _defer_agg:
         stac["time"] = stac["time"].dt.floor("D")
 
         # _has_new_dates guard: in update mode with nothing new to add, these
@@ -695,6 +731,52 @@ def get_stac_layers(
                 stac.attrs["spectral_bands"] = [
                     b for b in stac.attrs.get("spectral_bands", []) if b != "scl"
                 ]
+
+        # ---- Scene-level cloud filter (headless "Max cloud %") --------------
+        # Same semantics as the GUI Result panel box: keep only timesteps with
+        # cloud_percentage <= threshold, via positional time selection (isel),
+        # so nothing is computed and the data stays lazy. thr >= 100 was
+        # already turned into a no-op by the precondition block. The binary
+        # cloud-mask file (cloud_mask_output), written above, keeps ALL dates -
+        # matching the GUI, whose held mask is also exported unfiltered.
+        if scene_cloud_coverage is not None and float(scene_cloud_coverage) < 100.0:
+            if "cloud_percentage" not in stac.coords:
+                raise ValueError(
+                    "scene_cloud_coverage was requested but the built cube "
+                    "carries no cloud_percentage coordinate (cloud detection "
+                    "yielded no per-scene percentage for this mission/setup)."
+                )
+            _thr = float(scene_cloud_coverage)
+            _keep = np.asarray((stac["cloud_percentage"] <= _thr).values)
+            if not _keep.any():
+                _mn = float(np.nanmin(np.asarray(stac["cloud_percentage"].values)))
+                raise ValueError(
+                    f"scene_cloud_coverage={_thr:g}% keeps no scenes: the least "
+                    f"cloudy scene has {_mn:.1f}% cloud cover. Raise the "
+                    "threshold (or widen the daterange) and rerun."
+                )
+            if not _keep.all():
+                _n_total = int(_keep.size)
+                stac = stac.isel(time=np.flatnonzero(_keep))
+                if not q:
+                    print(
+                        f"scene_cloud_coverage={_thr:g}%: kept "
+                        f"{int(_keep.sum())}/{_n_total} scenes.",
+                        flush=True,
+                    )
+
+        # Deferred temporal composite: collapse the SURVIVING scenes (GUI
+        # order build -> filter -> composite). keep_attrs preserves the cube
+        # metadata through the reduction, as the GUI composite does.
+        if _defer_agg:
+            if aggregator == "mean":
+                stac = stac.mean(dim="time", skipna=True, keep_attrs=True)
+            elif aggregator == "median":
+                stac = stac.median(dim="time", skipna=True, keep_attrs=True)
+            else:
+                raise ValueError(
+                    "Invalid aggregator. Please select either 'mean' or 'median'."
+                )
 
     stac.attrs["crs"] = crs
     stac.attrs["transform"] = transform

@@ -30,6 +30,7 @@ The easiest and safest way to produce a valid config is the **Data Cube Builder*
     "bands": ["blue", "green", "red", "nir"],
     "indices": ["ndvi", "ndwi"],
     "max_cc": 100,
+    "scene_cloud_coverage": 30,
     "cloud_masking": true,
     "output": "/dss/.../test.nc",
     "clip_raster": false,

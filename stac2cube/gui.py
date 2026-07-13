@@ -2905,6 +2905,14 @@ def datacube_builder(missions_func=missions):
             else None
         )
 
+        # Result panel's "Max cloud %" -> scene_cloud_coverage. Only meaningful
+        # with cloud detection on (the cloud_percentage coord it filters does
+        # not exist otherwise), and 100 means "keep everything" - emit null for
+        # both so the JSON only carries the parameter when it actually filters.
+        scene_cloud_coverage = None
+        if cloud_masking is True and int(result_cloud_max_w.value) < 100:
+            scene_cloud_coverage = int(result_cloud_max_w.value)
+
         json_payload = {
             "parameters": {
                 "mission": mission_for_json,
@@ -2915,6 +2923,7 @@ def datacube_builder(missions_func=missions):
                 "bands": bands,
                 "indices": indices,
                 "max_cc": max_cc,
+                "scene_cloud_coverage": scene_cloud_coverage,
                 "cloud_masking": cloud_masking,
                 "keep_clouds": keep_clouds,
                 "cloud_mask_output": cloud_mask_output,
@@ -4955,17 +4964,18 @@ def datacube_builder(missions_func=missions):
     result_acc.set_title(0, "Result")
     result_acc.layout = widgets.Layout(width="99%")
 
-    # Top action row: build the preview + copy JSON. Exporting is a separate,
-    # deliberate step that lives with the Export Options section further down.
+    # Top action row: build the preview. Exporting is a separate, deliberate
+    # step that lives with the Export Options section further down.
     action_row = widgets.HBox(
-        [generate_btn, copy_json_btn],
+        [generate_btn],
         layout=widgets.Layout(gap="8px", flex_flow="row wrap"),
     )
 
     # The Export Current Result button sits right under the Export Options
     # accordion so the "choose format -> export" flow reads top to bottom.
+    # Copy JSON rides along here: both are ways of taking the result away.
     export_action_row = widgets.HBox(
-        [export_result_btn],
+        [export_result_btn, copy_json_btn],
         layout=widgets.Layout(gap="8px", flex_flow="row wrap", margin="6px 0 0 0"),
     )
 
