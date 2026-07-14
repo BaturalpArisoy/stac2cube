@@ -464,7 +464,8 @@ COREG_HELP_MD = r"""
 
 **iteration**
 - Number of shift-ESTIMATION passes. The data itself is always resampled exactly once at the end, so extra iterations refine the estimated shifts without degrading the pixels.
-- Default is `1`, which is usually enough; `2` can help difficult time series.
+- `"auto"` measures the cube after every pass (edge roughness of the matching band) and keeps a refinement pass only when it improves the cube by more than 2%; otherwise the pass is discarded and iteration stops (max 5 passes).
+- An integer runs exactly that many passes; `1` is usually already converged with the consensus estimator.
 - If the first_scene_mode is set to `composite`, later passes use `first`.
 
 **cloud_mask**

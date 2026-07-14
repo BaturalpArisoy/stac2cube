@@ -523,6 +523,26 @@ def _estimate_shifts_pass(
     return shifts, dropped, stats
 
 
+def _edge_roughness(data_tyxb, band_idx):
+    """Internal cube-quality metric for auto-iteration: mean |second
+    temporal difference| of the matching band over EDGE pixels (top-decile
+    spatial gradient of the temporal median). Misregistration makes
+    land-cover boundary pixels flicker between classes, so this drops as
+    alignment improves; it is insensitive to uniform seasonal change."""
+    v = data_tyxb.isel(band=band_idx - 1).values  # (time, y, x)
+    med = np.nanmedian(v, axis=0)
+    gy, gx = np.gradient(med)
+    grad = np.hypot(gy, gx)
+    valid = np.isfinite(grad)
+    if not valid.any():
+        return np.nan
+    edge = grad >= np.nanpercentile(grad[valid], 90)
+    d2 = np.abs(v[:-2] - 2 * v[1:-1] + v[2:])
+    with np.errstate(invalid="ignore"):
+        rough = np.nanmean(d2, axis=0)
+    return float(np.nanmean(rough[edge]))
+
+
 # ----------------------------------------------------------------------
 # Main function (sliding-grid, consensus)
 # ----------------------------------------------------------------------
@@ -566,11 +586,17 @@ def coregister_cube(
         thresholds, which did not transfer across AOI sizes).
     max_cloud_update_ref : float or None
         Scenes cloudier than this never become the reference.
-    iteration : int
+    iteration : int or "auto"
         Estimation passes. Pass k re-estimates residual shifts on an
         in-memory shifted copy; the OUTPUT is always the original data
         warped once by the total shift (the old behavior resampled the
         cube once per iteration, blurring it).
+        "auto" measures the cube after every pass (edge roughness of the
+        matching band) and only keeps a refinement pass when it improves
+        the cube by more than 2%; otherwise the pass is discarded and
+        iteration stops (max 5 passes). With the consensus estimator,
+        pass 1 is usually already converged (measured), so "auto"
+        typically keeps 1 pass and proves that a second was not needed.
     min_win_px : int
         Discard candidate windows whose actual matching window (after
         AROSICS clips it to the AOI) is smaller than this in either
@@ -602,11 +628,18 @@ def coregister_cube(
             stacklevel=2,
         )
 
-    if isinstance(iteration, bool) or not isinstance(iteration, (int, np.integer)):
-        raise TypeError("iteration must be an integer >= 1.")
-    iteration = int(iteration)
-    if iteration < 1:
-        raise ValueError("iteration must be an integer >= 1 (cannot be 0).")
+    AUTO_MAX_PASSES = 5
+    AUTO_MIN_IMPROVE = 0.02  # a pass must improve edge roughness by > 2%
+
+    auto_iteration = isinstance(iteration, str) and iteration.lower() == "auto"
+    if auto_iteration:
+        iteration = AUTO_MAX_PASSES
+    else:
+        if isinstance(iteration, bool) or not isinstance(iteration, (int, np.integer)):
+            raise TypeError("iteration must be an integer >= 1 or 'auto'.")
+        iteration = int(iteration)
+        if iteration < 1:
+            raise ValueError("iteration must be an integer >= 1 (cannot be 0).")
 
     # ------------------------------------------------------------------
     # Load + filter
@@ -671,7 +704,11 @@ def coregister_cube(
     print(
         f"Co-registration: {times.size} scenes, matching on band "
         f"'{band_label}', {len(candidates)} window positions/scene, "
-        f"{iteration} estimation pass(es)"
+        + (
+            f"auto iterations (max {AUTO_MAX_PASSES})"
+            if auto_iteration
+            else f"{iteration} estimation pass(es)"
+        )
         + (", clouds masked for estimation only" if mask_da is not None else "")
         + "."
     )
@@ -685,6 +722,7 @@ def coregister_cube(
     est_data = est_source
     est_times = times
     mode = first_scene_mode
+    quality_prev = None
 
     for it in range(1, iteration + 1):
         shifts, dropped, stats = _estimate_shifts_pass(
@@ -701,31 +739,65 @@ def coregister_cube(
             max_cloud_update_ref,
             _cloud_lookup,
             min_win_px,
-            desc=f"Estimating shifts (pass {it}/{iteration})",
+            desc=(
+                f"Estimating shifts (pass {it}"
+                + ("/auto)" if auto_iteration else f"/{iteration})")
+            ),
         )
-        dropped_all.extend(dropped)
-        for t, (sx, sy) in shifts.items():
-            px, py = total_shifts.get(t, (0.0, 0.0))
-            total_shifts[t] = (px + sx, py + sy)
-        for t, s in stats.items():
-            last_stats[t] = s
 
-        kept_times = np.array([t for t in est_times if t in shifts])
-        if kept_times.size == 0:
+        cand_times = np.array([t for t in est_times if t in shifts])
+        if cand_times.size == 0:
             raise RuntimeError("No scenes were kept. Output stack would be empty.")
-        est_times = kept_times
+        cand_totals = dict(total_shifts)
+        for t, (sx, sy) in shifts.items():
+            px, py = cand_totals.get(t, (0.0, 0.0))
+            cand_totals[t] = (px + sx, py + sy)
 
-        if it < iteration:
-            # shifted in-memory copy for the next estimation pass only;
-            # the final output is still warped once from the ORIGINAL data
+        # shifted in-memory copy: input of the next pass, and in auto mode
+        # the object the quality guard measures. The final OUTPUT is still
+        # warped once from the ORIGINAL data.
+        shifted_data = None
+        if auto_iteration or it < iteration:
             shifted = []
-            for t in est_times:
+            for t in cand_times:
                 da = _warp_scene_yxb(
-                    est_source.sel(time=t), *total_shifts[t], geotransform, crs_wkt
+                    est_source.sel(time=t), *cand_totals[t], geotransform, crs_wkt
                 ).transpose("y", "x", "band")
                 shifted.append(da.assign_coords(time=t))
-            est_data = xr.concat(shifted, dim="time")
-            # the composite start only makes sense against raw scenes
+            shifted_data = xr.concat(shifted, dim="time")
+
+        # auto mode: accept a refinement pass only when it measurably
+        # improves the cube. All refinement strategies tested re-measure
+        # estimation noise once the consensus has converged (usually after
+        # pass 1), so the guard is on cube quality itself, not on the size
+        # of the corrections.
+        if auto_iteration:
+            q = _edge_roughness(shifted_data, band_idx)
+            if it == 1:
+                q0 = _edge_roughness(est_source.sel(time=cand_times), band_idx)
+                print(
+                    f"Pass 1: edge roughness {q0:.4f} -> {q:.4f} "
+                    f"({(q0 - q) / q0:+.1%})"
+                )
+            else:
+                improve = (quality_prev - q) / quality_prev if quality_prev else 0.0
+                print(f"Pass {it}: edge roughness {q:.4f} ({improve:+.1%} vs previous)")
+                if improve <= AUTO_MIN_IMPROVE:
+                    print(
+                        f"Auto-iteration: converged - pass {it} did not improve "
+                        f"the cube, keeping {it - 1} pass(es)."
+                    )
+                    break  # discard this pass entirely
+            quality_prev = q
+
+        # accept the pass
+        total_shifts = cand_totals
+        est_times = cand_times
+        dropped_all.extend(dropped)
+        last_stats.update(stats)
+
+        if it < iteration:
+            est_data = shifted_data
             if mode == "composite":
                 mode = "first"
 

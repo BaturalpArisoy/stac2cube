@@ -274,6 +274,55 @@ def _with_help_left(widget, help_key, label_text=None):
     return _field_with_help(widget, label_text, PARAM_HELP_HTML.get(help_key, ""))
 
 
+def _polygon_coreg_size_hint(polygon, resolution=None):
+    """Warn (string) when the AOI is likely too small for good
+    co-registration; None when it is fine or cannot be judged.
+
+    Co-registration accuracy is texture-limited on small areas (measured
+    ~0.3 px residual on a 2.9 x 1.2 km AOI); the matching window is
+    256 px, so the suggested minimum bounding-box edge is 256 * resolution
+    (2.6 km at 10 m). Users who need a small cube can build a larger one,
+    co-register it, and clip afterwards.
+    """
+    try:
+        import geopandas as gpd
+        from shapely.geometry import box, shape
+
+        if isinstance(polygon, (list, tuple)) and len(polygon) == 4:
+            gdf = gpd.GeoDataFrame(
+                geometry=[box(*map(float, polygon))], crs="EPSG:4326"
+            )
+        elif isinstance(polygon, dict) and "coordinates" in polygon:
+            gdf = gpd.GeoDataFrame(geometry=[shape(polygon)], crs="EPSG:4326")
+        elif isinstance(polygon, str):
+            gdf = gpd.read_file(polygon)
+            if gdf.empty:
+                return None
+            if gdf.crs is None:
+                gdf = gdf.set_crs("EPSG:4326")
+        else:
+            return None
+
+        utm = gdf.estimate_utm_crs()
+        minx, miny, maxx, maxy = gdf.to_crs(utm).total_bounds
+        w_km = (maxx - minx) / 1000.0
+        h_km = (maxy - miny) / 1000.0
+        res = float(resolution) if resolution else 10.0
+        min_edge_km = 256.0 * res / 1000.0
+        if min(w_km, h_km) < min_edge_km:
+            return (
+                f"The area is small for good quality co-registration: the bounding "
+                f"box is {w_km:.1f} x {h_km:.1f} km, while the suggested minimum "
+                f"edge length is {min_edge_km:.1f} km at {res:.0f} m resolution. "
+                "You can still build and co-register this cube, but shift accuracy "
+                "will be texture-limited. Tip: build a larger cube, co-register it, "
+                "then clip to your area of interest."
+            )
+    except Exception:
+        return None
+    return None
+
+
 def _band_resolution_map(mission_name: str):
     if mission_name in {"sentinel_2_l2a", "sentinel_2_l1c"}:
         return {
@@ -3560,8 +3609,19 @@ def datacube_builder(missions_func=missions):
             params, export_mode, export_target = _prepare_get_stac_layers_params()
             state["last_call_params"] = params
 
+            size_hint = _polygon_coreg_size_hint(
+                params.get("polygon"), params.get("resolution")
+            )
+
             with status_out:
                 clear_output()
+                if size_hint:
+                    display(HTML(
+                        "<div style='font-size:12px; color:#92400e; "
+                        "background:#fef3c7; border:1px solid #fcd34d; "
+                        "border-radius:8px; padding:8px 10px; margin:0 0 6px 0;'>"
+                        f"⚠️ {size_hint}</div>"
+                    ))
                 # Browser-side CSS animation so the dots keep moving even while the
                 # kernel is blocked on a slow STAC build - shows the user it isn't
                 # stuck. It's removed by clear_output(wait=True) once the build
@@ -8813,8 +8873,10 @@ def ard_cube_tools():
         "iteration": """
     <b>iteration</b><br>
     Number of shift-ESTIMATION passes. The data itself is always resampled exactly once at the end,<br>
-    so extra iterations refine the estimated shifts without degrading the pixels. 1 is usually enough;<br>
-    2 can help difficult time series. If <code>first_scene_mode="composite"</code>, later passes use <code>first</code>.
+    so extra iterations refine the estimated shifts without degrading the pixels.<br>
+    <code>auto</code> measures the cube after each pass and keeps a refinement pass only when it<br>
+    actually improves the cube; otherwise it stops (max 5). Usually 1 pass is already converged.<br>
+    If <code>first_scene_mode="composite"</code>, later passes use <code>first</code>.
     """,
     }
 
@@ -10317,7 +10379,11 @@ def ard_cube_tools():
     cr_composite_window_days_w = widgets.BoundedIntText(value=30, min=1, max=365, step=1, layout=widgets.Layout(width="200px"))
     cr_composite_window_days_w.disabled = True
 
-    cr_iteration_w = widgets.BoundedIntText(value=1, min=1, max=10, step=1, layout=widgets.Layout(width="200px"))
+    cr_iteration_w = widgets.Dropdown(
+        options=[("auto (recommended)", "auto"), ("1", 1), ("2", 2), ("3", 3), ("4", 4), ("5", 5)],
+        value="auto",
+        layout=widgets.Layout(width="200px"),
+    )
 
     # output path
     cr_out_w = widgets.Text(value="", layout=widgets.Layout(width="100%"))
@@ -10432,7 +10498,7 @@ def ard_cube_tools():
                     max_cloud_update_ref=float(cr_max_cloud_update_ref_w.value),
                     first_scene_mode=str(cr_first_scene_mode_w.value),
                     composite_window_days=int(cr_composite_window_days_w.value),
-                    iteration=int(cr_iteration_w.value),
+                    iteration=cr_iteration_w.value,  # "auto" or int
                     output_path=out_path,
                 )
 
@@ -10506,7 +10572,7 @@ def ard_cube_tools():
                 "max_cc": int(cr_max_cc_w.value),
                 "time_period": time_period,
                 "grid_size": int(cr_grid_size_w.value),
-                "iteration": int(cr_iteration_w.value),
+                "iteration": cr_iteration_w.value,
                 "match_band": str(cr_match_band_w.value),
                 "min_inliers_keep": int(cr_min_inliers_keep_w.value),
                 "min_inliers_update_ref": int(cr_min_inliers_update_ref_w.value),

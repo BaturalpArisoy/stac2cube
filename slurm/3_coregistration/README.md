@@ -29,7 +29,7 @@ The example below uses the GUI's default parameters:
     "max_cc": 100,
     "time_period": null,
     "grid_size": 7,
-    "iteration": 1,
+    "iteration": "auto",
     "match_band": "auto",
     "min_inliers_keep": 3,
     "min_inliers_update_ref": 8,
