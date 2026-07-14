@@ -439,6 +439,30 @@ def _load_cloud_mask(mask_obj, times, height, width):
     return da.sel(time=times).transpose("time", "y", "x").load()
 
 
+def _auto_anchor_time(data, times, band_idx, cloud_lookup):
+    """Pick the best chain anchor scene automatically: among scenes with
+    <=10% cloud and <20% missing pixels (falling back to all scenes when
+    nothing qualifies), the one whose matching band has the most texture
+    (median gradient magnitude). Snow, haze and clouds all reduce texture,
+    which is exactly what makes a scene a bad reference."""
+    scored = []
+    for t in times:
+        band = data.sel(time=t).isel(band=band_idx - 1).values
+        gy, gx = np.gradient(band)
+        grad = np.hypot(gy, gx)
+        finite = np.isfinite(grad)
+        texture = float(np.nanmedian(grad[finite])) if finite.any() else 0.0
+        nan_frac = 1.0 - float(finite.mean())
+        scored.append((t, cloud_lookup(t), texture, nan_frac))
+
+    eligible = [
+        s for s in scored if (s[1] is None or s[1] <= 10.0) and s[3] < 0.2
+    ]
+    if not eligible:
+        eligible = scored
+    return max(eligible, key=lambda s: s[2])[0]
+
+
 def _estimate_shifts_pass(
     data,  # (time, y, x, band) DataArray, loaded
     times,
@@ -446,8 +470,9 @@ def _estimate_shifts_pass(
     crs_wkt,
     candidates,
     band_idx,
-    mode,  # "first" | "composite"
+    mode,  # "composite" | "anchor"
     composite_window_days,
+    anchor_time,  # scene the chain is anchored at (mode="anchor")
     min_inliers_keep,
     min_inliers_update_ref,
     max_cloud_update_ref,
@@ -461,6 +486,12 @@ def _estimate_shifts_pass(
     scene plus its accumulated shift, so translations compose by addition
     and the reference is never resampled.
 
+    mode="anchor" pins the chain at anchor_time (shift 0) and chains
+    BIDIRECTIONALLY: forward in time from the anchor, then backward from
+    the anchor, so any scene of the series can be the reference.
+    mode="composite" matches every scene forward against the median of
+    the first composite_window_days days.
+
     Returns (shifts, dropped, stats):
       shifts: {time -> (abs_x_px, abs_y_px)} for kept scenes
       dropped: [time, ...]
@@ -468,12 +499,7 @@ def _estimate_shifts_pass(
     """
     shifts, stats, dropped = {}, {}, []
 
-    if mode == "first":
-        ref_arr = data.sel(time=times[0]).values
-        ref_abs = (0.0, 0.0)
-        shifts[times[0]] = (0.0, 0.0)
-        start_idx = 1
-    elif mode == "composite":
+    if mode == "composite":
         first_time = times[0]
         end_time = first_time + np.timedelta64(int(composite_window_days), "D")
         subset = data.sel(time=slice(first_time, end_time))
@@ -482,43 +508,60 @@ def _estimate_shifts_pass(
         master = subset.median(dim="time", skipna=True)
         master = master.where(master != 0, np.nan)
         ref_arr = master.values
-        ref_abs = (0.0, 0.0)
-        start_idx = 0
+        legs = [list(range(0, len(times)))]
+    elif mode == "anchor":
+        matches = np.where(times == anchor_time)[0]
+        if matches.size == 0:
+            raise ValueError(
+                f"anchor scene {np.datetime_as_string(anchor_time, 'D')} "
+                "is not in the (filtered) time series."
+            )
+        a = int(matches[0])
+        ref_arr = data.sel(time=times[a]).values
+        shifts[times[a]] = (0.0, 0.0)
+        legs = [
+            list(range(a + 1, len(times))),  # forward in time
+            list(range(a - 1, -1, -1)),  # backward in time
+        ]
     else:
-        raise ValueError("first_scene_mode must be 'first' or 'composite'")
+        raise ValueError("mode must be 'composite' or 'anchor'")
 
-    ref_geoArr = GeoArray(ref_arr, geotransform=geotransform, projection=crs_wkt)
+    anchor_geoArr = GeoArray(ref_arr, geotransform=geotransform, projection=crs_wkt)
 
-    for idx in tqdm(
-        range(start_idx, len(times)),
-        total=len(times),
-        initial=start_idx,
-        desc=desc,
-        unit="scene",
-    ):
-        t = times[idx]
-        tgt_arr = data.sel(time=t).values
-        tgt_geoArr = GeoArray(tgt_arr, geotransform=geotransform, projection=crs_wkt)
+    progress = tqdm(total=len(times), initial=len(times) - sum(len(l) for l in legs),
+                    desc=desc, unit="scene")
+    for leg in legs:
+        # every leg starts over from the anchor/composite reference
+        ref_geoArr = anchor_geoArr
+        ref_abs = (0.0, 0.0)
+        for idx in leg:
+            t = times[idx]
+            tgt_arr = data.sel(time=t).values
+            tgt_geoArr = GeoArray(
+                tgt_arr, geotransform=geotransform, projection=crs_wkt
+            )
 
-        cons = _consensus_shift(
-            ref_geoArr, tgt_geoArr, candidates, band_idx, min_win_px=min_win_px
-        )
-        if cons is None or cons["n_inliers"] < min_inliers_keep:
-            dropped.append(t)
-            continue
+            cons = _consensus_shift(
+                ref_geoArr, tgt_geoArr, candidates, band_idx, min_win_px=min_win_px
+            )
+            progress.update(1)
+            if cons is None or cons["n_inliers"] < min_inliers_keep:
+                dropped.append(t)
+                continue
 
-        abs_x = ref_abs[0] + cons["x"]
-        abs_y = ref_abs[1] + cons["y"]
-        shifts[t] = (abs_x, abs_y)
-        stats[t] = cons
+            abs_x = ref_abs[0] + cons["x"]
+            abs_y = ref_abs[1] + cons["y"]
+            shifts[t] = (abs_x, abs_y)
+            stats[t] = cons
 
-        cp = cloud_lookup(t)
-        update_ref = cons["n_inliers"] >= min_inliers_update_ref and (
-            max_cloud_update_ref is None or cp is None or cp <= max_cloud_update_ref
-        )
-        if update_ref:
-            ref_geoArr = tgt_geoArr
-            ref_abs = (abs_x, abs_y)
+            cp = cloud_lookup(t)
+            update_ref = cons["n_inliers"] >= min_inliers_update_ref and (
+                max_cloud_update_ref is None or cp is None or cp <= max_cloud_update_ref
+            )
+            if update_ref:
+                ref_geoArr = tgt_geoArr
+                ref_abs = (abs_x, abs_y)
+    progress.close()
 
     return shifts, dropped, stats
 
@@ -574,6 +617,15 @@ def coregister_cube(
 
     Parameters
     ----------
+    first_scene_mode : "composite" | "first" | "auto" | "YYYY-MM-DD"
+        How the chain's reference anchor is chosen. "first" anchors at the
+        first scene; "composite" matches everything against the median of
+        the first composite_window_days days; "auto" picks the scene with
+        the most texture on the matching band among low-cloud scenes
+        (snow/haze/clouds reduce texture, which is what makes a bad
+        reference); a date string anchors at the nearest scene to that
+        date (inspect the cube visually first to pick a clean one). With
+        "auto" or a date the chain runs BIDIRECTIONALLY from the anchor.
     match_band : "auto" or band name.
         Band used for matching. "auto" picks the first available native
         10-m band in the order nir, red, green, blue (20-m bands match
@@ -701,6 +753,37 @@ def coregister_cube(
 
     est_source = data.where(mask_da == 0) if mask_da is not None else data
 
+    # resolve first_scene_mode into (pass-1 mode, anchor scene)
+    fsm = "composite" if first_scene_mode is None else str(first_scene_mode)
+    if fsm == "composite":
+        pass1_mode, anchor_time = "composite", None
+    elif fsm == "first":
+        pass1_mode, anchor_time = "anchor", times[0]
+    elif fsm.lower() == "auto":
+        anchor_time = _auto_anchor_time(est_source, times, band_idx, _cloud_lookup)
+        pass1_mode = "anchor"
+        cp_a = _cloud_lookup(anchor_time)
+        print(
+            "Auto-selected reference scene: "
+            f"{np.datetime_as_string(anchor_time, 'D')}"
+            + (f" (cloud {cp_a:.1f}%)" if cp_a is not None else "")
+            + " - most textured low-cloud scene on the matching band."
+        )
+    else:
+        try:
+            query = np.datetime64(fsm)
+        except Exception:
+            raise ValueError(
+                "first_scene_mode must be 'first', 'composite', 'auto' or a "
+                f"date 'YYYY-MM-DD'; got {first_scene_mode!r}."
+            )
+        anchor_time = times[int(np.argmin(np.abs(times - query)))]
+        pass1_mode = "anchor"
+        print(
+            f"Reference scene for '{fsm}': "
+            f"{np.datetime_as_string(anchor_time, 'D')} (nearest available scene)."
+        )
+
     print(
         f"Co-registration: {times.size} scenes, matching on band "
         f"'{band_label}', {len(candidates)} window positions/scene, "
@@ -721,7 +804,7 @@ def coregister_cube(
     last_stats = {}
     est_data = est_source
     est_times = times
-    mode = first_scene_mode
+    mode = pass1_mode
     quality_prev = None
 
     for it in range(1, iteration + 1):
@@ -734,6 +817,7 @@ def coregister_cube(
             band_idx,
             mode,
             composite_window_days,
+            anchor_time,
             min_inliers_keep,
             min_inliers_update_ref,
             max_cloud_update_ref,
@@ -799,7 +883,9 @@ def coregister_cube(
         if it < iteration:
             est_data = shifted_data
             if mode == "composite":
-                mode = "first"
+                # refinement passes need a concrete anchor scene
+                mode = "anchor"
+                anchor_time = est_times[0]
 
     # ------------------------------------------------------------------
     # Single final warp from the original data

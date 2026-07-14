@@ -8861,9 +8861,17 @@ def ard_cube_tools():
     """,
         "first_scene_mode": """
     <b>first_scene_mode</b><br>
-    Mode for selecting the first reference in the time series (crucial for the rest).<br>
-    <code>first</code> selects the first scene; <code>composite</code> creates a composite of the first <code>composite_window_days</code> days and selects the median.<br>
-    Use <code>first</code> if the first scene is cloud-free; otherwise <code>composite</code> is more robust.
+    How the reference anchor of the chain is chosen (crucial for the rest of the series).<br>
+    <code>auto</code> picks the most textured low-cloud scene automatically (snow/haze/clouds reduce texture);<br>
+    <code>first</code> anchors at the first scene; <code>composite</code> matches against the median of the first<br>
+    <code>composite_window_days</code> days; <code>select date</code> anchors at the scene you name in Reference Date.<br>
+    With <code>auto</code> or a date, the chain runs in both directions from the anchor.
+    """,
+        "reference_date": """
+    <b>reference_date</b><br>
+    Only used with <code>select date</code>: the scene to anchor the chain at (<code>YYYY-MM-DD</code>,<br>
+    nearest available scene is used). Inspect the cube in the Data Cube Editor / Visualization first<br>
+    and pick a cloud-free, snow-free, high-contrast scene.
     """,
         "composite_window_days": """
     <b>composite_window_days</b><br>
@@ -10371,13 +10379,25 @@ def ard_cube_tools():
     )
 
     cr_first_scene_mode_w = widgets.Dropdown(
-        options=[("first", "first"), ("composite", "composite")],
-        value="first",
+        options=[
+            ("auto (recommended)", "auto"),
+            ("first", "first"),
+            ("composite", "composite"),
+            ("select date", "date"),
+        ],
+        value="auto",
         layout=widgets.Layout(width="200px"),
     )
 
     cr_composite_window_days_w = widgets.BoundedIntText(value=30, min=1, max=365, step=1, layout=widgets.Layout(width="200px"))
     cr_composite_window_days_w.disabled = True
+
+    cr_ref_date_w = widgets.Text(
+        value="",
+        placeholder="YYYY-MM-DD",
+        layout=widgets.Layout(width="200px"),
+        disabled=True,
+    )
 
     cr_iteration_w = widgets.Dropdown(
         options=[("auto (recommended)", "auto"), ("1", 1), ("2", 2), ("3", 3), ("4", 4), ("5", 5)],
@@ -10434,8 +10454,23 @@ def ard_cube_tools():
         if change.get("name") != "value":
             return
         cr_composite_window_days_w.disabled = (cr_first_scene_mode_w.value != "composite")
+        cr_ref_date_w.disabled = (cr_first_scene_mode_w.value != "date")
 
     cr_first_scene_mode_w.observe(_on_first_scene_mode_change, names="value")
+
+    def _resolve_first_scene_mode():
+        """GUI mode -> coregister_cube's first_scene_mode value."""
+        mode = str(cr_first_scene_mode_w.value)
+        if mode != "date":
+            return mode
+        date_txt = (cr_ref_date_w.value or "").strip()
+        if not date_txt:
+            raise ValueError(
+                'First Reference Scene is "select date" but no date is given. '
+                "Enter YYYY-MM-DD (inspect the cube in the Data Cube Editor to "
+                "pick a clean scene)."
+            )
+        return date_txt
 
     def _parse_time_period(txt: str):
         s = (txt or "").strip()
@@ -10472,6 +10507,7 @@ def ard_cube_tools():
 
         try:
             time_period = _parse_time_period(cr_time_period_w.value)
+            first_scene_mode = _resolve_first_scene_mode()
         except Exception as e:
             _status(f"❌ ValueError: {e}")
             return
@@ -10496,7 +10532,7 @@ def ard_cube_tools():
                     min_inliers_keep=int(cr_min_inliers_keep_w.value),
                     min_inliers_update_ref=int(cr_min_inliers_update_ref_w.value),
                     max_cloud_update_ref=float(cr_max_cloud_update_ref_w.value),
-                    first_scene_mode=str(cr_first_scene_mode_w.value),
+                    first_scene_mode=first_scene_mode,
                     composite_window_days=int(cr_composite_window_days_w.value),
                     iteration=cr_iteration_w.value,  # "auto" or int
                     output_path=out_path,
@@ -10560,6 +10596,13 @@ def ard_cube_tools():
             else int(cr_composite_window_days_w.value)
         )
 
+        # "select date" mode emits the date string itself; fall back to the
+        # raw mode when the date is missing and let the run surface the error.
+        try:
+            first_scene_mode_for_json = _resolve_first_scene_mode()
+        except Exception:
+            first_scene_mode_for_json = str(cr_first_scene_mode_w.value)
+
         # Parameter order follows the GUI layout (top -> bottom):
         # max_cc, time_period, grid_size, iteration, match_band,
         # min_inliers_keep, min_inliers_update_ref, max_cloud_update_ref,
@@ -10577,7 +10620,7 @@ def ard_cube_tools():
                 "min_inliers_keep": int(cr_min_inliers_keep_w.value),
                 "min_inliers_update_ref": int(cr_min_inliers_update_ref_w.value),
                 "max_cloud_update_ref": float(cr_max_cloud_update_ref_w.value),
-                "first_scene_mode": str(cr_first_scene_mode_w.value),
+                "first_scene_mode": first_scene_mode_for_json,
                 "composite_window_days": composite_window_for_json,
                 "cloud_mask": ((cr_cloud_mask_w.value or "").strip() or None),
             }
@@ -10718,6 +10761,7 @@ def ard_cube_tools():
             _row(
                 [
                     _stacked_field_with_help(cr_first_scene_mode_w, "First Reference Scene", "first_scene_mode"),
+                    _stacked_field_with_help(cr_ref_date_w, "Reference Date", "reference_date"),
                     _stacked_field_with_help(cr_composite_window_days_w, "Composite Window (days)", "composite_window_days"),
                 ],
                 gap_px=20,
@@ -11117,6 +11161,7 @@ def ard_cube_tools():
         cr_max_cloud_update_ref_w.disabled = not enabled
         cr_first_scene_mode_w.disabled = not enabled
         cr_composite_window_days_w.disabled = (not enabled) or (cr_first_scene_mode_w.value != "composite")
+        cr_ref_date_w.disabled = (not enabled) or (cr_first_scene_mode_w.value != "date")
         cr_iteration_w.disabled = not enabled
         cr_cloud_mask_w.disabled = not enabled
         browse_cr_mask_btn.disabled = not enabled

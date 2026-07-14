@@ -453,10 +453,12 @@ COREG_HELP_MD = r"""
 - Maximum cloud percentage for selecting a scene as reference.  
 - Scenes above this threshold will not be selected as reference for the co-registration of the next scene.
 
-**first_scene_mode**  
-- The mode of selecting the first reference in the time series. (the first reference is crucial for the co-registration of the rest of the scenes).
-- `first` selects the first scene, while `composite` creates a composite of the first `composite_window_days` days and selects the median as the first reference.
-- `first` is recommended if the first scene is cloud-free, potentially a vegetation season scene. Otherwise, `composite` is recommended to create a more robust reference.
+**first_scene_mode**
+- How the chain's reference anchor is chosen (crucial for the co-registration of the rest of the scenes).
+- `auto` picks the most textured low-cloud scene of the series automatically (snow, haze and clouds reduce texture, which is exactly what makes a bad reference).
+- `first` anchors at the first scene; `composite` matches every scene against the median of the first `composite_window_days` days.
+- A date string (`"YYYY-MM-DD"`) anchors at the nearest scene to that date - inspect the cube visually first and pick a clean, high-contrast scene.
+- With `auto` or a date, the chain runs in BOTH directions from the anchor scene.
 
 **composite_window_days**  
 - Integer number of days for creating the composite if `first_scene_mode` is set to `composite`.  
