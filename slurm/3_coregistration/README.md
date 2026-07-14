@@ -29,12 +29,13 @@ The example below uses the GUI's default parameters:
     "max_cc": 100,
     "time_period": null,
     "grid_size": 7,
-    "iteration": 5,
-    "min_reliability_keep": 10.0,
-    "min_reliability_update_ref": 70.0,
+    "iteration": 1,
+    "match_band": "auto",
+    "min_inliers_keep": 3,
+    "min_inliers_update_ref": 8,
     "max_cloud_update_ref": 20.0,
-    "first_scene_mode": "first",
-    "composite_window_days": null
+    "first_scene_mode": "composite",
+    "composite_window_days": 30
   }
 }
 ```

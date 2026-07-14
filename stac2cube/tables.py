@@ -422,25 +422,32 @@ COREG_HELP_MD = r"""
 **input_path**  
 - Can be a `DataArray`, `Dataset`, or a NetCDF file path.
 
-**grid_size**  
-- The strength of the area scan. The higher, the longer it takes, but it scans more potential matching areas.  
-- If the current setup still removes scenes with low cloud percentages, try increasing `grid_size`.
+**grid_size**
+- Density of the window scan: shifts are estimated at `grid_size x grid_size` positions (plus one automatic position) and combined into a robust consensus, so outlier windows (clouds, moving surfaces) are outvoted.
+- Higher values take longer but add voters; more windows can only make the consensus more robust.
 
-**max_cc**  
-- Maximum cloud percentage of scenes (from cloud-masked data cube; either SCL or s2cloudless). Scenes beyond this threshold are excluded.  
-- The algorithm is designed so that it detects some cloudy scenes that cannot be co-registered and automatically deletes them from the time series.  
+**max_cc**
+- Maximum cloud percentage of scenes (from cloud-masked data cube; either SCL or s2cloudless). Scenes beyond this threshold are excluded.
+- The algorithm is designed so that it detects some cloudy scenes that cannot be co-registered and automatically deletes them from the time series.
 - In this sense, the algorithm also acts as an automatic cloud-filtering system.
 
-**time_period**  
+**time_period**
 - Selection of the time range: `["YYYY-MM-DD", "YYYY-MM-DD"]`.
 
-**min_reliability_keep**  
-- Threshold for the co-registration reliability score (percent).  
-- Scenes with a score lower than this value are dropped. Very low scores often indicate highly cloudy scenes.
+**match_band**
+- Spectral band used for the matching. `auto` picks the first available native 10-m band in the order nir, red, green, blue.
+- Resampled 20-m bands (rededge*, nir08, swir16, swir22) match far worse and should not be used.
 
-**min_reliability_update_ref**  
-- Threshold for the co-registration reliability score (percent).  
-- Scenes with a score lower than this value are kept, but the algorithm will not select them as reference for the co-registration of the next scene.
+**min_inliers_keep**
+- Minimum number of window positions that must agree on a scene's shift.
+- Scenes with fewer agreeing windows (typically heavily clouded) are dropped from the time series.
+
+**min_inliers_update_ref**
+- Minimum number of agreeing windows for a scene to become the reference for the next scene.
+- Scenes below this are kept in the cube but never anchor the chain.
+
+**min_reliability_keep / min_reliability_update_ref (deprecated)**
+- Accepted for old configs but ignored: keep/reference decisions now use the consensus inlier counts above, which transfer across AOI sizes (fixed reliability thresholds do not).
 
 **max_cloud_update_ref**  
 - Maximum cloud percentage for selecting a scene as reference.  
@@ -455,14 +462,18 @@ COREG_HELP_MD = r"""
 - Integer number of days for creating the composite if `first_scene_mode` is set to `composite`.  
 - e.g. if the first scene is on `2020-01-15` and `composite_window_days` is set to `30`, the composite will calculate median of all scenes from `2020-01-15` to `2020-02-15` as the first reference.
 
-**iteration**  
-- The number of iterations to set how many time to run the co-registration process.  
-- Default is `1`, however increasing the number of iterations can further improve the co-registration quality.
-- `4` to `5` times is usually enough for good results.
-- If the first_scene_mode is set to `composite`, the mode will be switched to `first` after the first iteration.
+**iteration**
+- Number of shift-ESTIMATION passes. The data itself is always resampled exactly once at the end, so extra iterations refine the estimated shifts without degrading the pixels.
+- Default is `1`, which is usually enough; `2` can help difficult time series.
+- If the first_scene_mode is set to `composite`, later passes use `first`.
 
-**output_path**  
-- If `None`, the co-registered file will be exported to the same folder as the input, with the extra prefix `"_cr"`.  
+**cloud_mask**
+- Optional binary cloud mask cube (1 = cloud; the builder's mask export) for co-registering a cube that KEEPS its clouds (e.g. for natural animations).
+- Shifts are estimated on an in-memory cloud-masked copy (identical to the masked workflow), while the exported scenes keep their clouds.
+- The mask file may contain more dates than the cube; every cube date must be present in it.
+
+**output_path**
+- If `None`, the co-registered file will be exported to the same folder as the input, with the extra prefix `"_cr"`.
 - Otherwise, assign a path to a NetCDF file.
 """
 

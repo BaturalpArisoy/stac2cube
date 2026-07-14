@@ -2929,6 +2929,7 @@ def datacube_builder(missions_func=missions):
                 "cloud_mask_output": cloud_mask_output,
                 "output": output_for_json,
                 "clip_raster": clip_raster,
+                "resampling_method": resampling_w.value,
                 "aggregator": aggregator,
                 "stats": stats,
                 "compress": bool(export_compress_w.value),
@@ -8755,9 +8756,9 @@ def ard_cube_tools():
     COREG_HELP = {
         "grid_size": """
     <b>grid_size</b><br>
-    The strength of the area scan. The higher, the longer it takes, but it scans more potential matching areas.<br>
-    If the current setup still removes scenes with low cloud percentages, try increasing it.<br>
-    Increasing grid size does not guarantee that more scenes will be kept, but it can help in some cases.
+    Density of the window scan: shifts are estimated at grid_size x grid_size positions (plus one automatic)<br>
+    and combined into a robust consensus, so outlier windows (clouds, moving river bars) are outvoted.<br>
+    Higher values take longer but add voters; more windows can only make the consensus more robust.
     """,
         "max_cc": """
     <b>max_cc</b><br>
@@ -8771,15 +8772,27 @@ def ard_cube_tools():
     The co-registration is performed on the selected time range.<br> 
     It can be useful to exclude problematic surfaces for co-registration algorithm (e.g. snow & ice).
     """,
-        "min_reliability_keep": """
-    <b>min_reliability_keep</b><br>
-    Threshold for the co-registration reliability score (%). Scenes with a score lower than this value are dropped.<br>
-    Very low scores often indicate highly cloudy scenes.
+        "match_band": """
+    <b>match_band</b><br>
+    Spectral band used for the matching. <code>auto</code> picks the first available native 10-m band<br>
+    in the order nir, red, green, blue. Resampled 20-m bands (rededge*, nir08, swir16, swir22) match<br>
+    far worse and should not be used.
     """,
-        "min_reliability_update_ref": """
-    <b>min_reliability_update_ref</b><br>
-    Threshold for the co-registration reliability score (%). Scenes with a score lower than this value are kept,<br>
-    but the algorithm will not select them as reference for the co-registration of the next scene.
+        "cloud_mask": """
+    <b>cloud_mask</b><br>
+    Optional binary cloud mask cube (1 = cloud) for co-registering a cube that keeps its clouds:<br>
+    shifts are estimated with clouds masked out, while the exported scenes keep the clouds.<br>
+    The mask may contain more dates than the cube; every cube date must be present.
+    """,
+        "min_inliers_keep": """
+    <b>min_inliers_keep</b><br>
+    Minimum number of window positions that must agree on a scene's shift. Scenes with fewer<br>
+    agreeing windows (typically heavily clouded) are dropped from the time series.
+    """,
+        "min_inliers_update_ref": """
+    <b>min_inliers_update_ref</b><br>
+    Minimum number of agreeing windows for a scene to become the reference for the next scene.<br>
+    Scenes below this are kept in the cube but never anchor the chain.
     """,
         "max_cloud_update_ref": """
     <b>max_cloud_update_ref</b><br>
@@ -8799,8 +8812,9 @@ def ard_cube_tools():
     """,
         "iteration": """
     <b>iteration</b><br>
-    Number of iterations to run co-registration. Default 1; 4–5 is usually enough for good results.<br>
-    If <code>first_scene_mode="composite"</code>, it switches to <code>first</code> after the first iteration.
+    Number of shift-ESTIMATION passes. The data itself is always resampled exactly once at the end,<br>
+    so extra iterations refine the estimated shifts without degrading the pixels. 1 is usually enough;<br>
+    2 can help difficult time series. If <code>first_scene_mode="composite"</code>, later passes use <code>first</code>.
     """,
     }
 
@@ -10285,9 +10299,14 @@ def ard_cube_tools():
         layout=widgets.Layout(width="200px"),
     )
 
-    cr_min_rel_keep_w = widgets.BoundedFloatText(value=10.0, min=0.0, max=100.0, step=1.0, layout=widgets.Layout(width="200px"))
-    cr_min_rel_update_ref_w = widgets.BoundedFloatText(value=70.0, min=0.0, max=100.0, step=1.0, layout=widgets.Layout(width="200px"))
+    cr_min_inliers_keep_w = widgets.BoundedIntText(value=3, min=1, max=50, step=1, layout=widgets.Layout(width="200px"))
+    cr_min_inliers_update_ref_w = widgets.BoundedIntText(value=8, min=1, max=50, step=1, layout=widgets.Layout(width="200px"))
     cr_max_cloud_update_ref_w = widgets.BoundedFloatText(value=20.0, min=0.0, max=100.0, step=1.0, layout=widgets.Layout(width="200px"))
+    cr_match_band_w = widgets.Dropdown(
+        options=["auto", "nir", "red", "green", "blue"],
+        value="auto",
+        layout=widgets.Layout(width="200px"),
+    )
 
     cr_first_scene_mode_w = widgets.Dropdown(
         options=[("first", "first"), ("composite", "composite")],
@@ -10298,7 +10317,7 @@ def ard_cube_tools():
     cr_composite_window_days_w = widgets.BoundedIntText(value=30, min=1, max=365, step=1, layout=widgets.Layout(width="200px"))
     cr_composite_window_days_w.disabled = True
 
-    cr_iteration_w = widgets.BoundedIntText(value=5, min=1, max=10, step=1, layout=widgets.Layout(width="200px"))
+    cr_iteration_w = widgets.BoundedIntText(value=1, min=1, max=10, step=1, layout=widgets.Layout(width="200px"))
 
     # output path
     cr_out_w = widgets.Text(value="", layout=widgets.Layout(width="100%"))
@@ -10315,6 +10334,22 @@ def ard_cube_tools():
         layout=widgets.Layout(width="100%", gap="6px", align_items="center"),
     )
     cr_out_box = widgets.VBox([cr_out_row, cr_out_fc_box], layout=widgets.Layout(width="100%", gap="4px"))
+
+    # optional binary cloud mask (for co-registering unmasked / keep-clouds cubes)
+    cr_cloud_mask_w = widgets.Text(value="", layout=widgets.Layout(width="100%"))
+    browse_cr_mask_btn = widgets.Button(icon="folder-open", description="", layout=widgets.Layout(width="36px"))
+    cr_mask_fc_box = _attach_filechooser(
+        browse_cr_mask_btn,
+        cr_cloud_mask_w,
+        title="Select binary cloud mask cube (.nc or .zarr, Cloud_Stack)",
+        pattern=["*.nc", "*"],
+        select_dirs=False,
+    )
+    cr_mask_row = widgets.HBox(
+        [browse_cr_mask_btn, cr_cloud_mask_w],
+        layout=widgets.Layout(width="100%", gap="6px", align_items="center"),
+    )
+    cr_mask_box = widgets.VBox([cr_mask_row, cr_mask_fc_box], layout=widgets.Layout(width="100%", gap="4px"))
 
     cr_run_btn = widgets.Button(
         description="Co-register and Export",
@@ -10390,8 +10425,10 @@ def ard_cube_tools():
                     grid_size=int(cr_grid_size_w.value),
                     max_cc=int(cr_max_cc_w.value),
                     time_period=time_period,
-                    min_reliability_keep=float(cr_min_rel_keep_w.value),
-                    min_reliability_update_ref=float(cr_min_rel_update_ref_w.value),
+                    cloud_mask=((cr_cloud_mask_w.value or "").strip() or None),
+                    match_band=str(cr_match_band_w.value),
+                    min_inliers_keep=int(cr_min_inliers_keep_w.value),
+                    min_inliers_update_ref=int(cr_min_inliers_update_ref_w.value),
                     max_cloud_update_ref=float(cr_max_cloud_update_ref_w.value),
                     first_scene_mode=str(cr_first_scene_mode_w.value),
                     composite_window_days=int(cr_composite_window_days_w.value),
@@ -10458,9 +10495,10 @@ def ard_cube_tools():
         )
 
         # Parameter order follows the GUI layout (top -> bottom):
-        # max_cc, time_period, grid_size, iteration, min_reliability_keep,
-        # min_reliability_update_ref, max_cloud_update_ref, first_scene_mode,
-        # composite_window_days. Paths are kept first, as in the SLURM README.
+        # max_cc, time_period, grid_size, iteration, match_band,
+        # min_inliers_keep, min_inliers_update_ref, max_cloud_update_ref,
+        # first_scene_mode, composite_window_days. Paths first, as in the
+        # SLURM README.
         json_payload = {
             "parameters": {
                 "input_path": input_for_json,
@@ -10469,11 +10507,13 @@ def ard_cube_tools():
                 "time_period": time_period,
                 "grid_size": int(cr_grid_size_w.value),
                 "iteration": int(cr_iteration_w.value),
-                "min_reliability_keep": float(cr_min_rel_keep_w.value),
-                "min_reliability_update_ref": float(cr_min_rel_update_ref_w.value),
+                "match_band": str(cr_match_band_w.value),
+                "min_inliers_keep": int(cr_min_inliers_keep_w.value),
+                "min_inliers_update_ref": int(cr_min_inliers_update_ref_w.value),
                 "max_cloud_update_ref": float(cr_max_cloud_update_ref_w.value),
                 "first_scene_mode": str(cr_first_scene_mode_w.value),
                 "composite_window_days": composite_window_for_json,
+                "cloud_mask": ((cr_cloud_mask_w.value or "").strip() or None),
             }
         }
 
@@ -10583,6 +10623,7 @@ def ard_cube_tools():
                 [
                     _stacked_field_with_help(cr_grid_size_w, "Grid Size", "grid_size"),
                     _stacked_field_with_help(cr_iteration_w, "Iteration", "iteration"),
+                    _stacked_field_with_help(cr_match_band_w, "Matching Band", "match_band"),
                 ],
                 gap_px=20,
             ),
@@ -10595,8 +10636,8 @@ def ard_cube_tools():
             widgets.HTML("<b>Secondary Parameters</b>"),
             _row(
                 [
-                    _stacked_field_with_help(cr_min_rel_keep_w, "Min Reliability to Keep Scenes", "min_reliability_keep"),
-                    _stacked_field_with_help(cr_min_rel_update_ref_w, "Min Reliability to Update Reference", "min_reliability_update_ref"),
+                    _stacked_field_with_help(cr_min_inliers_keep_w, "Min Agreeing Windows to Keep Scene", "min_inliers_keep"),
+                    _stacked_field_with_help(cr_min_inliers_update_ref_w, "Min Agreeing Windows to Update Reference", "min_inliers_update_ref"),
                     _stacked_field_with_help(cr_max_cloud_update_ref_w, "Max Cloud Coverage to Update Reference", "max_cloud_update_ref"),
                 ],
                 gap_px=20,
@@ -10636,6 +10677,18 @@ def ard_cube_tools():
             row3,
             section_spacer,
             row4,
+            section_spacer,
+            _stacked_field(
+                cr_mask_box,
+                "Cloud mask cube (optional - only for cubes with clouds kept)",
+            ),
+            widgets.HTML(
+                "<div style='font-size:11px; color:#666; margin-top:-6px;'>"
+                "Provide the binary cloud mask (builder's mask export) to co-register a cube "
+                "that KEEPS its clouds (e.g. for natural animations): clouds are ignored during "
+                "shift estimation but stay in the exported scenes. Leave empty for cloud-masked cubes."
+                "</div>"
+            ),
             section_spacer,
             _stacked_field(cr_out_box, "Output NetCDF"),
             section_spacer,
@@ -10992,12 +11045,15 @@ def ard_cube_tools():
         cr_grid_size_w.disabled = not enabled
         cr_max_cc_w.disabled = not enabled
         cr_time_period_w.disabled = not enabled
-        cr_min_rel_keep_w.disabled = not enabled
-        cr_min_rel_update_ref_w.disabled = not enabled
+        cr_match_band_w.disabled = not enabled
+        cr_min_inliers_keep_w.disabled = not enabled
+        cr_min_inliers_update_ref_w.disabled = not enabled
         cr_max_cloud_update_ref_w.disabled = not enabled
         cr_first_scene_mode_w.disabled = not enabled
         cr_composite_window_days_w.disabled = (not enabled) or (cr_first_scene_mode_w.value != "composite")
         cr_iteration_w.disabled = not enabled
+        cr_cloud_mask_w.disabled = not enabled
+        browse_cr_mask_btn.disabled = not enabled
         cr_out_w.disabled = not enabled
         browse_cr_out_btn.disabled = not enabled
         cr_run_btn.disabled = not enabled

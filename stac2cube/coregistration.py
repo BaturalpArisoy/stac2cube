@@ -7,6 +7,7 @@ from .export_cfg import open_cube, is_zarr_path, _write_zarr
 from arosics import COREG
 from geoarray import GeoArray
 from rasterio.transform import Affine
+from rasterio.enums import Resampling
 import warnings
 from contextlib import contextmanager, redirect_stdout, redirect_stderr
 from tqdm.auto import tqdm
@@ -194,71 +195,6 @@ def _write_coreg_output(out_ds, out_path):
         out_ds.to_netcdf(out_path)
 
 
-def _roi_to_geom_and_projected_bbox(roi, roi_crs="EPSG:4326", target_crs_wkt=None):
-    """
-    Returns (bbox_in_target_crs, target_crs_str_for_debug)
-
-    bbox_in_target_crs: (xmin, ymin, xmax, ymax) in the stack CRS
-
-    roi can be:
-      - bbox list/tuple: [xmin, ymin, xmax, ymax] (assumed roi_crs)
-      - gpkg path (str ending in .gpkg)
-      - geojson geometry dict (has "type" and "coordinates")
-    """
-    from pyproj import CRS, Transformer
-    from shapely.geometry import box, shape
-    import pathlib
-
-    if target_crs_wkt is None:
-        raise ValueError("target_crs_wkt is required to project ROI into stack CRS.")
-
-    target_crs = CRS.from_wkt(target_crs_wkt)
-    src_crs = CRS.from_user_input(roi_crs)
-
-    if isinstance(roi, (list, tuple)) and len(roi) == 4:
-        xmin, ymin, xmax, ymax = map(float, roi)
-        geom = box(xmin, ymin, xmax, ymax)
-
-    elif isinstance(roi, dict) and "type" in roi and "coordinates" in roi:
-        geom = shape(roi)
-
-    elif isinstance(roi, str) and pathlib.Path(roi).suffix.lower() == ".gpkg":
-        import geopandas as gpd
-
-        gdf = gpd.read_file(roi)
-        if gdf.empty:
-            raise ValueError("GPKG ROI is empty.")
-        if gdf.crs is None:
-            raise ValueError(
-                "GPKG has no CRS. Please assign one before using it as ROI."
-            )
-        geom = gdf.geometry.unary_union
-        src_crs = CRS.from_user_input(gdf.crs)
-
-    else:
-        raise TypeError(
-            "roi must be one of: bbox [xmin,ymin,xmax,ymax], geojson geometry dict, or .gpkg path"
-        )
-
-    if src_crs == target_crs:
-        xmin, ymin, xmax, ymax = geom.bounds
-        return (float(xmin), float(ymin), float(xmax), float(ymax)), str(target_crs)
-
-    transformer = Transformer.from_crs(src_crs, target_crs, always_xy=True)
-
-    xmin, ymin, xmax, ymax = geom.bounds
-    corners = [(xmin, ymin), (xmin, ymax), (xmax, ymin), (xmax, ymax)]
-    xs, ys = [], []
-    for x, y in corners:
-        X, Y = transformer.transform(x, y)
-        xs.append(X)
-        ys.append(Y)
-
-    return (float(min(xs)), float(min(ys)), float(max(xs)), float(max(ys))), str(
-        target_crs
-    )
-
-
 def _apply_time_and_cloud_filters(stack, max_cc=None, time_period=None):
     """
     Uses stac2cube.filter_cloud(stack, max_cc) if available.
@@ -289,7 +225,306 @@ def _apply_time_and_cloud_filters(stack, max_cc=None, time_period=None):
 
 
 # ----------------------------------------------------------------------
-# Main function (sliding-grid)
+# Consensus estimation engine
+# ----------------------------------------------------------------------
+# Bands acquired natively at 10 m by Sentinel-2. 20-m bands (rededge*,
+# nir08, swir16, swir22) are only resampled to the 10-m grid and lack the
+# high-frequency content the FFT matcher needs (measured: reliability ~25
+# vs ~65 on the same scenes), so auto-selection is restricted to these.
+_NATIVE_10M_BANDS = ("nir", "red", "green", "blue")
+
+
+def _resolve_match_band(band_names, match_band):
+    """Return (one_based_index, band_label) of the band used for matching."""
+    labels = [str(b) for b in band_names]
+    lowered = [s.lower() for s in labels]
+
+    if match_band is None or str(match_band).lower() == "auto":
+        for cand in _NATIVE_10M_BANDS:
+            if cand in lowered:
+                i = lowered.index(cand)
+                return i + 1, labels[i]
+        raise ValueError(
+            "match_band='auto' requires one of the native 10-m bands "
+            f"{list(_NATIVE_10M_BANDS)} in the cube; found {labels}. "
+            "Pass match_band=<band name> to override explicitly."
+        )
+
+    mb = str(match_band).lower()
+    if mb not in lowered:
+        raise ValueError(
+            f"match_band='{match_band}' not found in the cube. Available: {labels}"
+        )
+    i = lowered.index(mb)
+    if mb not in _NATIVE_10M_BANDS:
+        warnings.warn(
+            f"match_band='{labels[i]}' is not a native 10-m Sentinel-2 band. "
+            "Resampled 20-m bands match far worse (low reliability); expect "
+            "degraded co-registration quality.",
+            stacklevel=3,
+        )
+    return i + 1, labels[i]
+
+
+def _grid_candidates(geotransform, height, width, grid_size):
+    """Matching-window positions: AROSICS' automatic position plus a
+    grid_size x grid_size lattice across the AOI."""
+    left, bottom, right, top = _get_bounds_from_gt(geotransform, height, width)
+    margin = 1.0 / (grid_size + 1)
+    frac_vals = np.linspace(margin, 1.0 - margin, grid_size)
+    cands = [("auto", None)]
+    for iy, fy in enumerate(frac_vals):
+        for ix, fx in enumerate(frac_vals):
+            cands.append(
+                (
+                    f"g{grid_size}x{grid_size}_r{iy}_c{ix}",
+                    (left + fx * (right - left), bottom + fy * (top - bottom)),
+                )
+            )
+    return cands
+
+
+def _consensus_shift(ref_geoArr, tgt_geoArr, candidates, band_idx, min_win_px=64):
+    """Estimate one scene's shift as the consensus over many window positions.
+
+    Runs estimation-only AROSICS at every candidate window (no warping),
+    keeps windows whose ACTUAL matching window is at least min_win_px in
+    both dimensions (AROSICS clips windows near AOI edges; tiny windows
+    measured wildly unreliable), then:
+      reliability-weighted median -> inliers within max(0.2 px, 3*MAD)
+      -> consensus = reliability-weighted mean of the inliers.
+
+    A single high-reliability outlier window (e.g. on a cloud edge or a
+    migrated river bar) gets outvoted instead of winning outright, which
+    is what poisoned the old argmax-based chaining.
+
+    Returns dict(x, y, n_ok, n_inliers, spread) in pixels, or None.
+    """
+    xs, ys, rel = [], [], []
+    with _suppress_arosics_warnings():
+        for _label, wp in candidates:
+            try:
+                kwargs = dict(
+                    align_grids=True, q=True, r_b4match=band_idx, s_b4match=band_idx
+                )
+                if wp is not None:
+                    kwargs["wp"] = wp
+                cr = COREG(ref_geoArr, tgt_geoArr, **kwargs)
+                cr.calculate_spatial_shifts()
+                if cr.success is not True or cr.shift_reliability is None:
+                    continue
+                win_y, win_x = cr.matchBox.imDimsYX
+                if min(win_x, win_y) < min_win_px:
+                    continue
+                xs.append(float(cr.x_shift_px))
+                ys.append(float(cr.y_shift_px))
+                rel.append(float(cr.shift_reliability))
+            except (RuntimeError, ValueError, AssertionError, AttributeError):
+                continue
+
+    if not xs:
+        return None
+    xs, ys, rel = np.asarray(xs), np.asarray(ys), np.asarray(rel)
+
+    def _wmedian(values, weights):
+        order = np.argsort(values)
+        cum = np.cumsum(weights[order])
+        return values[order][np.searchsorted(cum, cum[-1] / 2.0)]
+
+    med_x = _wmedian(xs, rel)
+    med_y = _wmedian(ys, rel)
+    dist = np.hypot(xs - med_x, ys - med_y)
+    inliers = dist <= max(0.2, 3.0 * float(np.median(dist)))
+    n_inl = int(inliers.sum())
+    if n_inl == 0:
+        return None
+    cons_x = float(np.average(xs[inliers], weights=rel[inliers]))
+    cons_y = float(np.average(ys[inliers], weights=rel[inliers]))
+    spread = float(np.median(np.hypot(xs[inliers] - cons_x, ys[inliers] - cons_y)))
+    return {
+        "x": cons_x,
+        "y": cons_y,
+        "n_ok": int(xs.size),
+        "n_inliers": n_inl,
+        "spread": spread,
+    }
+
+
+def _warp_scene_yxb(da_yxb, shift_x_px, shift_y_px, geotransform, crs_wkt):
+    """Apply one translation to a (y, x, band) scene by shifting its
+    coordinates and resampling (cubic) back onto the original grid.
+
+    Verified pixel-identical (RMSE 0.0) to AROSICS
+    correct_shifts(align_grids=True) for the same shift; the coordinates
+    must be moved (rioxarray derives the source grid from coords, a
+    written transform alone is ignored).
+    """
+    da = da_yxb.transpose("band", "y", "x")
+    template = da.rio.write_crs(crs_wkt).rio.write_transform(
+        Affine.from_gdal(*geotransform)
+    )
+    px_w, px_h = geotransform[1], geotransform[5]
+    da = da.assign_coords(
+        x=da.x.values + shift_x_px * px_w,
+        y=da.y.values + shift_y_px * px_h,
+    )
+    da = da.rio.write_crs(crs_wkt).rio.write_nodata(np.nan)
+    out = da.rio.reproject_match(template, resampling=Resampling.cubic)
+    return out.assign_coords(x=template.x.values, y=template.y.values)
+
+
+def _mask_nodata_zeros(da_yxb):
+    """Set pixels where ALL bands are exactly 0 (loader nodata gaps) to NaN
+    so the warp treats them as nodata instead of bleeding zeros into
+    neighbors. Genuine zero values in individual bands are preserved."""
+    allzero = (da_yxb == 0).all(dim="band")
+    return da_yxb.where(~allzero)
+
+
+def _load_cloud_mask(mask_obj, times, height, width):
+    """Load a binary cloud mask cube (1 = cloud) and align it to the
+    spectral cube's time axis.
+
+    Accepts a path (NetCDF/Zarr with 'Cloud_Stack' or a single data
+    variable), an xr.Dataset, or an xr.DataArray. The mask file may
+    contain MORE dates than the cube (the builder's mask export is not
+    filtered by scene_cloud_coverage); every cube date must be present.
+
+    Returns a (time, y, x) DataArray of 0/1.
+    """
+    if isinstance(mask_obj, str):
+        ds = open_cube(mask_obj)
+    elif isinstance(mask_obj, xr.Dataset):
+        ds = mask_obj
+    elif isinstance(mask_obj, xr.DataArray):
+        ds = None
+    else:
+        raise TypeError(
+            "cloud_mask must be a file path, xarray.Dataset or xarray.DataArray"
+        )
+
+    if ds is not None:
+        if "Cloud_Stack" in ds:
+            da = ds["Cloud_Stack"]
+        else:
+            cands = [v for v in ds.data_vars if v != "spatial_ref"]
+            if len(cands) != 1:
+                raise KeyError(
+                    "cloud_mask dataset needs a 'Cloud_Stack' variable "
+                    f"(found: {list(ds.data_vars)})"
+                )
+            da = ds[cands[0]]
+    else:
+        da = mask_obj
+
+    if "band" in da.dims:
+        da = da.isel(band=0)
+
+    if (da.sizes.get("y"), da.sizes.get("x")) != (height, width):
+        raise ValueError(
+            "cloud_mask grid does not match the cube: "
+            f"mask {da.sizes.get('x')}x{da.sizes.get('y')} px vs "
+            f"cube {width}x{height} px. Both must cover the same AOI at "
+            "the same resolution."
+        )
+
+    missing = np.setdiff1d(times, da.time.values)
+    if missing.size:
+        miss = ", ".join(np.datetime_as_string(m, unit="D") for m in missing[:10])
+        raise ValueError(
+            f"cloud_mask is missing {missing.size} of the cube's dates "
+            f"(e.g. {miss}). Export the mask for the same query."
+        )
+
+    return da.sel(time=times).transpose("time", "y", "x").load()
+
+
+def _estimate_shifts_pass(
+    data,  # (time, y, x, band) DataArray, loaded
+    times,
+    geotransform,
+    crs_wkt,
+    candidates,
+    band_idx,
+    mode,  # "first" | "composite"
+    composite_window_days,
+    min_inliers_keep,
+    min_inliers_update_ref,
+    max_cloud_update_ref,
+    cloud_lookup,  # callable time -> float or None
+    min_win_px,
+    desc,
+):
+    """One estimation pass over the (raw or pre-shifted) cube.
+
+    Chains on UNWARPED scenes: the running reference is the last trusted
+    scene plus its accumulated shift, so translations compose by addition
+    and the reference is never resampled.
+
+    Returns (shifts, dropped, stats):
+      shifts: {time -> (abs_x_px, abs_y_px)} for kept scenes
+      dropped: [time, ...]
+      stats: {time -> consensus dict}
+    """
+    shifts, stats, dropped = {}, {}, []
+
+    if mode == "first":
+        ref_arr = data.sel(time=times[0]).values
+        ref_abs = (0.0, 0.0)
+        shifts[times[0]] = (0.0, 0.0)
+        start_idx = 1
+    elif mode == "composite":
+        first_time = times[0]
+        end_time = first_time + np.timedelta64(int(composite_window_days), "D")
+        subset = data.sel(time=slice(first_time, end_time))
+        if subset.sizes["time"] == 0:
+            subset = data
+        master = subset.median(dim="time", skipna=True)
+        master = master.where(master != 0, np.nan)
+        ref_arr = master.values
+        ref_abs = (0.0, 0.0)
+        start_idx = 0
+    else:
+        raise ValueError("first_scene_mode must be 'first' or 'composite'")
+
+    ref_geoArr = GeoArray(ref_arr, geotransform=geotransform, projection=crs_wkt)
+
+    for idx in tqdm(
+        range(start_idx, len(times)),
+        total=len(times),
+        initial=start_idx,
+        desc=desc,
+        unit="scene",
+    ):
+        t = times[idx]
+        tgt_arr = data.sel(time=t).values
+        tgt_geoArr = GeoArray(tgt_arr, geotransform=geotransform, projection=crs_wkt)
+
+        cons = _consensus_shift(
+            ref_geoArr, tgt_geoArr, candidates, band_idx, min_win_px=min_win_px
+        )
+        if cons is None or cons["n_inliers"] < min_inliers_keep:
+            dropped.append(t)
+            continue
+
+        abs_x = ref_abs[0] + cons["x"]
+        abs_y = ref_abs[1] + cons["y"]
+        shifts[t] = (abs_x, abs_y)
+        stats[t] = cons
+
+        cp = cloud_lookup(t)
+        update_ref = cons["n_inliers"] >= min_inliers_update_ref and (
+            max_cloud_update_ref is None or cp is None or cp <= max_cloud_update_ref
+        )
+        if update_ref:
+            ref_geoArr = tgt_geoArr
+            ref_abs = (abs_x, abs_y)
+
+    return shifts, dropped, stats
+
+
+# ----------------------------------------------------------------------
+# Main function (sliding-grid, consensus)
 # ----------------------------------------------------------------------
 def coregister_cube(
     input_path,  # str | xr.Dataset | xr.DataArray
@@ -297,686 +532,283 @@ def coregister_cube(
     stack_name="Spectral_Temporal_Stack",
     first_scene_mode="composite",
     composite_window_days=30,
-    grid_size=3,
-    min_reliability_keep=10.0,
-    min_reliability_update_ref=50.0,
+    grid_size=7,
+    match_band="auto",
+    min_inliers_keep=3,
+    min_inliers_update_ref=8,
     max_cloud_update_ref=20.0,
     max_cc=None,
     time_period=None,
-    # NEW:
     iteration=1,
+    min_win_px=64,
+    cloud_mask=None,
+    **deprecated,
 ):
-    # -----------------------------
-    # NEW: validate iteration
-    # -----------------------------
+    """Co-register a Sentinel-2 data cube scene-to-scene (AROSICS global).
+
+    Redesigned engine (2026-07): per scene, shifts are ESTIMATED at
+    grid_size^2 + 1 window positions and combined into a robust consensus
+    (outlier windows are outvoted instead of argmax-selected); scenes chain
+    by summing translations against unwarped references; the data is
+    warped exactly ONCE at the end (cubic), regardless of `iteration`.
+
+    Parameters
+    ----------
+    match_band : "auto" or band name.
+        Band used for matching. "auto" picks the first available native
+        10-m band in the order nir, red, green, blue (20-m bands match
+        far worse; measured).
+    min_inliers_keep : int
+        A scene is dropped when fewer window positions agree on its shift.
+    min_inliers_update_ref : int
+        A scene becomes the reference for the next scene only when at
+        least this many windows agree (replaces the old reliability
+        thresholds, which did not transfer across AOI sizes).
+    max_cloud_update_ref : float or None
+        Scenes cloudier than this never become the reference.
+    iteration : int
+        Estimation passes. Pass k re-estimates residual shifts on an
+        in-memory shifted copy; the OUTPUT is always the original data
+        warped once by the total shift (the old behavior resampled the
+        cube once per iteration, blurring it).
+    min_win_px : int
+        Discard candidate windows whose actual matching window (after
+        AROSICS clips it to the AOI) is smaller than this in either
+        dimension.
+    cloud_mask : path | xr.Dataset | xr.DataArray or None
+        Binary cloud mask cube (1 = cloud, e.g. the builder's SCL mask
+        export) for co-registering an UNMASKED (clouds kept) cube: the
+        shifts are estimated on an in-memory cloud-masked copy - exactly
+        what the masked workflow would estimate - while the exported
+        scenes keep their clouds. The mask file may contain more dates
+        than the cube; every cube date must be present in it. If the
+        cube itself lacks a cloud_percentage coordinate, per-scene cloud
+        percentages are derived from the mask for the reference rule.
+
+    Deprecated and ignored (accepted for old configs/GUIs):
+    min_reliability_keep, min_reliability_update_ref.
+
+    Returns (out_ds, output_path).
+    """
+    _DEPRECATED = {"min_reliability_keep", "min_reliability_update_ref"}
+    unknown = set(deprecated) - _DEPRECATED
+    if unknown:
+        raise TypeError(f"coregister_cube() got unexpected arguments: {sorted(unknown)}")
+    if deprecated:
+        warnings.warn(
+            f"{sorted(set(deprecated) & _DEPRECATED)} are deprecated and ignored: "
+            "scene keep/reference decisions now use consensus inlier counts "
+            "(min_inliers_keep / min_inliers_update_ref).",
+            stacklevel=2,
+        )
+
     if isinstance(iteration, bool) or not isinstance(iteration, (int, np.integer)):
         raise TypeError("iteration must be an integer >= 1.")
     iteration = int(iteration)
     if iteration < 1:
         raise ValueError("iteration must be an integer >= 1 (cannot be 0).")
 
-    # Keep original input path string for auto-export on final iteration
-    _orig_input_path_str = input_path if isinstance(input_path, str) else None
+    # ------------------------------------------------------------------
+    # Load + filter
+    # ------------------------------------------------------------------
+    stac, masked_stack, cloud_pct_da, input_path_str = _load_coreg_input(
+        input_path, stack_name=stack_name
+    )
+    input_crs_attr = masked_stack.attrs.get("crs", None)
+    filtered = _apply_time_and_cloud_filters(
+        masked_stack, max_cc=max_cc, time_period=time_period
+    )
 
-    def _run_once(
-        _input_obj,
-        _output_path,
-        _first_scene_mode,
-        do_export=True,
-    ):
-        stac, masked_stac, cloud_pct_da, input_path_str = _load_coreg_input(
-            _input_obj, stack_name=stack_name
-        )
-        input_crs_attr = masked_stac.attrs.get("crs", None)
-        # replace hard-coded test filters
-        filtered_data = _apply_time_and_cloud_filters(
-            masked_stac, max_cc=max_cc, time_period=time_period
-        )
+    crs_wkt = _get_crs_wkt(filtered, ds=stac)
+    filtered = filtered.rio.write_crs(crs_wkt, inplace=True)
+    geotransform = _get_geotransform(filtered, ds=stac)
 
-        # geo
-        crs_wkt = _get_crs_wkt(filtered_data, ds=stac)
-        filtered_data = filtered_data.rio.write_crs(crs_wkt, inplace=True)
-        geotransform = _get_geotransform(filtered_data, ds=stac)
+    times = filtered.time.values
+    if times.size == 0:
+        raise ValueError("No scenes left after applying max_cc/time_period filters.")
 
-        times = filtered_data.time.values
-        if times.size == 0:
-            raise ValueError(
-                "No scenes left after applying max_cc/time_period filters."
-            )
-        band_names = filtered_data.band.values
-        height = filtered_data.sizes["y"]
-        width = filtered_data.sizes["x"]
+    band_idx, band_label = _resolve_match_band(filtered.band.values, match_band)
 
-        corrected_images, failed_times = [], []
-        current_reference, master_geoArr = None, None
-        kept_reliabilities, kept_rel_times = [], []
-
-        if _first_scene_mode == "first":
-            im_ref = filtered_data.sel(time=times[0]).transpose("y", "x", "band")
-            im_ref = im_ref.where(im_ref != 0, np.nan)
-            y_coords, x_coords = _compute_coords(geotransform, height, width)
-            im_ref = im_ref.assign_coords(
-                {"y": ("y", y_coords), "x": ("x", x_coords), "time": times[0]}
-            )
-            corrected_images.append(im_ref)
-            current_reference = im_ref
-            start_idx = 1
-
-        elif _first_scene_mode == "composite":
-            first_time = times[0]
-            end_time = first_time + np.timedelta64(composite_window_days, "D")
-            subset = filtered_data.sel(time=slice(first_time, end_time))
-            if subset.sizes["time"] == 0:
-                subset = filtered_data
-            master_median = subset.median(dim="time", skipna=True)
-            master_ref = master_median.transpose("y", "x", "band").where(
-                master_median.transpose("y", "x", "band") != 0, np.nan
-            )
-            master_geoArr = GeoArray(
-                master_ref.values, geotransform=geotransform, projection=crs_wkt
-            )
-            start_idx = 0
-        else:
-            raise ValueError("first_scene_mode must be 'first' or 'composite'")
-
-        indices = range(start_idx, len(times))
-
-        for idx in tqdm(
-            indices,
-            total=len(times),  # show full count (e.g., 1/23 in "first" mode)
-            initial=start_idx,
-            desc="Co-registering scenes",
-            unit="scene",
-        ):
-            t = times[idx]
-            im_target = filtered_data.sel(time=t).transpose("y", "x", "band")
-
-            if _first_scene_mode == "composite" and current_reference is None:
-                ref_geoArr = master_geoArr
-            else:
-                if current_reference is None:
-                    raise RuntimeError("No valid reference available for chained mode.")
-                ref_geoArr = GeoArray(
-                    current_reference.values,
-                    geotransform=geotransform,
-                    projection=crs_wkt,
-                )
-
-            tgt_geoArr = GeoArray(
-                im_target.values, geotransform=geotransform, projection=crs_wkt
-            )
-
-            # sliding-grid candidates
-            height_target, width_target, _ = im_target.shape
-            left, bottom, right, top = _get_bounds_from_gt(
-                geotransform, height_target, width_target
-            )
-
-            margin = 1.0 / (grid_size + 1)
-            frac_vals = np.linspace(margin, 1.0 - margin, grid_size)
-
-            manual_wps = []
-            for iy, fy in enumerate(frac_vals):
-                for ix, fx in enumerate(frac_vals):
-                    x_wp = left + fx * (right - left)
-                    y_wp = bottom + fy * (top - bottom)
-                    manual_wps.append(
-                        (f"g{grid_size}x{grid_size}_r{iy}_c{ix}", (x_wp, y_wp))
-                    )
-
-            candidates = [("auto", None)] + manual_wps
-            successful_matches = []
-
-            with _suppress_arosics_warnings():
-                for label, wp in candidates:
-                    try:
-                        if wp is None:
-                            CR_try = COREG(
-                                ref_geoArr, tgt_geoArr, align_grids=True, q=True
-                            )
-                        else:
-                            CR_try = COREG(
-                                ref_geoArr, tgt_geoArr, align_grids=True, q=True, wp=wp
-                            )
-
-                        CR_try.calculate_spatial_shifts()
-                        result_try = CR_try.correct_shifts()
-                        reliability_try = getattr(CR_try, "shift_reliability", None)
-                        successful_matches.append(
-                            {
-                                "label": label,
-                                "CR": CR_try,
-                                "result": result_try,
-                                "reliability": reliability_try,
-                            }
-                        )
-
-                    except (RuntimeError, ValueError, AssertionError, AttributeError):
-                        continue
-
-            if not successful_matches:
-                failed_times.append(t)
-                continue
-
-            best_match = max(
-                successful_matches,
-                key=lambda m: (
-                    -np.inf if m["reliability"] is None else float(m["reliability"])
-                ),
-            )
-
-            CR = best_match["CR"]
-            result = best_match["result"]
-            reliability = best_match["reliability"]
-
-            if (min_reliability_keep is not None) and (
-                (reliability is None) or (reliability < min_reliability_keep)
-            ):
-                failed_times.append(t)
-                continue
-
-            out_geoArr = GeoArray(
-                result["arr_shifted"],
-                result["updated geotransform"],
-                result["updated projection"],
-            )
-            arr_corr = out_geoArr[:].transpose(2, 0, 1)
-            arr_corr = np.where(arr_corr == 0, np.nan, arr_corr)
-
-            updated_gt = result["updated geotransform"]
-            h2, w2 = arr_corr.shape[1], arr_corr.shape[2]
-            y2, x2 = _compute_coords(updated_gt, h2, w2)
-
-            da_corr = xr.DataArray(
-                arr_corr,
-                dims=("band", "y", "x"),
-                coords={
-                    "band": range(1, arr_corr.shape[0] + 1),
-                    "y": ("y", y2),
-                    "x": ("x", x2),
-                },
-            )
-            da_corr = da_corr.rio.write_transform(Affine.from_gdal(*updated_gt))
-            da_corr = da_corr.rio.write_crs(result["updated projection"])
-            da_corr = (
-                da_corr.assign_coords(band=("band", band_names))
-                .transpose("y", "x", "band")
-                .assign_coords(time=t)
-            )
-
-            corrected_images.append(da_corr)
-
-            if reliability is not None:
-                kept_reliabilities.append(float(reliability))
-                kept_rel_times.append(t)
-
-            # reference update rules
-            cp_t = None
-            if cloud_pct_da is not None:
-                try:
-                    cp_t = (
-                        float(cloud_pct_da.sel(time=t))
-                        if "time" in cloud_pct_da.dims
-                        else float(cloud_pct_da)
-                    )
-                except Exception:
-                    cp_t = None
-
-            update_ref = True
-            if (min_reliability_update_ref is not None) and (
-                (reliability is None) or (reliability < min_reliability_update_ref)
-            ):
-                update_ref = False
-            if (
-                (max_cloud_update_ref is not None)
-                and (cp_t is not None)
-                and (cp_t > max_cloud_update_ref)
-            ):
-                update_ref = False
-
-            if update_ref:
-                current_reference = da_corr
-
-        if not corrected_images:
-            raise RuntimeError("No scenes were kept. Output stack would be empty.")
-
-        corrected_stack = xr.concat(corrected_images, dim="time").transpose(
-            "time", "band", "y", "x"
-        )
-        corrected_stack = corrected_stack.rio.write_crs(crs_wkt, inplace=True)
-        if input_crs_attr is not None:
-            corrected_stack.attrs["crs"] = input_crs_attr
-        corrected_stack.name = "Spectral_Temporal_Stack"
-
-        out_ds = xr.Dataset({"Spectral_Temporal_Stack": corrected_stack})
-        if stac is not None and "spatial_ref" in stac.variables:
-            out_ds["spatial_ref"] = stac["spatial_ref"]
-
-        if stac is not None:
-            if "cloud_percentage" in stac.coords:
-                out_ds = out_ds.assign_coords(cloud_percentage=stac.cloud_percentage)
-            elif "cloud_percentage" in stac:
-                out_ds = out_ds.assign_coords(cloud_percentage=stac["cloud_percentage"])
-
-        # report
-        times_out = corrected_stack.time.values
-        print("\nCo-registration summary")
-        print("-----------------------")
+    height = filtered.sizes["y"]
+    width = filtered.sizes["x"]
+    if min(height, width) < 256:
         print(
-            f"Original (after max_cc/time_period): {len(times)} scenes from "
-            f"{np.datetime_as_string(times[0], 'D')} to {np.datetime_as_string(times[-1], 'D')}"
+            f"Warning: the AOI is only {width}x{height} px. Matching accuracy "
+            "is texture-limited on small areas (measured ~0.3 px residual on "
+            "a 287x124 px AOI); a larger AOI gives better co-registration."
         )
-        print(
-            "Scenes excluded after co-registration (overlap / tie points / low reliability):",
-            len(failed_times),
-        )
-        print(f"Scenes remaining in the co-registered cube: {len(times_out)}")
 
-        if failed_times:
-            excluded_entries = []
-            for ts in failed_times:
-                ds_ = np.datetime_as_string(ts, unit="D")
-                if cloud_pct_da is not None:
-                    try:
-                        cp = (
-                            float(cloud_pct_da.sel(time=ts))
-                            if "time" in cloud_pct_da.dims
-                            else float(cloud_pct_da)
-                        )
-                        excluded_entries.append(f"{ds_} ({cp:.1f}%)")
-                    except Exception:
-                        excluded_entries.append(ds_)
-                else:
-                    excluded_entries.append(ds_)
-            print("Excluded dates (cloud percentage): " + ", ".join(excluded_entries))
+    candidates = _grid_candidates(geotransform, height, width, grid_size)
 
-        if kept_reliabilities:
-            mean_rel = float(np.mean(kept_reliabilities))
-            min_idx = int(np.argmin(kept_reliabilities))
-            print(f"\nMean match reliability of kept scenes: {mean_rel:.1f} %")
-            print(
-                f"Minimum match reliability of kept scenes: {kept_reliabilities[min_idx]:.1f} % "
-                f"(date: {np.datetime_as_string(kept_rel_times[min_idx], 'D')})"
+    def _cloud_lookup(t):
+        if cloud_pct_da is None:
+            return None
+        try:
+            return (
+                float(cloud_pct_da.sel(time=t))
+                if "time" in cloud_pct_da.dims
+                else float(cloud_pct_da)
+            )
+        except Exception:
+            return None
+
+    # one in-memory copy in (time, y, x, band) order for fast per-scene access
+    data = filtered.transpose("time", "y", "x", "band").load()
+
+    # optional cloud mask: estimate on a masked copy, warp the original.
+    mask_da = None
+    if cloud_mask is not None:
+        mask_da = _load_cloud_mask(cloud_mask, times, height, width)
+        if cloud_pct_da is None or "time" not in getattr(cloud_pct_da, "dims", ()):
+            # derive per-scene cloud percentage from the mask so the
+            # update-reference rule still works on keep-clouds cubes
+            cloud_pct_da = (mask_da.mean(dim=("y", "x")) * 100.0).rename(
+                "cloud_percentage"
             )
 
-        print("\nS2 co-registration is completed!")
+    est_source = data.where(mask_da == 0) if mask_da is not None else data
 
-        # export (ONLY if requested by wrapper)
-        final_out_path = _output_path
-        if do_export:
-            if final_out_path is None and input_path_str is not None:
-                final_out_path = _auto_output_path(input_path_str, suffix="_cr")
+    print(
+        f"Co-registration: {times.size} scenes, matching on band "
+        f"'{band_label}', {len(candidates)} window positions/scene, "
+        f"{iteration} estimation pass(es)"
+        + (", clouds masked for estimation only" if mask_da is not None else "")
+        + "."
+    )
 
-            if final_out_path is not None:
-                _write_coreg_output(out_ds, final_out_path)
-                print(f"\nCo-registered cube written to: {final_out_path}")
-            else:
-                print(
-                    "\nNo output_path provided and input was not a file path -> skipping NetCDF export."
-                )
-
-        return out_ds, final_out_path
-
-    # -----------------------------
-    # NEW: iteration wrapper
-    # -----------------------------
-    if iteration == 1:
-        return _run_once(input_path, output_path, first_scene_mode, do_export=True)
-
-    # Multi-iteration: no intermediate exports; export only at the end.
-    # If user didn't specify output_path but the ORIGINAL input was a file path, keep the old auto-export behavior.
-    final_target_path = output_path
-    if final_target_path is None and _orig_input_path_str is not None:
-        final_target_path = _auto_output_path(_orig_input_path_str, suffix="_cr")
-
-    current_input = input_path
-    current_mode = first_scene_mode
-
-    out_ds_final, out_path_final = None, None
+    # ------------------------------------------------------------------
+    # Estimation passes (no warping of the output data here)
+    # ------------------------------------------------------------------
+    total_shifts = {}  # time -> (x_px, y_px)
+    dropped_all = []
+    last_stats = {}
+    est_data = est_source
+    est_times = times
+    mode = first_scene_mode
 
     for it in range(1, iteration + 1):
-        is_last = it == iteration
-        print(
-            f"\n=== Iteration {it}/{iteration} (first_scene_mode='{current_mode}') ==="
+        shifts, dropped, stats = _estimate_shifts_pass(
+            est_data,
+            est_times,
+            geotransform,
+            crs_wkt,
+            candidates,
+            band_idx,
+            mode,
+            composite_window_days,
+            min_inliers_keep,
+            min_inliers_update_ref,
+            max_cloud_update_ref,
+            _cloud_lookup,
+            min_win_px,
+            desc=f"Estimating shifts (pass {it}/{iteration})",
         )
+        dropped_all.extend(dropped)
+        for t, (sx, sy) in shifts.items():
+            px, py = total_shifts.get(t, (0.0, 0.0))
+            total_shifts[t] = (px + sx, py + sy)
+        for t, s in stats.items():
+            last_stats[t] = s
 
-        out_ds_it, out_path_it = _run_once(
-            current_input,
-            final_target_path if is_last else None,
-            current_mode,
-            do_export=is_last,
-        )
-
-        current_input = out_ds_it  # feed next iteration with already co-registered cube
-        out_ds_final, out_path_final = out_ds_it, out_path_it
-
-        # composite only on iteration 1; then switch to 'first'
-        if first_scene_mode == "composite" and it == 1:
-            current_mode = "first"
-
-    return out_ds_final, out_path_final
-
-
-# ----------------------------------------------------------------------
-# ROI-based co-registration (no sliding windows)
-# ----------------------------------------------------------------------
-def coregister_cube_roi(
-    input_path,  # str | xr.Dataset | xr.DataArray
-    roi,  # bbox [xmin,ymin,xmax,ymax] OR geojson geom dict OR .gpkg path
-    roi_crs="EPSG:4326",
-    output_path=None,
-    stack_name="Spectral_Temporal_Stack",
-    first_scene_mode="composite",
-    composite_window_days=30,
-    min_reliability_keep=10.0,
-    min_reliability_update_ref=50.0,
-    max_cloud_update_ref=20.0,
-    roi_ws_min_px=64,
-    roi_ws_max_px=2048,
-    max_cc=None,
-    time_period=None,
-    # NEW:
-    iteration=1,
-):
-    if isinstance(iteration, bool) or not isinstance(iteration, (int, np.integer)):
-        raise TypeError("iteration must be an integer >= 1.")
-    iteration = int(iteration)
-    if iteration < 1:
-        raise ValueError("iteration must be an integer >= 1 (cannot be 0).")
-
-    _orig_input_path_str = input_path if isinstance(input_path, str) else None
-
-    def _run_once(
-        _input_obj,
-        _output_path,
-        _first_scene_mode,
-        do_export=True,
-    ):
-        stac, masked_stac, cloud_pct_da, input_path_str = _load_coreg_input(
-            _input_obj, stack_name=stack_name
-        )
-        input_crs_attr = masked_stac.attrs.get("crs", None)
-        filtered_data = _apply_time_and_cloud_filters(
-            masked_stac, max_cc=max_cc, time_period=time_period
-        )
-
-        crs_wkt = _get_crs_wkt(filtered_data, ds=stac)
-        filtered_data = filtered_data.rio.write_crs(crs_wkt, inplace=True)
-        geotransform = _get_geotransform(filtered_data, ds=stac)
-
-        times = filtered_data.time.values
-        if times.size == 0:
-            raise ValueError(
-                "No scenes left after applying max_cc/time_period filters."
-            )
-        band_names = filtered_data.band.values
-        height = filtered_data.sizes["y"]
-        width = filtered_data.sizes["x"]
-
-        (rxmin, rymin, rxmax, rymax), _ = _roi_to_geom_and_projected_bbox(
-            roi, roi_crs=roi_crs, target_crs_wkt=crs_wkt
-        )
-        wp = ((rxmin + rxmax) / 2.0, (rymin + rymax) / 2.0)
-
-        px_w = float(geotransform[1])
-        px_h = float(abs(geotransform[5]))
-        wsx = int(
-            max(roi_ws_min_px, min(roi_ws_max_px, (rxmax - rxmin) / max(px_w, 1e-12)))
-        )
-        wsy = int(
-            max(roi_ws_min_px, min(roi_ws_max_px, (rymax - rymin) / max(px_h, 1e-12)))
-        )
-        ws = (wsx, wsy)
-
-        corrected_images, failed_times = [], []
-        current_reference, master_geoArr = None, None
-        kept_reliabilities, kept_rel_times = [], []
-
-        if _first_scene_mode == "first":
-            im_ref = filtered_data.sel(time=times[0]).transpose("y", "x", "band")
-            im_ref = im_ref.where(im_ref != 0, np.nan)
-            y_coords, x_coords = _compute_coords(geotransform, height, width)
-            im_ref = im_ref.assign_coords(
-                {"y": ("y", y_coords), "x": ("x", x_coords), "time": times[0]}
-            )
-            corrected_images.append(im_ref)
-            current_reference = im_ref
-            start_idx = 1
-
-        elif _first_scene_mode == "composite":
-            first_time = times[0]
-            end_time = first_time + np.timedelta64(composite_window_days, "D")
-            subset = filtered_data.sel(time=slice(first_time, end_time))
-            if subset.sizes["time"] == 0:
-                subset = filtered_data
-            master_median = subset.median(dim="time", skipna=True)
-            master_ref = master_median.transpose("y", "x", "band").where(
-                master_median.transpose("y", "x", "band") != 0, np.nan
-            )
-            master_geoArr = GeoArray(
-                master_ref.values, geotransform=geotransform, projection=crs_wkt
-            )
-            start_idx = 0
-        else:
-            raise ValueError("first_scene_mode must be 'first' or 'composite'")
-
-        indices = range(start_idx, len(times))
-
-        for idx in tqdm(
-            indices,
-            total=len(times),
-            initial=start_idx,
-            desc="Co-registering scenes (ROI)",
-            unit="scene",
-        ):
-            t = times[idx]
-            im_target = filtered_data.sel(time=t).transpose("y", "x", "band")
-
-            if _first_scene_mode == "composite" and current_reference is None:
-                ref_geoArr = master_geoArr
-            else:
-                if current_reference is None:
-                    raise RuntimeError("No valid reference available for chained mode.")
-                ref_geoArr = GeoArray(
-                    current_reference.values,
-                    geotransform=geotransform,
-                    projection=crs_wkt,
-                )
-
-            tgt_geoArr = GeoArray(
-                im_target.values, geotransform=geotransform, projection=crs_wkt
-            )
-
-            with _suppress_arosics_warnings():
-                try:
-                    CR = COREG(
-                        ref_geoArr, tgt_geoArr, align_grids=True, q=True, wp=wp, ws=ws
-                    )
-                    CR.calculate_spatial_shifts()
-                    result = CR.correct_shifts()
-                    reliability = getattr(CR, "shift_reliability", None)
-                except (RuntimeError, ValueError, AssertionError, AttributeError):
-                    failed_times.append(t)
-                    continue
-
-            if (min_reliability_keep is not None) and (
-                (reliability is None) or (reliability < min_reliability_keep)
-            ):
-                failed_times.append(t)
-                continue
-
-            out_geoArr = GeoArray(
-                result["arr_shifted"],
-                result["updated geotransform"],
-                result["updated projection"],
-            )
-            arr_corr = out_geoArr[:].transpose(2, 0, 1)
-            arr_corr = np.where(arr_corr == 0, np.nan, arr_corr)
-
-            updated_gt = result["updated geotransform"]
-            h2, w2 = arr_corr.shape[1], arr_corr.shape[2]
-            y2, x2 = _compute_coords(updated_gt, h2, w2)
-
-            da_corr = xr.DataArray(
-                arr_corr,
-                dims=("band", "y", "x"),
-                coords={
-                    "band": range(1, arr_corr.shape[0] + 1),
-                    "y": ("y", y2),
-                    "x": ("x", x2),
-                },
-            )
-            da_corr = da_corr.rio.write_transform(Affine.from_gdal(*updated_gt))
-            da_corr = da_corr.rio.write_crs(result["updated projection"])
-            da_corr = (
-                da_corr.assign_coords(band=("band", band_names))
-                .transpose("y", "x", "band")
-                .assign_coords(time=t)
-            )
-
-            corrected_images.append(da_corr)
-
-            if reliability is not None:
-                kept_reliabilities.append(float(reliability))
-                kept_rel_times.append(t)
-
-            cp_t = None
-            if cloud_pct_da is not None:
-                try:
-                    cp_t = (
-                        float(cloud_pct_da.sel(time=t))
-                        if "time" in cloud_pct_da.dims
-                        else float(cloud_pct_da)
-                    )
-                except Exception:
-                    cp_t = None
-
-            update_ref = True
-            if (min_reliability_update_ref is not None) and (
-                (reliability is None) or (reliability < min_reliability_update_ref)
-            ):
-                update_ref = False
-            if (
-                (max_cloud_update_ref is not None)
-                and (cp_t is not None)
-                and (cp_t > max_cloud_update_ref)
-            ):
-                update_ref = False
-
-            if update_ref:
-                current_reference = da_corr
-
-        if not corrected_images:
+        kept_times = np.array([t for t in est_times if t in shifts])
+        if kept_times.size == 0:
             raise RuntimeError("No scenes were kept. Output stack would be empty.")
+        est_times = kept_times
 
-        corrected_stack = xr.concat(corrected_images, dim="time").transpose(
-            "time", "band", "y", "x"
+        if it < iteration:
+            # shifted in-memory copy for the next estimation pass only;
+            # the final output is still warped once from the ORIGINAL data
+            shifted = []
+            for t in est_times:
+                da = _warp_scene_yxb(
+                    est_source.sel(time=t), *total_shifts[t], geotransform, crs_wkt
+                ).transpose("y", "x", "band")
+                shifted.append(da.assign_coords(time=t))
+            est_data = xr.concat(shifted, dim="time")
+            # the composite start only makes sense against raw scenes
+            if mode == "composite":
+                mode = "first"
+
+    # ------------------------------------------------------------------
+    # Single final warp from the original data
+    # ------------------------------------------------------------------
+    corrected_images = []
+    for t in tqdm(est_times, desc="Applying shifts (single warp)", unit="scene"):
+        scene = _mask_nodata_zeros(data.sel(time=t))
+        da = _warp_scene_yxb(scene, *total_shifts[t], geotransform, crs_wkt)
+        corrected_images.append(da.assign_coords(time=t))
+
+    corrected_stack = xr.concat(corrected_images, dim="time").transpose(
+        "time", "band", "y", "x"
+    )
+    corrected_stack = corrected_stack.rio.write_crs(crs_wkt, inplace=True)
+    if input_crs_attr is not None:
+        corrected_stack.attrs["crs"] = input_crs_attr
+    corrected_stack.name = "Spectral_Temporal_Stack"
+
+    out_ds = xr.Dataset({"Spectral_Temporal_Stack": corrected_stack})
+    if stac is not None and "spatial_ref" in stac.variables:
+        out_ds["spatial_ref"] = stac["spatial_ref"]
+    if cloud_pct_da is not None and "time" in getattr(cloud_pct_da, "dims", ()):
+        out_ds = out_ds.assign_coords(
+            cloud_percentage=cloud_pct_da.sel(time=corrected_stack.time.values)
         )
-        corrected_stack = corrected_stack.rio.write_crs(crs_wkt, inplace=True)
-        if input_crs_attr is not None:
-            corrected_stack.attrs["crs"] = input_crs_attr
-        corrected_stack.name = "Spectral_Temporal_Stack"
 
-        out_ds = xr.Dataset({"Spectral_Temporal_Stack": corrected_stack})
-        if stac is not None and "spatial_ref" in stac.variables:
-            out_ds["spatial_ref"] = stac["spatial_ref"]
+    # ------------------------------------------------------------------
+    # Report
+    # ------------------------------------------------------------------
+    times_out = corrected_stack.time.values
+    print("\nCo-registration summary")
+    print("-----------------------")
+    print(
+        f"Original (after max_cc/time_period): {len(times)} scenes from "
+        f"{np.datetime_as_string(times[0], 'D')} to {np.datetime_as_string(times[-1], 'D')}"
+    )
+    print(
+        "Scenes excluded after co-registration (no window consensus):",
+        len(set(dropped_all)),
+    )
+    print(f"Scenes remaining in the co-registered cube: {len(times_out)}")
 
-        if stac is not None:
-            if "cloud_percentage" in stac.coords:
-                out_ds = out_ds.assign_coords(cloud_percentage=stac.cloud_percentage)
-            elif "cloud_percentage" in stac:
-                out_ds = out_ds.assign_coords(cloud_percentage=stac["cloud_percentage"])
+    if dropped_all:
+        excluded_entries = []
+        for ts in sorted(set(dropped_all)):
+            ds_ = np.datetime_as_string(ts, unit="D")
+            cp = _cloud_lookup(ts)
+            excluded_entries.append(f"{ds_} ({cp:.1f}%)" if cp is not None else ds_)
+        print("Excluded dates (cloud percentage): " + ", ".join(excluded_entries))
 
-        # report
-        times_out = corrected_stack.time.values
-        print("\nCo-registration summary (ROI)")
-        print("-----------------------------")
-        print(f"ROI wp={wp}, ws(px)={ws}")
+    if last_stats:
+        inl = np.array([s["n_inliers"] for s in last_stats.values()], dtype=float)
+        spr = np.array([s["spread"] for s in last_stats.values()], dtype=float)
         print(
-            f"Original (after max_cc/time_period): {len(times)} scenes from "
-            f"{np.datetime_as_string(times[0], 'D')} to {np.datetime_as_string(times[-1], 'D')}"
+            f"\nWindow agreement of kept scenes: mean {inl.mean():.1f} inlier "
+            f"windows/scene (min {int(inl.min())}), median spread {np.median(spr):.2f} px"
         )
+        mags = np.array([np.hypot(*total_shifts[t]) for t in est_times])
         print(
-            "Scenes excluded after co-registration (overlap / tie points / low reliability):",
-            len(failed_times),
+            f"Applied shifts: mean {mags.mean():.2f} px, max {mags.max():.2f} px "
+            f"(single cubic warp; data resampled once)"
         )
-        print(f"Scenes remaining in the co-registered cube: {len(times_out)}")
 
-        if failed_times:
-            excluded_entries = []
-            for ts in failed_times:
-                ds_ = np.datetime_as_string(ts, unit="D")
-                if cloud_pct_da is not None:
-                    try:
-                        cp = (
-                            float(cloud_pct_da.sel(time=ts))
-                            if "time" in cloud_pct_da.dims
-                            else float(cloud_pct_da)
-                        )
-                        excluded_entries.append(f"{ds_} ({cp:.1f}%)")
-                    except Exception:
-                        excluded_entries.append(ds_)
-                else:
-                    excluded_entries.append(ds_)
-            print("Excluded dates (cloud percentage): " + ", ".join(excluded_entries))
+    print("\nS2 co-registration is completed!")
 
-        if kept_reliabilities:
-            mean_rel = float(np.mean(kept_reliabilities))
-            min_idx = int(np.argmin(kept_reliabilities))
-            print(f"\nMean match reliability of kept scenes: {mean_rel:.1f} %")
-            print(
-                f"Minimum match reliability of kept scenes: {kept_reliabilities[min_idx]:.1f} % "
-                f"(date: {np.datetime_as_string(kept_rel_times[min_idx], 'D')})"
-            )
+    # ------------------------------------------------------------------
+    # Export
+    # ------------------------------------------------------------------
+    final_out_path = output_path
+    if final_out_path is None and input_path_str is not None:
+        final_out_path = _auto_output_path(input_path_str, suffix="_cr")
 
-        print("\nS2 co-registration is completed!")
-
-        final_out_path = _output_path
-        if do_export:
-            if final_out_path is None and input_path_str is not None:
-                final_out_path = _auto_output_path(input_path_str, suffix="_cr")
-
-            if final_out_path is not None:
-                _write_coreg_output(out_ds, final_out_path)
-                print(f"\nCo-registered cube written to: {final_out_path}")
-            else:
-                print(
-                    "\nNo output_path provided and input was not a file path -> skipping NetCDF export."
-                )
-
-        return out_ds, final_out_path
-
-    if iteration == 1:
-        return _run_once(input_path, output_path, first_scene_mode, do_export=True)
-
-    final_target_path = output_path
-    if final_target_path is None and _orig_input_path_str is not None:
-        final_target_path = _auto_output_path(_orig_input_path_str, suffix="_cr")
-
-    current_input = input_path
-    current_mode = first_scene_mode
-    out_ds_final, out_path_final = None, None
-
-    for it in range(1, iteration + 1):
-        is_last = it == iteration
+    if final_out_path is not None:
+        _write_coreg_output(out_ds, final_out_path)
+        print(f"\nCo-registered cube written to: {final_out_path}")
+    else:
         print(
-            f"\n=== Iteration {it}/{iteration} (first_scene_mode='{current_mode}') ==="
+            "\nNo output_path provided and input was not a file path -> skipping export."
         )
 
-        out_ds_it, out_path_it = _run_once(
-            current_input,
-            final_target_path if is_last else None,
-            current_mode,
-            do_export=is_last,
-        )
-
-        current_input = out_ds_it
-        out_ds_final, out_path_final = out_ds_it, out_path_it
-
-        if first_scene_mode == "composite" and it == 1:
-            current_mode = "first"
-
-    return out_ds_final
+    return out_ds, final_out_path
 
 
 # ----------------------------------------------------------------------
