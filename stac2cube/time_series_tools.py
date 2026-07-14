@@ -736,6 +736,7 @@ def interactive_time_view(
     figsize=(8, 8),
     crop=None,
     modes=("rgb", "false_color", "ndvi", "ndwi"),
+    return_time_widget: bool = False,
 ):
     """
     Interactive cube viewer with three visualization sections:
@@ -1131,6 +1132,11 @@ def interactive_time_view(
     )
     display(widgets.VBox([controls, out]))
     plot_current()
+
+    if return_time_widget:
+        # opt-in accessor for embedding GUIs (e.g. "pick a reference scene"):
+        # time_w.value is the integer index into the cube's time axis.
+        return time_w
 
 
 # ==========================================================

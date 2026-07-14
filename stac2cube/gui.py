@@ -8845,19 +8845,20 @@ def ard_cube_tools():
     The mask may contain more dates than the cube; every cube date must be present.
     """,
         "min_inliers_keep": """
-    <b>min_inliers_keep</b><br>
-    Minimum number of window positions that must agree on a scene's shift. Scenes with fewer<br>
-    agreeing windows (typically heavily clouded) are dropped from the time series.
+    <b>Matching Points to Keep a Scene</b> (<code>min_inliers_keep</code>)<br>
+    The shift of each scene is measured at many points across the image. This is the minimum number<br>
+    of points that must agree for the scene to be kept; scenes with fewer agreeing points (typically<br>
+    heavily clouded) are dropped from the time series.
     """,
         "min_inliers_update_ref": """
-    <b>min_inliers_update_ref</b><br>
-    Minimum number of agreeing windows for a scene to become the reference for the next scene.<br>
-    Scenes below this are kept in the cube but never anchor the chain.
+    <b>Matching Points to Trust as Reference</b> (<code>min_inliers_update_ref</code>)<br>
+    A scene becomes the reference that the NEXT scene is aligned to only when at least this many<br>
+    points agree on its shift. Scenes below this stay in the cube but never serve as reference.
     """,
         "max_cloud_update_ref": """
-    <b>max_cloud_update_ref</b><br>
-    Maximum cloud percentage for selecting a scene as reference. Scenes above this threshold will not be selected as reference<br>
-    for the co-registration of the following scene.
+    <b>Max Cloud % for Reference Scenes</b> (<code>max_cloud_update_ref</code>)<br>
+    Scenes cloudier than this never become the reference for the following scene, even when their<br>
+    shift was measured confidently.
     """,
         "first_scene_mode": """
     <b>first_scene_mode</b><br>
@@ -8870,8 +8871,9 @@ def ard_cube_tools():
         "reference_date": """
     <b>reference_date</b><br>
     Only used with <code>select date</code>: the scene to anchor the chain at (<code>YYYY-MM-DD</code>,<br>
-    nearest available scene is used). Inspect the cube in the Data Cube Editor / Visualization first<br>
-    and pick a cloud-free, snow-free, high-contrast scene.
+    nearest available scene is used). Click <b>Browse Scenes</b> to look through the cube and pick a<br>
+    cloud-free, high-contrast scene visually - "Select Scene as Reference" fills this field for you.<br>
+    The chain then runs in both directions from that scene, so any date of the series works.
     """,
         "composite_window_days": """
     <b>composite_window_days</b><br>
@@ -10380,10 +10382,10 @@ def ard_cube_tools():
 
     cr_first_scene_mode_w = widgets.Dropdown(
         options=[
-            ("auto (recommended)", "auto"),
-            ("first", "first"),
-            ("composite", "composite"),
+            ("auto", "auto"),
             ("select date", "date"),
+            ("composite", "composite"),
+            ("first", "first"),
         ],
         value="auto",
         layout=widgets.Layout(width="200px"),
@@ -10399,8 +10401,68 @@ def ard_cube_tools():
         disabled=True,
     )
 
+    # scene browser: reuses the standard cube viewer so the user can look
+    # through the scenes and pick the reference date visually
+    cr_browse_scenes_btn = widgets.Button(
+        description="Browse Scenes",
+        icon="eye",
+        layout=widgets.Layout(width="150px", margin="18px 0 0 0"),
+    )
+    cr_pick_out = widgets.Output()
+
+    def _on_browse_scenes_clicked(_):
+        spectral = state.get("loaded_obj")
+        if spectral is None:
+            _status("❌ Load a cube first.")
+            return
+        if isinstance(spectral, xr.Dataset):
+            if "Spectral_Temporal_Stack" not in spectral.data_vars:
+                _status("❌ Loaded cube has no 'Spectral_Temporal_Stack'.")
+                return
+            spectral = spectral["Spectral_Temporal_Stack"]
+        if "time" not in spectral.dims:
+            _status(
+                "❌ The loaded layer is a single composite image; "
+                "there are no scenes to browse."
+            )
+            return
+
+        with cr_pick_out:
+            clear_output()
+            time_w = interactive_time_view(
+                stac=spectral, widget_type="dropdown", return_time_widget=True
+            )
+
+            select_btn = widgets.Button(
+                description="Select Scene as Reference",
+                button_style="info",
+                icon="check",
+                layout=widgets.Layout(width="230px"),
+            )
+            close_btn = widgets.Button(
+                description="Close",
+                layout=widgets.Layout(width="90px"),
+            )
+
+            def _on_select(_btn):
+                idx = int(time_w.value)
+                date_str = str(spectral.time.values[idx])[:10]
+                cr_first_scene_mode_w.value = "date"  # enables the date field
+                cr_ref_date_w.value = date_str
+                _status(f"✅ Reference scene set to {date_str}.")
+
+            def _on_close(_btn):
+                cr_pick_out.clear_output()
+
+            select_btn.on_click(_on_select)
+            close_btn.on_click(_on_close)
+            display(widgets.HBox([select_btn, close_btn],
+                                 layout=widgets.Layout(gap="8px")))
+
+    cr_browse_scenes_btn.on_click(_on_browse_scenes_clicked)
+
     cr_iteration_w = widgets.Dropdown(
-        options=[("auto (recommended)", "auto"), ("1", 1), ("2", 2), ("3", 3), ("4", 4), ("5", 5)],
+        options=[("auto", "auto"), ("1", 1), ("2", 2), ("3", 3), ("4", 4), ("5", 5)],
         value="auto",
         layout=widgets.Layout(width="200px"),
     )
@@ -10721,6 +10783,17 @@ def ard_cube_tools():
                 ],
                 gap_px=20,
             ),
+            _stacked_field(
+                cr_mask_box,
+                "Cloud mask cube (optional - only for cubes with clouds kept)",
+            ),
+            widgets.HTML(
+                "<div style='font-size:11px; color:#666; margin-top:-6px;'>"
+                "Provide the binary cloud mask (builder's mask export) to co-register a cube "
+                "that KEEPS its clouds (e.g. for natural animations): clouds are ignored during "
+                "shift estimation but stay in the exported scenes. Leave empty for cloud-masked cubes."
+                "</div>"
+            ),
         ],
         layout=widgets.Layout(width="100%", gap="6px"),
     )
@@ -10745,9 +10818,9 @@ def ard_cube_tools():
             widgets.HTML("<b>Secondary Parameters</b>"),
             _row(
                 [
-                    _stacked_field_with_help(cr_min_inliers_keep_w, "Min Agreeing Windows to Keep Scene", "min_inliers_keep"),
-                    _stacked_field_with_help(cr_min_inliers_update_ref_w, "Min Agreeing Windows to Update Reference", "min_inliers_update_ref"),
-                    _stacked_field_with_help(cr_max_cloud_update_ref_w, "Max Cloud Coverage to Update Reference", "max_cloud_update_ref"),
+                    _stacked_field_with_help(cr_min_inliers_keep_w, "Matching Points to Keep a Scene", "min_inliers_keep"),
+                    _stacked_field_with_help(cr_min_inliers_update_ref_w, "Matching Points to Trust as Reference", "min_inliers_update_ref"),
+                    _stacked_field_with_help(cr_max_cloud_update_ref_w, "Max Cloud % for Reference Scenes", "max_cloud_update_ref"),
                 ],
                 gap_px=20,
             ),
@@ -10762,6 +10835,7 @@ def ard_cube_tools():
                 [
                     _stacked_field_with_help(cr_first_scene_mode_w, "First Reference Scene", "first_scene_mode"),
                     _stacked_field_with_help(cr_ref_date_w, "Reference Date", "reference_date"),
+                    cr_browse_scenes_btn,
                     _stacked_field_with_help(cr_composite_window_days_w, "Composite Window (days)", "composite_window_days"),
                 ],
                 gap_px=20,
@@ -10787,18 +10861,7 @@ def ard_cube_tools():
             row3,
             section_spacer,
             row4,
-            section_spacer,
-            _stacked_field(
-                cr_mask_box,
-                "Cloud mask cube (optional - only for cubes with clouds kept)",
-            ),
-            widgets.HTML(
-                "<div style='font-size:11px; color:#666; margin-top:-6px;'>"
-                "Provide the binary cloud mask (builder's mask export) to co-register a cube "
-                "that KEEPS its clouds (e.g. for natural animations): clouds are ignored during "
-                "shift estimation but stay in the exported scenes. Leave empty for cloud-masked cubes."
-                "</div>"
-            ),
+            cr_pick_out,
             section_spacer,
             _stacked_field(cr_out_box, "Output NetCDF"),
             section_spacer,
@@ -11162,6 +11225,7 @@ def ard_cube_tools():
         cr_first_scene_mode_w.disabled = not enabled
         cr_composite_window_days_w.disabled = (not enabled) or (cr_first_scene_mode_w.value != "composite")
         cr_ref_date_w.disabled = (not enabled) or (cr_first_scene_mode_w.value != "date")
+        cr_browse_scenes_btn.disabled = not enabled
         cr_iteration_w.disabled = not enabled
         cr_cloud_mask_w.disabled = not enabled
         browse_cr_mask_btn.disabled = not enabled

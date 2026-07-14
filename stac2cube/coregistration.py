@@ -440,11 +440,16 @@ def _load_cloud_mask(mask_obj, times, height, width):
 
 
 def _auto_anchor_time(data, times, band_idx, cloud_lookup):
-    """Pick the best chain anchor scene automatically: among scenes with
-    <=10% cloud and <20% missing pixels (falling back to all scenes when
-    nothing qualifies), the one whose matching band has the most texture
-    (median gradient magnitude). Snow, haze and clouds all reduce texture,
-    which is exactly what makes a scene a bad reference."""
+    """Pick the best chain anchor scene automatically.
+
+    Candidates: <=10% cloud and <20% missing pixels (falling back to all
+    scenes when nothing qualifies). Among them, prefer scenes in the
+    CENTRAL HALF of the time range - the chain runs bidirectionally from
+    the anchor, so a central anchor halves the worst-case chain length
+    and the error accumulation (measured: mid-series anchor gave the
+    smallest shifts and best cube). The most textured scene (median
+    gradient of the matching band) of the preferred window wins; texture
+    is what the matcher locks onto, and clouds/haze destroy it."""
     scored = []
     for t in times:
         band = data.sel(time=t).isel(band=band_idx - 1).values
@@ -460,6 +465,12 @@ def _auto_anchor_time(data, times, band_idx, cloud_lookup):
     ]
     if not eligible:
         eligible = scored
+
+    t0, t1 = times[0], times[-1]
+    quarter = (t1 - t0) / 4
+    central = [s for s in eligible if t0 + quarter <= s[0] <= t1 - quarter]
+    if central:
+        eligible = central
     return max(eligible, key=lambda s: s[2])[0]
 
 
@@ -573,17 +584,20 @@ def _edge_roughness(data_tyxb, band_idx):
     land-cover boundary pixels flicker between classes, so this drops as
     alignment improves; it is insensitive to uniform seasonal change."""
     v = data_tyxb.isel(band=band_idx - 1).values  # (time, y, x)
-    med = np.nanmedian(v, axis=0)
-    gy, gx = np.gradient(med)
-    grad = np.hypot(gy, gx)
-    valid = np.isfinite(grad)
-    if not valid.any():
-        return np.nan
-    edge = grad >= np.nanpercentile(grad[valid], 90)
-    d2 = np.abs(v[:-2] - 2 * v[1:-1] + v[2:])
-    with np.errstate(invalid="ignore"):
+    # pixels that are NaN on every date (persistent cloud mask / nodata)
+    # legitimately yield NaN means; silence numpy's empty-slice warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        med = np.nanmedian(v, axis=0)
+        gy, gx = np.gradient(med)
+        grad = np.hypot(gy, gx)
+        valid = np.isfinite(grad)
+        if not valid.any():
+            return np.nan
+        edge = grad >= np.nanpercentile(grad[valid], 90)
+        d2 = np.abs(v[:-2] - 2 * v[1:-1] + v[2:])
         rough = np.nanmean(d2, axis=0)
-    return float(np.nanmean(rough[edge]))
+        return float(np.nanmean(rough[edge]))
 
 
 # ----------------------------------------------------------------------
@@ -848,7 +862,13 @@ def coregister_cube(
                     est_source.sel(time=t), *cand_totals[t], geotransform, crs_wkt
                 ).transpose("y", "x", "band")
                 shifted.append(da.assign_coords(time=t))
-            shifted_data = xr.concat(shifted, dim="time")
+            # coords="different" (today's default, pinned explicitly so the
+            # planned xarray default change cannot alter behavior): per-scene
+            # scalar coords like cloud_percentage differ and must be
+            # concatenated along time
+            shifted_data = xr.concat(
+                shifted, dim="time", coords="different", compat="equals"
+            )
 
         # auto mode: accept a refinement pass only when it measurably
         # improves the cube. All refinement strategies tested re-measure
@@ -896,9 +916,9 @@ def coregister_cube(
         da = _warp_scene_yxb(scene, *total_shifts[t], geotransform, crs_wkt)
         corrected_images.append(da.assign_coords(time=t))
 
-    corrected_stack = xr.concat(corrected_images, dim="time").transpose(
-        "time", "band", "y", "x"
-    )
+    corrected_stack = xr.concat(
+        corrected_images, dim="time", coords="different", compat="equals"
+    ).transpose("time", "band", "y", "x")
     corrected_stack = corrected_stack.rio.write_crs(crs_wkt, inplace=True)
     if input_crs_attr is not None:
         corrected_stack.attrs["crs"] = input_crs_attr

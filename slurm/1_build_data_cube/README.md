@@ -34,6 +34,7 @@ The easiest and safest way to produce a valid config is the **Data Cube Builder*
     "cloud_masking": true,
     "output": "/dss/.../test.nc",
     "clip_raster": false,
+    "resampling_method": "nearest",
     "aggregator": null,
     "stats": null
   }

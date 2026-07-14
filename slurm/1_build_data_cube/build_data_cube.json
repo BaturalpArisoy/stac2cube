@@ -12,6 +12,7 @@
     "cloud_masking": true,
     "output": "/dss/.../test.nc",
     "clip_raster": false,
+    "resampling_method": "nearest",
     "aggregator": null,
     "stats": null
   }
