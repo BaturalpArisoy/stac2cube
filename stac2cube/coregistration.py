@@ -284,21 +284,142 @@ def _grid_candidates(geotransform, height, width, grid_size):
     return cands
 
 
-def _consensus_shift(ref_geoArr, tgt_geoArr, candidates, band_idx, min_win_px=64):
-    """Estimate one scene's shift as the consensus over many window positions.
+# adaptive escalation: a coarse-stage consensus is accepted outright only
+# when it is this unambiguous (measured clear-scene spreads: 0.02-0.09 px)
+_COARSE_MIN_SUCCESS = 5
+_COARSE_MIN_INLIER_FRACTION = 0.8
+_COARSE_MAX_SPREAD_PX = 0.15
+_COARSE_N = 10  # coarse-stage window budget (matches the old 3x3 lattice + auto)
 
-    Runs estimation-only AROSICS at every candidate window (no warping),
-    keeps windows whose ACTUAL matching window is at least min_win_px in
-    both dimensions (AROSICS clips windows near AOI edges; tiny windows
-    measured wildly unreliable), then:
-      reliability-weighted median -> inliers within max(0.2 px, 3*MAD)
-      -> consensus = reliability-weighted mean of the inliers.
+# cloud-aware window placement: AROSICS tolerates NO nodata inside the
+# matching window (measured: ~10 NaN pixels in a 256 px window already make
+# the match fail), so on partially cloudy scenes blind lattice positions
+# almost all die and good scenes get dropped. Windows are therefore placed
+# only where BOTH images are fully clear, scanned on a dense candidate
+# lattice with an integral image (cost is negligible next to one COREG call).
+_WIN_PX = 256  # AROSICS default matching-window size (win_size_XY)
+_CLEAR_PAD_PX = 8  # margin: grid alignment (1 px) + integer-shift search
+_PLACEMENT_STRIDE_PX = 64
+_MIN_SEP_PX = 128  # selected window centers at least half a window apart
 
-    A single high-reliability outlier window (e.g. on a cloud edge or a
-    migrated river bar) gets outvoted instead of winning outright, which
-    is what poisoned the old argmax-based chaining.
 
-    Returns dict(x, y, n_ok, n_inliers, spread) in pixels, or None.
+def _integral_image(mask2d):
+    ii = np.zeros((mask2d.shape[0] + 1, mask2d.shape[1] + 1), dtype=np.int64)
+    ii[1:, 1:] = mask2d.astype(np.int64).cumsum(axis=0).cumsum(axis=1)
+    return ii
+
+
+def _box_count(ii, cy, cx, half):
+    return (
+        ii[cy + half, cx + half]
+        - ii[cy - half, cx + half]
+        - ii[cy + half, cx - half]
+        + ii[cy - half, cx - half]
+    )
+
+
+def _clear_window_positions(
+    ref_finite,
+    tgt_finite,
+    geotransform,
+    n_max,
+    win_px=_WIN_PX,
+    pad_px=_CLEAR_PAD_PX,
+    stride_px=_PLACEMENT_STRIDE_PX,
+    min_sep_px=_MIN_SEP_PX,
+):
+    """Candidate window positions where BOTH images are fully clear
+    (no NaN in the padded matching-window box).
+
+    Returns [(label, (map_x, map_y)), ...] ordered by farthest-point
+    sampling from the AOI center, so any prefix of the list is itself a
+    well-spread subset (used directly as the adaptive coarse stage).
+    Returns [] when the AOI is smaller than a padded window or no fully
+    clear position exists.
+    """
+    h, w = ref_finite.shape
+    half = win_px // 2 + pad_px
+    if h < 2 * half or w < 2 * half:
+        return []
+
+    both = ref_finite & tgt_finite
+    ii = _integral_image(both)
+    full = (2 * half) ** 2
+
+    cys = np.arange(half, h - half + 1, stride_px)
+    cxs = np.arange(half, w - half + 1, stride_px)
+    pool = [
+        (cy, cx)
+        for cy in cys
+        for cx in cxs
+        if _box_count(ii, cy, cx, half) == full
+    ]
+    if not pool:
+        return []
+
+    pts = np.asarray(pool, dtype=float)
+    center = np.array([h / 2.0, w / 2.0])
+    seed = int(np.argmin(((pts - center) ** 2).sum(axis=1)))
+    selected = [seed]
+    dist = np.hypot(*(pts - pts[seed]).T)
+    while len(selected) < min(n_max, len(pool)):
+        i = int(np.argmax(dist))
+        if dist[i] < min_sep_px:
+            break
+        selected.append(i)
+        dist = np.minimum(dist, np.hypot(*(pts - pts[i]).T))
+
+    left, top = geotransform[0], geotransform[3]
+    px_w, px_h = geotransform[1], geotransform[5]
+    out = []
+    for k, i in enumerate(selected):
+        cy, cx = pool[i]
+        out.append((f"cw{k}_y{cy}_x{cx}", (left + cx * px_w, top + cy * px_h)))
+    return out
+
+
+def _place_candidates(ref_finite, tgt_finite, geotransform, grid_candidates):
+    """Window positions for one scene pair: fully clear positions first
+    (farthest-point ordered), topped up with blind lattice positions that
+    keep their distance from the clear ones. Falls back to the blind
+    lattice entirely when no clear position exists (small AOIs, hopeless
+    scenes) - AROSICS' own window shrinking then gets its chance, exactly
+    the pre-placement behavior.
+
+    Returns (candidates, n_clear).
+    """
+    n_full = len(grid_candidates)
+    clear = _clear_window_positions(ref_finite, tgt_finite, geotransform, n_full)
+    if not clear:
+        return grid_candidates, 0
+    if len(clear) >= n_full:
+        return clear, len(clear)
+
+    left, top = geotransform[0], geotransform[3]
+    px_w, px_h = geotransform[1], geotransform[5]
+    sel_px = np.array(
+        [((wp[1] - top) / px_h, (wp[0] - left) / px_w) for _l, wp in clear]
+    )
+    cands = list(clear)
+    for label, wp in grid_candidates:
+        if len(cands) >= n_full:
+            break
+        if wp is None:
+            continue
+        p = np.array([(wp[1] - top) / px_h, (wp[0] - left) / px_w])
+        if np.hypot(*(sel_px - p).T).min() >= _MIN_SEP_PX:
+            cands.append((label, wp))
+    return cands, len(clear)
+
+
+def _estimate_windows(ref_geoArr, tgt_geoArr, candidates, band_idx, min_win_px):
+    """Estimation-only AROSICS at every candidate window (no warping).
+
+    Windows whose ACTUAL matching window ends up below min_win_px in
+    either dimension are discarded (AROSICS clips windows near AOI edges;
+    tiny windows measured wildly unreliable).
+
+    Returns (xs, ys, reliabilities) as float arrays (possibly empty).
     """
     xs, ys, rel = [], [], []
     with _suppress_arosics_warnings():
@@ -321,10 +442,22 @@ def _consensus_shift(ref_geoArr, tgt_geoArr, candidates, band_idx, min_win_px=64
                 rel.append(float(cr.shift_reliability))
             except (RuntimeError, ValueError, AssertionError, AttributeError):
                 continue
+    return np.asarray(xs), np.asarray(ys), np.asarray(rel)
 
-    if not xs:
+
+def _consensus_from_estimates(xs, ys, rel, n_attempted):
+    """Robust consensus over per-window shift estimates:
+      reliability-weighted median -> inliers within max(0.2 px, 3*MAD)
+      -> consensus = reliability-weighted mean of the inliers.
+
+    A single high-reliability outlier window (e.g. on a cloud edge or a
+    migrated river bar) gets outvoted instead of winning outright, which
+    is what poisoned the old argmax-based chaining.
+
+    Returns dict(x, y, n_ok, n_inliers, spread, n_attempted) or None.
+    """
+    if xs.size == 0:
         return None
-    xs, ys, rel = np.asarray(xs), np.asarray(ys), np.asarray(rel)
 
     def _wmedian(values, weights):
         order = np.argsort(values)
@@ -347,7 +480,98 @@ def _consensus_shift(ref_geoArr, tgt_geoArr, candidates, band_idx, min_win_px=64
         "n_ok": int(xs.size),
         "n_inliers": n_inl,
         "spread": spread,
+        "n_attempted": int(n_attempted),
     }
+
+
+def _consensus_shift(
+    ref_geoArr,
+    tgt_geoArr,
+    candidates,
+    band_idx,
+    min_win_px=64,
+    coarse_candidates=None,
+):
+    """Estimate one scene's shift as the consensus over many window positions.
+
+    When coarse_candidates is given (adaptive escalation), the coarse set
+    is evaluated first and accepted outright only when the result is
+    unambiguous (enough successes, >=80% of them agreeing, tight spread).
+    Otherwise the remaining full-grid windows are evaluated as well and
+    ALL estimates are pooled into one consensus - escalation adds voters,
+    it never discards the coarse evidence.
+
+    Returns dict(x, y, n_ok, n_inliers, spread, n_attempted, escalated)
+    or None.
+    """
+    if coarse_candidates is None:
+        xs, ys, rel = _estimate_windows(
+            ref_geoArr, tgt_geoArr, candidates, band_idx, min_win_px
+        )
+        cons = _consensus_from_estimates(xs, ys, rel, len(candidates))
+        if cons is not None:
+            cons["escalated"] = False
+        return cons
+
+    xs, ys, rel = _estimate_windows(
+        ref_geoArr, tgt_geoArr, coarse_candidates, band_idx, min_win_px
+    )
+    cons = _consensus_from_estimates(xs, ys, rel, len(coarse_candidates))
+    if (
+        cons is not None
+        and cons["n_ok"] >= _COARSE_MIN_SUCCESS
+        and cons["n_inliers"] >= _COARSE_MIN_INLIER_FRACTION * cons["n_ok"]
+        and cons["spread"] <= _COARSE_MAX_SPREAD_PX
+    ):
+        cons["escalated"] = False
+        return cons
+
+    # escalate: evaluate only the positions not already tried, pool all
+    coarse_wps = {wp for _label, wp in coarse_candidates if wp is not None}
+    extra = [
+        c for c in candidates if c[1] is not None and c[1] not in coarse_wps
+    ]
+    xs2, ys2, rel2 = _estimate_windows(
+        ref_geoArr, tgt_geoArr, extra, band_idx, min_win_px
+    )
+    xs = np.concatenate([xs, xs2])
+    ys = np.concatenate([ys, ys2])
+    rel = np.concatenate([rel, rel2])
+    cons = _consensus_from_estimates(
+        xs, ys, rel, len(coarse_candidates) + len(extra)
+    )
+    if cons is not None:
+        cons["escalated"] = True
+    return cons
+
+
+# fraction-based agreement thresholds ("auto"): calibrated to reproduce the
+# validated absolute defaults at the 7x7 grid (3 and 8 of 50 windows), but
+# scaling with however many windows a scene actually attempted - absolute
+# counts silently change meaning when the window budget changes (same class
+# of bug as the fixed reliability threshold that froze small-AOI references)
+_AUTO_KEEP_FRACTION = 0.06
+_AUTO_PROMOTE_FRACTION = 0.16
+_INLIER_FLOOR = 3
+
+
+def _resolve_inlier_threshold(value, n_attempted, fraction):
+    """'auto' -> max(floor, fraction of the windows attempted for THIS
+    scene); an integer -> itself (legacy absolute behavior)."""
+    if value is None or (isinstance(value, str) and value.lower() == "auto"):
+        return max(_INLIER_FLOOR, int(np.ceil(fraction * n_attempted)))
+    return int(value)
+
+
+def _check_inlier_param(value, name):
+    if value is None or (isinstance(value, str) and value.lower() == "auto"):
+        return "auto"
+    if isinstance(value, bool) or not isinstance(value, (int, np.integer)):
+        raise TypeError(f"{name} must be an integer >= 1 or 'auto'.")
+    value = int(value)
+    if value < 1:
+        raise ValueError(f"{name} must be an integer >= 1 or 'auto'.")
+    return value
 
 
 def _warp_scene_yxb(da_yxb, shift_x_px, shift_y_px, geotransform, crs_wkt):
@@ -479,23 +703,30 @@ def _estimate_shifts_pass(
     times,
     geotransform,
     crs_wkt,
-    candidates,
+    grid_candidates,  # blind lattice: window budget + placement fallback
     band_idx,
     mode,  # "composite" | "anchor"
     composite_window_days,
     anchor_time,  # scene the chain is anchored at (mode="anchor")
-    min_inliers_keep,
-    min_inliers_update_ref,
+    min_inliers_keep,  # int or "auto" (fraction-based, per-scene)
+    min_inliers_update_ref,  # int or "auto"
     max_cloud_update_ref,
     cloud_lookup,  # callable time -> float or None
     min_win_px,
     desc,
+    adaptive=False,  # coarse-first scan with escalation
 ):
     """One estimation pass over the (raw or pre-shifted) cube.
 
     Chains on UNWARPED scenes: the running reference is the last trusted
     scene plus its accumulated shift, so translations compose by addition
     and the reference is never resampled.
+
+    Window positions are chosen PER SCENE PAIR: fully clear positions in
+    both images first (AROSICS fails on any NaN inside the window, so on
+    partially cloudy scenes blind lattice positions almost all die), blind
+    lattice positions as fallback/top-up. The budget per scene is
+    len(grid_candidates).
 
     mode="anchor" pins the chain at anchor_time (shift 0) and chains
     BIDIRECTIONALLY: forward in time from the anchor, then backward from
@@ -505,7 +736,7 @@ def _estimate_shifts_pass(
 
     Returns (shifts, dropped, stats):
       shifts: {time -> (abs_x_px, abs_y_px)} for kept scenes
-      dropped: [time, ...]
+      dropped: [(time, reason), ...]
       stats: {time -> consensus dict}
     """
     shifts, stats, dropped = {}, {}, []
@@ -538,12 +769,14 @@ def _estimate_shifts_pass(
         raise ValueError("mode must be 'composite' or 'anchor'")
 
     anchor_geoArr = GeoArray(ref_arr, geotransform=geotransform, projection=crs_wkt)
+    anchor_finite = np.isfinite(ref_arr[:, :, band_idx - 1])
 
     progress = tqdm(total=len(times), initial=len(times) - sum(len(l) for l in legs),
                     desc=desc, unit="scene")
     for leg in legs:
         # every leg starts over from the anchor/composite reference
         ref_geoArr = anchor_geoArr
+        ref_finite = anchor_finite
         ref_abs = (0.0, 0.0)
         for idx in leg:
             t = times[idx]
@@ -551,26 +784,59 @@ def _estimate_shifts_pass(
             tgt_geoArr = GeoArray(
                 tgt_arr, geotransform=geotransform, projection=crs_wkt
             )
+            tgt_finite = np.isfinite(tgt_arr[:, :, band_idx - 1])
+
+            candidates, n_clear = _place_candidates(
+                ref_finite, tgt_finite, geotransform, grid_candidates
+            )
+            coarse_candidates = (
+                candidates[:_COARSE_N]
+                if adaptive and len(candidates) > _COARSE_N
+                else None
+            )
 
             cons = _consensus_shift(
-                ref_geoArr, tgt_geoArr, candidates, band_idx, min_win_px=min_win_px
+                ref_geoArr,
+                tgt_geoArr,
+                candidates,
+                band_idx,
+                min_win_px=min_win_px,
+                coarse_candidates=coarse_candidates,
             )
             progress.update(1)
-            if cons is None or cons["n_inliers"] < min_inliers_keep:
-                dropped.append(t)
+            if cons is None:
+                dropped.append(
+                    (t, "no successful matching windows"
+                        if n_clear else "no fully clear matching window vs. "
+                        "the reference, blind windows all failed")
+                )
+                continue
+            keep_thr = _resolve_inlier_threshold(
+                min_inliers_keep, cons["n_attempted"], _AUTO_KEEP_FRACTION
+            )
+            if cons["n_inliers"] < keep_thr:
+                dropped.append(
+                    (t, f"only {cons['n_inliers']} agreeing window(s), "
+                        f"{keep_thr} needed")
+                )
                 continue
 
             abs_x = ref_abs[0] + cons["x"]
             abs_y = ref_abs[1] + cons["y"]
             shifts[t] = (abs_x, abs_y)
+            cons["n_clear"] = n_clear
             stats[t] = cons
 
             cp = cloud_lookup(t)
-            update_ref = cons["n_inliers"] >= min_inliers_update_ref and (
+            promote_thr = _resolve_inlier_threshold(
+                min_inliers_update_ref, cons["n_attempted"], _AUTO_PROMOTE_FRACTION
+            )
+            update_ref = cons["n_inliers"] >= promote_thr and (
                 max_cloud_update_ref is None or cp is None or cp <= max_cloud_update_ref
             )
             if update_ref:
                 ref_geoArr = tgt_geoArr
+                ref_finite = tgt_finite
                 ref_abs = (abs_x, abs_y)
     progress.close()
 
@@ -611,23 +877,28 @@ def coregister_cube(
     composite_window_days=30,
     grid_size=7,
     match_band="auto",
-    min_inliers_keep=3,
-    min_inliers_update_ref=8,
+    min_inliers_keep="auto",
+    min_inliers_update_ref="auto",
     max_cloud_update_ref=20.0,
     max_cc=None,
     time_period=None,
     iteration=1,
     min_win_px=64,
     cloud_mask=None,
+    adaptive=True,
     **deprecated,
 ):
     """Co-register a Sentinel-2 data cube scene-to-scene (AROSICS global).
 
-    Redesigned engine (2026-07): per scene, shifts are ESTIMATED at
+    Redesigned engine (2026-07): per scene, shifts are ESTIMATED at up to
     grid_size^2 + 1 window positions and combined into a robust consensus
-    (outlier windows are outvoted instead of argmax-selected); scenes chain
-    by summing translations against unwarped references; the data is
-    warped exactly ONCE at the end (cubic), regardless of `iteration`.
+    (outlier windows are outvoted instead of argmax-selected). Window
+    positions are CLOUD-AWARE: chosen per scene pair where both images are
+    fully clear (AROSICS fails on any NaN inside a window, so blind lattice
+    positions die on partially cloudy scenes), with the blind lattice as
+    fallback. Scenes chain by summing translations against unwarped
+    references; the data is warped exactly ONCE at the end (cubic),
+    regardless of `iteration`.
 
     Parameters
     ----------
@@ -644,12 +915,17 @@ def coregister_cube(
         Band used for matching. "auto" picks the first available native
         10-m band in the order nir, red, green, blue (20-m bands match
         far worse; measured).
-    min_inliers_keep : int
+    min_inliers_keep : "auto" or int
         A scene is dropped when fewer window positions agree on its shift.
-    min_inliers_update_ref : int
+        "auto" = max(3, 6% of the windows attempted for that scene), which
+        reproduces the validated absolute default (3 of 50) at the 7x7
+        grid but scales with any window budget. An integer is absolute.
+    min_inliers_update_ref : "auto" or int
         A scene becomes the reference for the next scene only when at
         least this many windows agree (replaces the old reliability
         thresholds, which did not transfer across AOI sizes).
+        "auto" = max(3, 16% of attempted windows) (8 of 50 at the 7x7
+        grid). An integer is absolute.
     max_cloud_update_ref : float or None
         Scenes cloudier than this never become the reference.
     iteration : int or "auto"
@@ -676,6 +952,13 @@ def coregister_cube(
         than the cube; every cube date must be present in it. If the
         cube itself lacks a cloud_percentage coordinate, per-scene cloud
         percentages are derived from the mask for the reference rule.
+    adaptive : bool
+        Adaptive window escalation (default True): each scene is first
+        measured at a coarse set (the 10 best-spread positions) and the
+        full window budget runs only when that result is not unambiguous
+        (a failure, disagreeing windows, or a loose spread). Clear scenes
+        resolve at the coarse stage; cloudy/difficult scenes automatically
+        get the full effort. Set False to always use the full budget.
 
     Deprecated and ignored (accepted for old configs/GUIs):
     min_reliability_keep, min_reliability_update_ref.
@@ -706,6 +989,11 @@ def coregister_cube(
         iteration = int(iteration)
         if iteration < 1:
             raise ValueError("iteration must be an integer >= 1 (cannot be 0).")
+
+    min_inliers_keep = _check_inlier_param(min_inliers_keep, "min_inliers_keep")
+    min_inliers_update_ref = _check_inlier_param(
+        min_inliers_update_ref, "min_inliers_update_ref"
+    )
 
     # ------------------------------------------------------------------
     # Load + filter
@@ -800,7 +1088,14 @@ def coregister_cube(
 
     print(
         f"Co-registration: {times.size} scenes, matching on band "
-        f"'{band_label}', {len(candidates)} window positions/scene, "
+        f"'{band_label}', cloud-aware window placement, "
+        + (
+            f"adaptive scan ({_COARSE_N} coarse -> "
+            f"{len(candidates)} window positions/scene)"
+            if adaptive and len(candidates) > _COARSE_N
+            else f"up to {len(candidates)} window positions/scene"
+        )
+        + ", "
         + (
             f"auto iterations (max {AUTO_MAX_PASSES})"
             if auto_iteration
@@ -841,6 +1136,7 @@ def coregister_cube(
                 f"Estimating shifts (pass {it}"
                 + ("/auto)" if auto_iteration else f"/{iteration})")
             ),
+            adaptive=adaptive,
         )
 
         cand_times = np.array([t for t in est_times if t in shifts])
@@ -942,19 +1238,20 @@ def coregister_cube(
         f"Original (after max_cc/time_period): {len(times)} scenes from "
         f"{np.datetime_as_string(times[0], 'D')} to {np.datetime_as_string(times[-1], 'D')}"
     )
+    reason_by_time = {t: r for t, r in dropped_all}
     print(
-        "Scenes excluded after co-registration (no window consensus):",
-        len(set(dropped_all)),
+        "Scenes excluded after co-registration:",
+        len(reason_by_time),
     )
     print(f"Scenes remaining in the co-registered cube: {len(times_out)}")
 
-    if dropped_all:
-        excluded_entries = []
-        for ts in sorted(set(dropped_all)):
+    if reason_by_time:
+        print("Excluded dates:")
+        for ts in sorted(reason_by_time):
             ds_ = np.datetime_as_string(ts, unit="D")
             cp = _cloud_lookup(ts)
-            excluded_entries.append(f"{ds_} ({cp:.1f}%)" if cp is not None else ds_)
-        print("Excluded dates (cloud percentage): " + ", ".join(excluded_entries))
+            cloud_txt = f", cloud {cp:.1f}%" if cp is not None else ""
+            print(f"  {ds_} ({reason_by_time[ts]}{cloud_txt})")
 
     if last_stats:
         inl = np.array([s["n_inliers"] for s in last_stats.values()], dtype=float)
@@ -962,6 +1259,20 @@ def coregister_cube(
         print(
             f"\nWindow agreement of kept scenes: mean {inl.mean():.1f} inlier "
             f"windows/scene (min {int(inl.min())}), median spread {np.median(spr):.2f} px"
+        )
+        if adaptive:
+            n_esc = sum(1 for s in last_stats.values() if s.get("escalated"))
+            print(
+                f"Adaptive scan: {len(last_stats) - n_esc}/{len(last_stats)} scenes "
+                f"resolved at the coarse stage, {n_esc} escalated to the full budget"
+            )
+        n_cl = np.array(
+            [s.get("n_clear", 0) for s in last_stats.values()], dtype=float
+        )
+        print(
+            f"Window placement: mean {n_cl.mean():.1f} fully clear window "
+            f"positions/scene ({int((n_cl == 0).sum())} scene(s) fell back to "
+            f"blind windows)"
         )
         mags = np.array([np.hypot(*total_shifts[t]) for t in est_times])
         print(

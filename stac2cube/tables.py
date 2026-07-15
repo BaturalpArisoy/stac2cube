@@ -423,7 +423,8 @@ COREG_HELP_MD = r"""
 - Can be a `DataArray`, `Dataset`, or a NetCDF file path.
 
 **grid_size**
-- Density of the window scan: shifts are estimated at `grid_size x grid_size` positions (plus one automatic position) and combined into a robust consensus, so outlier windows (clouds, moving surfaces) are outvoted.
+- Window budget of the scan: shifts are estimated at up to `grid_size x grid_size + 1` window positions and combined into a robust consensus, so outlier windows (clouds, moving surfaces) are outvoted.
+- Windows are placed **cloud-aware**: only where both the scene and its reference are fully cloud-free (a matching window fails on even a few masked pixels, so partially cloudy scenes would otherwise lose almost all their windows). A regular grid is the fallback when no clear spot exists.
 - Higher values take longer but add voters; more windows can only make the consensus more robust.
 
 **max_cc**
@@ -441,10 +442,16 @@ COREG_HELP_MD = r"""
 **min_inliers_keep**
 - Minimum number of window positions that must agree on a scene's shift.
 - Scenes with fewer agreeing windows (typically heavily clouded) are dropped from the time series.
+- `"auto"` (default) = at least 3 windows and at least 6% of the windows attempted for that scene; scales correctly with `grid_size` and the adaptive scan. An integer is an absolute count.
 
 **min_inliers_update_ref**
 - Minimum number of agreeing windows for a scene to become the reference for the next scene.
 - Scenes below this are kept in the cube but never anchor the chain.
+- `"auto"` (default) = at least 3 windows and at least 16% of the windows attempted for that scene. An integer is an absolute count.
+
+**adaptive**
+- Adaptive window escalation (default `true`): each scene is first measured at a coarse set of 10 well-spread windows; the full window budget runs only when that result is not unambiguous.
+- Clear scenes resolve cheaply, cloudy/difficult scenes automatically get the full effort. Set `false` to always use the full budget.
 
 **min_reliability_keep / min_reliability_update_ref (deprecated)**
 - Accepted for old configs but ignored: keep/reference decisions now use the consensus inlier counts above, which transfer across AOI sizes (fixed reliability thresholds do not).

@@ -31,11 +31,13 @@ The example below uses the GUI's default parameters:
     "grid_size": 7,
     "iteration": "auto",
     "match_band": "auto",
-    "min_inliers_keep": 3,
-    "min_inliers_update_ref": 8,
+    "min_inliers_keep": "auto",
+    "min_inliers_update_ref": "auto",
+    "adaptive": true,
     "max_cloud_update_ref": 20.0,
-    "first_scene_mode": "composite",
-    "composite_window_days": 30
+    "first_scene_mode": "auto",
+    "composite_window_days": null,
+    "cloud_mask": null
   }
 }
 ```

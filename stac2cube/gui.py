@@ -8816,9 +8816,13 @@ def ard_cube_tools():
     COREG_HELP = {
         "grid_size": """
     <b>grid_size</b><br>
-    Density of the window scan: shifts are estimated at grid_size x grid_size positions (plus one automatic)<br>
+    Window budget of the scan: shifts are estimated at up to grid_size x grid_size + 1 window positions<br>
     and combined into a robust consensus, so outlier windows (clouds, moving river bars) are outvoted.<br>
-    Higher values take longer but add voters; more windows can only make the consensus more robust.
+    Windows are placed cloud-aware: only where both the scene and its reference are fully cloud-free<br>
+    (a window fails on even a few masked pixels), with a regular grid as fallback.<br>
+    Higher values take longer but add voters; more windows can only make the consensus more robust.<br>
+    With the adaptive scan enabled, easy scenes are resolved by a coarse 10-window stage and the full<br>
+    budget runs only for difficult scenes - so a large grid_size mainly costs time on cloudy dates.
     """,
         "max_cc": """
     <b>max_cc</b><br>
@@ -8848,12 +8852,16 @@ def ard_cube_tools():
     <b>Matching Points to Keep a Scene</b> (<code>min_inliers_keep</code>)<br>
     The shift of each scene is measured at many points across the image. This is the minimum number<br>
     of points that must agree for the scene to be kept; scenes with fewer agreeing points (typically<br>
-    heavily clouded) are dropped from the time series.
+    heavily clouded) are dropped from the time series.<br>
+    <code>auto</code> = at least 3 points and at least 6% of the points tried for that scene - it scales<br>
+    correctly with Grid Size and the adaptive scan, so it is the recommended setting.
     """,
         "min_inliers_update_ref": """
     <b>Matching Points to Trust as Reference</b> (<code>min_inliers_update_ref</code>)<br>
     A scene becomes the reference that the NEXT scene is aligned to only when at least this many<br>
-    points agree on its shift. Scenes below this stay in the cube but never serve as reference.
+    points agree on its shift. Scenes below this stay in the cube but never serve as reference.<br>
+    <code>auto</code> = at least 3 points and at least 16% of the points tried for that scene - it scales<br>
+    correctly with Grid Size and the adaptive scan, so it is the recommended setting.
     """,
         "max_cloud_update_ref": """
     <b>Max Cloud % for Reference Scenes</b> (<code>max_cloud_update_ref</code>)<br>
@@ -10371,9 +10379,21 @@ def ard_cube_tools():
         layout=widgets.Layout(width="200px"),
     )
 
-    cr_min_inliers_keep_w = widgets.BoundedIntText(value=3, min=1, max=50, step=1, layout=widgets.Layout(width="200px"))
-    cr_min_inliers_update_ref_w = widgets.BoundedIntText(value=8, min=1, max=50, step=1, layout=widgets.Layout(width="200px"))
+    cr_min_inliers_keep_w = widgets.Text(value="auto", placeholder="auto", layout=widgets.Layout(width="200px"))
+    cr_min_inliers_update_ref_w = widgets.Text(value="auto", placeholder="auto", layout=widgets.Layout(width="200px"))
     cr_max_cloud_update_ref_w = widgets.BoundedFloatText(value=20.0, min=0.0, max=100.0, step=1.0, layout=widgets.Layout(width="200px"))
+    cr_adaptive_w = widgets.Checkbox(
+        value=True,
+        description="Adaptive window scan (coarse first, full budget only when a scene is difficult)",
+        indent=False,
+        layout=widgets.Layout(width="100%"),
+    )
+
+    def _parse_inlier_value(txt):
+        s = str(txt or "").strip().lower()
+        if s in ("", "auto"):
+            return "auto"
+        return int(s)  # raises ValueError on junk; surfaced by the caller
     cr_match_band_w = widgets.Dropdown(
         options=["auto", "nir", "red", "green", "blue"],
         value="auto",
@@ -10570,6 +10590,8 @@ def ard_cube_tools():
         try:
             time_period = _parse_time_period(cr_time_period_w.value)
             first_scene_mode = _resolve_first_scene_mode()
+            inliers_keep = _parse_inlier_value(cr_min_inliers_keep_w.value)
+            inliers_update = _parse_inlier_value(cr_min_inliers_update_ref_w.value)
         except Exception as e:
             _status(f"❌ ValueError: {e}")
             return
@@ -10579,7 +10601,7 @@ def ard_cube_tools():
         old_mtime, old_size = _output_stat(p_out) if existed_before else (None, None)
 
         _status(
-            "Co-registering and exporting...",
+            "Co-registering...",
         )
 
         try:
@@ -10591,8 +10613,9 @@ def ard_cube_tools():
                     time_period=time_period,
                     cloud_mask=((cr_cloud_mask_w.value or "").strip() or None),
                     match_band=str(cr_match_band_w.value),
-                    min_inliers_keep=int(cr_min_inliers_keep_w.value),
-                    min_inliers_update_ref=int(cr_min_inliers_update_ref_w.value),
+                    min_inliers_keep=inliers_keep,
+                    min_inliers_update_ref=inliers_update,
+                    adaptive=bool(cr_adaptive_w.value),
                     max_cloud_update_ref=float(cr_max_cloud_update_ref_w.value),
                     first_scene_mode=first_scene_mode,
                     composite_window_days=int(cr_composite_window_days_w.value),
@@ -10665,6 +10688,17 @@ def ard_cube_tools():
         except Exception:
             first_scene_mode_for_json = str(cr_first_scene_mode_w.value)
 
+        # agreement thresholds: "auto" or an integer; emit the raw text as
+        # typed when unparsable and let the run surface the error
+        try:
+            inliers_keep_for_json = _parse_inlier_value(cr_min_inliers_keep_w.value)
+        except Exception:
+            inliers_keep_for_json = str(cr_min_inliers_keep_w.value)
+        try:
+            inliers_update_for_json = _parse_inlier_value(cr_min_inliers_update_ref_w.value)
+        except Exception:
+            inliers_update_for_json = str(cr_min_inliers_update_ref_w.value)
+
         # Parameter order follows the GUI layout (top -> bottom):
         # max_cc, time_period, grid_size, iteration, match_band,
         # min_inliers_keep, min_inliers_update_ref, max_cloud_update_ref,
@@ -10679,8 +10713,9 @@ def ard_cube_tools():
                 "grid_size": int(cr_grid_size_w.value),
                 "iteration": cr_iteration_w.value,
                 "match_band": str(cr_match_band_w.value),
-                "min_inliers_keep": int(cr_min_inliers_keep_w.value),
-                "min_inliers_update_ref": int(cr_min_inliers_update_ref_w.value),
+                "min_inliers_keep": inliers_keep_for_json,
+                "min_inliers_update_ref": inliers_update_for_json,
+                "adaptive": bool(cr_adaptive_w.value),
                 "max_cloud_update_ref": float(cr_max_cloud_update_ref_w.value),
                 "first_scene_mode": first_scene_mode_for_json,
                 "composite_window_days": composite_window_for_json,
@@ -10773,9 +10808,38 @@ def ard_cube_tools():
             ),
         )
 
-    row1 = widgets.VBox(
+    # --- Layout: a welcoming front (output + run is all a casual user
+    # needs; everything else is auto) with collapsed sections for the rest.
+
+    cr_ref_box = widgets.VBox(
         [
-            widgets.HTML("<b>Filter time-series (optional)</b>"),
+            widgets.HTML(
+                "<div style='font-size:12px; color:#666;'>"
+                "The reference scene anchors the alignment; every other scene is "
+                "aligned to it (in both time directions). <b>auto</b> picks a clean, "
+                "high-contrast scene near the middle of the series for you - or use "
+                "<b>Browse Scenes</b> to pick one yourself."
+                "</div>"
+            ),
+            _row(
+                [
+                    _stacked_field_with_help(cr_first_scene_mode_w, "Reference Scene", "first_scene_mode"),
+                    _stacked_field_with_help(cr_ref_date_w, "Reference Date", "reference_date"),
+                    cr_browse_scenes_btn,
+                    _stacked_field_with_help(cr_composite_window_days_w, "Composite Window (days)", "composite_window_days"),
+                ],
+                gap_px=20,
+            ),
+            cr_pick_out,
+        ],
+        layout=widgets.Layout(width="100%", gap="6px"),
+    )
+    cr_ref_acc = widgets.Accordion(children=[cr_ref_box], selected_index=None)
+    cr_ref_acc.set_title(0, "Reference Scene")
+    cr_ref_acc.layout = widgets.Layout(width="100%")
+
+    cr_filter_box = widgets.VBox(
+        [
             _row(
                 [
                     _stacked_field_with_help(cr_max_cc_w, "Max Cloud Coverage", "max_cc"),
@@ -10797,25 +10861,26 @@ def ard_cube_tools():
         ],
         layout=widgets.Layout(width="100%", gap="6px"),
     )
+    cr_filter_acc = widgets.Accordion(children=[cr_filter_box], selected_index=None)
+    cr_filter_acc.set_title(0, "Filters (optional)")
+    cr_filter_acc.layout = widgets.Layout(width="100%")
 
-    row2 = widgets.VBox(
+    cr_adv_box = widgets.VBox(
         [
-            widgets.HTML("<b>Primary Parameters</b>"),
+            widgets.HTML(
+                "<div style='font-size:12px; color:#666;'>"
+                "All of these have safe automatic defaults - open the (?) of a field "
+                "before changing it."
+                "</div>"
+            ),
             _row(
                 [
                     _stacked_field_with_help(cr_grid_size_w, "Grid Size", "grid_size"),
-                    _stacked_field_with_help(cr_iteration_w, "Iteration", "iteration"),
                     _stacked_field_with_help(cr_match_band_w, "Matching Band", "match_band"),
+                    _stacked_field_with_help(cr_iteration_w, "Iteration", "iteration"),
                 ],
                 gap_px=20,
             ),
-        ],
-        layout=widgets.Layout(width="100%", gap="6px"),
-    )
-
-    row3 = widgets.VBox(
-        [
-            widgets.HTML("<b>Secondary Parameters</b>"),
             _row(
                 [
                     _stacked_field_with_help(cr_min_inliers_keep_w, "Matching Points to Keep a Scene", "min_inliers_keep"),
@@ -10824,25 +10889,13 @@ def ard_cube_tools():
                 ],
                 gap_px=20,
             ),
+            cr_adaptive_w,
         ],
         layout=widgets.Layout(width="100%", gap="6px"),
     )
-
-    row4 = widgets.VBox(
-        [
-            widgets.HTML("<b>First Scene Behavior</b>"),
-            _row(
-                [
-                    _stacked_field_with_help(cr_first_scene_mode_w, "First Reference Scene", "first_scene_mode"),
-                    _stacked_field_with_help(cr_ref_date_w, "Reference Date", "reference_date"),
-                    cr_browse_scenes_btn,
-                    _stacked_field_with_help(cr_composite_window_days_w, "Composite Window (days)", "composite_window_days"),
-                ],
-                gap_px=20,
-            ),
-        ],
-        layout=widgets.Layout(width="100%", gap="6px"),
-    )
+    cr_adv_acc = widgets.Accordion(children=[cr_adv_box], selected_index=None)
+    cr_adv_acc.set_title(0, "Advanced Settings")
+    cr_adv_acc.layout = widgets.Layout(width="100%")
 
     section_spacer = widgets.HTML("<div style='height:10px;'></div>")  # adjust 6/8/10/12
 
@@ -10850,18 +10903,15 @@ def ard_cube_tools():
         [
             widgets.HTML(
                 "<div style='font-size:12px; color:#666;'>"
-                "Co-registers the data cube.<br>"
-                "Performs the best in relatively larger areas with heterogeneous land cover."
+                "Aligns all scenes of the data cube to each other with sub-pixel "
+                "precision, so time series become clean and comparable.<br>"
+                "The default settings work well for most cubes: <b>set the output "
+                "file and click Co-register</b>. Larger, varied areas align best."
                 "</div>"
             ),
-            row1,
-            section_spacer,
-            row2,
-            section_spacer,
-            row3,
-            section_spacer,
-            row4,
-            cr_pick_out,
+            cr_ref_acc,
+            cr_filter_acc,
+            cr_adv_acc,
             section_spacer,
             _stacked_field(cr_out_box, "Output NetCDF"),
             section_spacer,
@@ -11226,6 +11276,7 @@ def ard_cube_tools():
         cr_composite_window_days_w.disabled = (not enabled) or (cr_first_scene_mode_w.value != "composite")
         cr_ref_date_w.disabled = (not enabled) or (cr_first_scene_mode_w.value != "date")
         cr_browse_scenes_btn.disabled = not enabled
+        cr_adaptive_w.disabled = not enabled
         cr_iteration_w.disabled = not enabled
         cr_cloud_mask_w.disabled = not enabled
         browse_cr_mask_btn.disabled = not enabled
