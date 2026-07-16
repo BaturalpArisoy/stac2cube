@@ -1363,13 +1363,15 @@ def _to_dmy(time_values):
 
 
 def spectral_profiler(
-    before_path, after_path, stack_name="Spectral_Temporal_Stack", rgb_time="first"
+    before_path, after_path, band="ndvi",
+    stack_name="Spectral_Temporal_Stack", rgb_time="first"
 ):
     stac_b = _load_stac(before_path, stack_name)
     stac_a = _load_stac(after_path, stack_name)
 
-    ndvi_b = _band_label(stac_b, "ndvi")
-    ndvi_a = _band_label(stac_a, "ndvi")
+    band_label = str(band)
+    band_b = _band_label(stac_b, band_label)
+    band_a = _band_label(stac_a, band_label)
 
     # RGB for click map (from BEFORE)
     rgb = _pick_rgb(stac_b)
@@ -1407,7 +1409,7 @@ def spectral_profiler(
     )
     fig_ts.update_layout(
         title=dict(
-            text="NDVI Spectral Profile",
+            text=f"{band_label.upper()} Spectral Profile",
             x=0.5,
             xanchor="center",
             pad=dict(t=10, b=20),
@@ -1417,7 +1419,7 @@ def spectral_profiler(
             tickangle=-45,   # <-- incline labels so they don't overlap
             type="category", # <-- treat x as categorical strings, not numbers
         ),
-        yaxis_title="NDVI",
+        yaxis_title=band_label.upper(),
         margin=dict(l=40, r=10, t=110, b=80),  # extra bottom margin for angled labels
         height=450,
         width=650,
@@ -1440,8 +1442,8 @@ def spectral_profiler(
         x0 = float(x_vals[col])
         y0 = float(y_vals[row])
 
-        s_b = stac_b.sel(band=ndvi_b).sel(x=x0, y=y0, method="nearest")
-        s_a = stac_a.sel(band=ndvi_a).sel(x=x0, y=y0, method="nearest")
+        s_b = stac_b.sel(band=band_b).sel(x=x0, y=y0, method="nearest")
+        s_a = stac_a.sel(band=band_a).sel(x=x0, y=y0, method="nearest")
 
         with fig_ts.batch_update():
             fig_ts.data[0].x = _to_dmy(s_b.time.values)  # <-- converted to dd.mm.yyyy
@@ -1474,6 +1476,8 @@ def spectral_profiler(
     # initialize with center pixel so plot is not empty
     update_from_rowcol(rgb_img.shape[0] // 2, rgb_img.shape[1] // 2)
 
-    ui = widgets.VBox([widgets.HBox([fig_img, fig_ts]), out])
+    # Stack the click map and the time-series plot vertically so both fit inside
+    # a narrow GUI panel (side-by-side pushed the graph past the panel border).
+    ui = widgets.VBox([fig_img, fig_ts, out])
     display(ui)
     return ui

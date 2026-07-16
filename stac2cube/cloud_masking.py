@@ -8,6 +8,7 @@ import sys
 from tqdm.auto import tqdm
 from .export_cfg import export_stac, open_cube
 from .clip import compute_cloud_percentage
+from rasterio.transform import Affine
 import rioxarray as rio
 import cv2
 import os
@@ -643,3 +644,288 @@ def cloud_filter(inp, max_cloud):
     # da = da.rio.write_crs(da.crs)
 
     return da.where(da["cloud_percentage"] <= int(max_cloud), drop=True)
+
+
+# ----------------------------------------------------------------------
+# SCL binary cloud-mask cubes (build + update)
+# ----------------------------------------------------------------------
+# The binary mask (Cloud_Stack, band 'cloud_mask_scl', 1=cloud/0=clear) is the
+# same product the builder writes with return_cloud_mask / cloud_mask_output.
+# It cannot be derived from a cube's pixels (the SCL band is not stored), so it
+# is rebuilt by re-querying STAC with the cube's own stored parameters.
+
+_SCL_MASK_STATUSES = {"clouds_detected", "scl_masked", "scl_shadow_masked"}
+
+
+def _build_scl_mask_in_memory(
+    mission, polygon, resolution, daterange, cloud_status,
+    stac_api, resampling, nir_dark_threshold=None, shadow_proj_distance=None,
+):
+    """Re-query STAC and return the SCL binary mask (Cloud_Stack DataArray)
+    over ``daterange``. keep_clouds=True: only the mask is wanted, never a
+    masked cube (the SCL mask values are identical either way).
+
+    The mask values come from the SCL band, not from the requested spectral
+    bands (verified pixel-identical), so only a single band is fetched:
+    'nir', which shadow projection also needs. This keeps builds/updates
+    light regardless of what the source cube contained."""
+    shadow = (cloud_status == "scl_shadow_masked")
+    kw = dict(
+        mission=mission, polygon=polygon, resolution=resolution,
+        daterange=daterange, bands=["nir"], indices=None, max_cc=100,
+        cloud_masking=True, keep_clouds=True, shadow_masking=shadow,
+        source=stac_api, resampling_method=resampling,
+        return_cloud_mask=True, output=None, q=True,
+    )
+    if shadow:
+        kw["nir_dark_threshold"] = nir_dark_threshold
+        kw["shadow_proj_distance"] = shadow_proj_distance
+    _res = get_stac_layers(**kw)
+    if not (isinstance(_res, tuple) and len(_res) == 2):
+        raise ValueError(
+            "get_stac_layers(return_cloud_mask=True) did not return a "
+            "(cube, mask) pair."
+        )
+    _cube, mask = _res
+    if mask is None:
+        raise ValueError(
+            "No cloud mask was produced (cloud detection returned nothing)."
+        )
+    return mask
+
+
+def _stamp_scl_mask_attrs(
+    mask, mission, polygon, resolution, cloud_status,
+    stac_api, resampling, nir_dark_threshold=None, shadow_proj_distance=None,
+):
+    """Write the reconstruction metadata onto a binary mask so
+    update_cloud_mask_cube can re-query and extend it later. No band list is
+    stored: the SCL mask is band-independent and always rebuilt from 'nir'."""
+    mask.attrs["mask_kind"] = "scl_binary"
+    mask.attrs["mission"] = mission
+    mask.attrs["bbox"] = list(np.asarray(polygon).ravel().tolist())
+    mask.attrs["resolution"] = float(resolution)
+    mask.attrs["cloud_status"] = cloud_status
+    mask.attrs["stac_api"] = stac_api or "element84"
+    mask.attrs["resampling"] = resampling or "nearest"
+    if cloud_status == "scl_shadow_masked":
+        if nir_dark_threshold is not None:
+            mask.attrs["nir_dark_threshold"] = float(nir_dark_threshold)
+        if shadow_proj_distance is not None:
+            mask.attrs["shadow_proj_distance"] = float(shadow_proj_distance)
+    return mask
+
+
+def build_cloud_mask_cube(cube, output=None, q=False):
+    """Build the SCL binary cloud mask of an existing data cube (1=cloud,
+    0=clear), date-for-date identical to the cube.
+
+    Re-queries STAC with the cube's stored parameters (needs internet) and
+    keeps ONLY the scenes whose day is present in the cube's time axis, so the
+    mask lines up exactly with the cube. The result carries reconstruction
+    metadata so it can later be extended with update_cloud_mask_cube.
+
+    Parameters
+    ----------
+    cube : str | Path
+        Path to a cube with a 'Spectral_Temporal_Stack' built with an SCL
+        cloud strategy (cloud_status clouds_detected / scl_masked /
+        scl_shadow_masked).
+    output : str, optional
+        Where to write the mask (.nc or .zarr). In-memory only when None.
+    q : bool
+        Silence the report prints.
+
+    Returns
+    -------
+    xr.DataArray named 'Cloud_Stack' (time, band, y, x).
+    """
+    with open_cube(cube) as _ds:
+        if "Spectral_Temporal_Stack" not in _ds.data_vars:
+            raise ValueError(
+                "build_cloud_mask_cube needs a cube with a "
+                "'Spectral_Temporal_Stack' layer (a spectral data cube, not a "
+                f"mask/cloud cube). Found: {list(_ds.data_vars)}"
+            )
+
+    params = get_stac_parameters(cube)
+
+    cs = str(params.get("cloud_status") or "").strip().lower()
+    if cs not in _SCL_MASK_STATUSES:
+        if cs in ("", "clouds_not_detected", "none"):
+            raise ValueError(
+                "This cube was built without cloud detection, so a binary "
+                "cloud mask cannot be reconstructed from it. Rebuild the cube "
+                "with cloud masking (or keep-clouds) enabled."
+            )
+        raise ValueError(
+            f"cloud_status='{params.get('cloud_status')}' is not an SCL-based "
+            "strategy. This function reproduces the SCL binary mask; for "
+            "s2cloudless masks use the cloud tools (get_cloud_layers)."
+        )
+
+    mask_cube = _build_scl_mask_in_memory(
+        params["mission"], params["polygon"], params["resolution"],
+        params["daterange"], cs,
+        params.get("stac_api"), params.get("resampling"),
+        params.get("nir_dark_threshold"), params.get("shadow_proj_distance"),
+    )
+
+    # Exact date match: keep ONLY the mask scenes whose day is present in the
+    # cube's stored time axis (the raw query keeps every scene in the range).
+    cube_days = set(np.asarray(params["times"]).astype("datetime64[D]"))
+    mask_days = np.asarray(mask_cube["time"].values).astype("datetime64[D]")
+    keep = np.array([d in cube_days for d in mask_days], dtype=bool)
+    mask_out = mask_cube.isel(time=np.where(keep)[0])
+
+    _stamp_scl_mask_attrs(
+        mask_out, params["mission"], params["polygon"], params["resolution"],
+        cs, params.get("stac_api"), params.get("resampling"),
+        params.get("nir_dark_threshold"), params.get("shadow_proj_distance"),
+    )
+
+    if not q:
+        missing = sorted(cube_days - set(mask_days))
+        print(
+            f"Binary cloud mask: {int(mask_out.sizes.get('time', 0))} scene(s) "
+            f"matched to the cube's {len(cube_days)} date(s)."
+        )
+        if missing:
+            print(
+                f"WARNING: {len(missing)} cube date(s) had no scene in the "
+                "fresh STAC query and are not in the mask:"
+            )
+            for d in missing:
+                print(f"  - {np.datetime_as_string(d, unit='D')}")
+
+    if output is not None:
+        export_stac(
+            mask_out, output,
+            crs=mask_cube.attrs.get("crs"),
+            transform=mask_cube.attrs.get("transform"),
+            var_name="Cloud_Stack", compress=False,
+        )
+
+    return mask_out
+
+
+def update_cloud_mask_cube(mask, daterange, output=None, q=False):
+    """Extend an SCL binary cloud mask with the new scenes in ``daterange``
+    (only dates it does not already have; existing dates are never recomputed).
+
+    The mask must carry the reconstruction metadata written by
+    build_cloud_mask_cube (mask_kind='scl_binary'); masks without it are
+    rejected. Time axes are compared at day precision. The merged mask keeps
+    the metadata, so it stays updatable.
+
+    Parameters
+    ----------
+    mask : str | Path | xr.DataArray
+        The binary mask cube (path to .nc/.zarr, or the Cloud_Stack DataArray).
+    daterange : [str, str]
+        ["YYYY-MM-DD", "YYYY-MM-DD"] range to fetch new scenes from.
+    output : str, optional
+        Where to write the merged mask. In-memory only when None.
+    q : bool
+        Silence the report prints.
+
+    Returns
+    -------
+    xr.DataArray named 'Cloud_Stack' - the merged mask (day-floored times).
+    """
+    existing = mask
+    if isinstance(mask, (str, os.PathLike)):
+        with open_cube(mask) as _ds:
+            if "Cloud_Stack" not in _ds.data_vars:
+                raise ValueError(
+                    "update_cloud_mask_cube needs a Cloud_Stack cube. "
+                    f"Found: {list(_ds.data_vars)}"
+                )
+            existing = _ds["Cloud_Stack"].load()
+
+    _bands = (
+        [str(b) for b in existing["band"].values]
+        if "band" in getattr(existing, "dims", ())
+        else []
+    )
+    if "cloud_mask_scl" not in _bands:
+        raise ValueError(
+            "This Cloud_Stack is not an SCL binary mask (no 'cloud_mask_scl' "
+            "band) - update_cloud_mask_cube cannot extend it."
+        )
+
+    a = existing.attrs
+    mission = a.get("mission")
+    bbox = a.get("bbox")
+    if not mission or bbox is None:
+        raise ValueError(
+            "This binary mask has no update metadata (mission/bbox). "
+            "Rebuild it with build_cloud_mask_cube to enable updates."
+        )
+    cloud_status = str(a.get("cloud_status") or "clouds_detected")
+    try:
+        resolution = float(a.get("resolution"))
+    except (TypeError, ValueError):
+        resolution = float(abs(existing["y"].resolution))
+    polygon = list(np.asarray(bbox).ravel().tolist())
+
+    new_mask = _build_scl_mask_in_memory(
+        mission, polygon, resolution, daterange, cloud_status,
+        a.get("stac_api", "element84"), a.get("resampling", "nearest"),
+        a.get("nir_dark_threshold"), a.get("shadow_proj_distance"),
+    )
+
+    # Floor both time axes to day, keep only genuinely new dates.
+    def _to_day(da):
+        return da.assign_coords(
+            time=da.time.astype("datetime64[D]").astype("datetime64[ns]")
+        )
+
+    existing = _to_day(existing)
+    new_mask = _to_day(new_mask)
+
+    existing_days = set(np.asarray(existing.time.values))
+    keep = np.array(
+        [t not in existing_days for t in np.asarray(new_mask.time.values)],
+        dtype=bool,
+    )
+    new_only = new_mask.isel(time=np.where(keep)[0])
+    n_new = int(new_only.sizes.get("time", 0))
+
+    if n_new == 0:
+        if not q:
+            print(
+                f"No new dates in {daterange} - the binary mask is already "
+                "up to date."
+            )
+        return existing
+
+    # Align bands to the existing mask, then concat along time.
+    new_only = new_only.sel(band=_bands)
+    merged = xr.concat([existing, new_only], dim="time").sortby("time")
+    merged.name = "Cloud_Stack"
+    merged.attrs = dict(existing.attrs)  # keep reconstruction metadata
+    merged["band"].encoding = {}         # re-infer band string width on export
+
+    if not q:
+        print(f"Binary cloud mask updated: {n_new} new date(s) in {daterange}.")
+        for t in np.asarray(new_only.time.values):
+            print(f"  - {np.datetime_as_string(t, unit='D')}")
+
+    if output is not None:
+        # A mask reloaded from disk carries its transform attr as a plain float
+        # array (the Affine is serialized on write); rebuild the Affine so
+        # export_stac's `transform or ...` fallback never truth-tests an array.
+        # The crs attr round-trips as a string and stays one (a CRS object would
+        # not be netCDF-serializable as an attribute).
+        _t = merged.attrs.get("transform")
+        if _t is not None and not isinstance(_t, Affine):
+            _t = Affine(*np.asarray(_t).ravel()[:6])
+        export_stac(
+            merged, output,
+            crs=merged.attrs.get("crs"),
+            transform=_t,
+            var_name="Cloud_Stack", compress=False,
+        )
+
+    return merged

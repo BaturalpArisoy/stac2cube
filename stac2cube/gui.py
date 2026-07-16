@@ -1,8 +1,10 @@
 import ast
+import io
 import json
 import os
 import re
 import tempfile
+from contextlib import redirect_stdout
 from datetime import date as _date, datetime as _datetime
 from pathlib import Path
 
@@ -33,9 +35,12 @@ from stac2cube import (
     cloud_filter,
     get_stac_layers,
     get_cloud_layers,
+    build_cloud_mask_cube,
+    update_cloud_mask_cube,
     get_shadow_layers,
     add_shadow_masks_to_cloud_stack,
     coregister_cube,
+    spectral_profiler,
     get_stac_parameters,
     mask_from_probability,
     mask_stac_clouds,
@@ -321,6 +326,88 @@ def _polygon_coreg_size_hint(polygon, resolution=None):
     except Exception:
         return None
     return None
+
+
+def _enlarge_polygon_for_coreg(polygon, resolution=None):
+    """Enlarge the AOI so its bounding box meets the suggested minimum
+    co-registration edge (256 px * resolution, i.e. 2.6 km at 10 m). Only
+    edges below the minimum are expanded, symmetrically, so the original
+    area stays centered (e.g. 5 x 2 km -> 5 x 2.6 km).
+
+    Input / output:
+    - bbox [xmin, ymin, xmax, ymax] (EPSG:4326) -> new bbox (list of 4 floats)
+    - polygon file path -> path (str) of a NEW file written next to the
+      original with an '_enlarged' stem suffix. Every feature whose bounding
+      box is below the minimum edge is replaced by its enlarged bounding
+      RECTANGLE; features already large enough keep their exact geometry.
+
+    Note: enlargement is rectangular (bounding box based), so an irregular
+    drawn polygon becomes a rectangle in the enlarged file - 'Clip to exact
+    polygon outline' will then clip to that rectangle.
+    """
+    import geopandas as gpd
+    from shapely.geometry import box
+
+    res = float(resolution) if resolution else 10.0
+    min_edge_m = 256.0 * res
+
+    def _expand(minx, miny, maxx, maxy):
+        if (maxx - minx) < min_edge_m:
+            pad = (min_edge_m - (maxx - minx)) / 2.0
+            minx, maxx = minx - pad, maxx + pad
+        if (maxy - miny) < min_edge_m:
+            pad = (min_edge_m - (maxy - miny)) / 2.0
+            miny, maxy = miny - pad, maxy + pad
+        return minx, miny, maxx, maxy
+
+    # Bbox input: expand in the metric UTM CRS, then return the EPSG:4326
+    # bounds of the expanded rectangle (the tightest axis-aligned 4326 bbox
+    # that still contains it).
+    if isinstance(polygon, (list, tuple)) and len(polygon) == 4:
+        gdf = gpd.GeoDataFrame(
+            geometry=[box(*map(float, polygon))], crs="EPSG:4326"
+        )
+        utm = gdf.estimate_utm_crs()
+        expanded = box(*_expand(*gdf.to_crs(utm).total_bounds))
+        back = gpd.GeoDataFrame(geometry=[expanded], crs=utm).to_crs("EPSG:4326")
+        return [float(v) for v in back.total_bounds]
+
+    if not isinstance(polygon, str):
+        raise ValueError(
+            "Only a polygon file path or a [xmin, ymin, xmax, ymax] bbox "
+            "can be resized."
+        )
+
+    src = Path(polygon)
+    if not src.exists():
+        raise ValueError(f"Polygon file not found: {src}")
+    gdf = gpd.read_file(src)
+    if gdf.empty:
+        raise ValueError(f"Polygon file has no features: {src}")
+    orig_crs = gdf.crs
+    if orig_crs is None:
+        gdf = gdf.set_crs("EPSG:4326")
+        orig_crs = gdf.crs
+
+    utm = gdf.estimate_utm_crs()
+    utm_gdf = gdf.to_crs(utm)
+    new_geoms = []
+    for geom in utm_gdf.geometry:
+        minx, miny, maxx, maxy = geom.bounds
+        if (maxx - minx) < min_edge_m or (maxy - miny) < min_edge_m:
+            new_geoms.append(box(*_expand(minx, miny, maxx, maxy)))
+        else:
+            new_geoms.append(geom)
+    out = utm_gdf.set_geometry(new_geoms).to_crs(orig_crs)
+
+    # Re-clicking on an already-enlarged file overwrites it instead of
+    # stacking suffixes (foo_enlarged_enlarged...).
+    stem = src.stem
+    if not stem.endswith("_enlarged"):
+        stem += "_enlarged"
+    out_path = src.with_name(stem + src.suffix)
+    out.to_file(out_path)
+    return out_path.as_posix()
 
 
 def _band_resolution_map(mission_name: str):
@@ -1124,6 +1211,25 @@ def datacube_builder(missions_func=missions):
     )
     result_viz_note_w = widgets.HTML(value="")
 
+    # Co-registration size warning: when the AOI is small for good co-registration
+    # this is shown BELOW the visualize/export note in the Result section (not in
+    # Status, which is now taken by the "preview ready" message). Filled in by
+    # _show_result_summary from state["coreg_size_hint"]; cleared otherwise.
+    result_coreg_warn_w = widgets.HTML(
+        value="", layout=widgets.Layout(flex="1 1 auto")
+    )
+    # One-click fix for the warning above: writes an enlarged copy of the
+    # polygon (short bbox edges expanded to the minimum co-registration edge,
+    # original area kept centered) and re-runs the build with it - every other
+    # parameter stays as selected. Shown only while the warning is shown
+    # (see _set_coreg_warning).
+    coreg_resize_btn = widgets.Button(
+        description="Resize and Re-build Data Cube",
+        button_style="warning",
+        icon="expand",
+        layout=widgets.Layout(width="auto", display="none", flex="0 0 auto"),
+    )
+
     stats_w = widgets.SelectMultiple(
         options=[],
         value=(),
@@ -1748,10 +1854,33 @@ def datacube_builder(missions_func=missions):
             return all(_cube_is_empty(c) for c in cubes)
         return _cube_is_empty(obj)
 
+    def _coreg_warn_html():
+        """Yellow co-registration size warning for the Result panel, or empty
+        string when the last build carried no such hint."""
+        hint = state.get("coreg_size_hint")
+        if not hint:
+            return ""
+        return (
+            "<div style='font-size:12px; color:#92400e; "
+            "background:#fef3c7; border:1px solid #fcd34d; "
+            "border-radius:8px; padding:8px 10px; margin:0;'>"
+            f"⚠️ {hint}</div>"
+        )
+
+    def _set_coreg_warning(html):
+        """Show/clear the co-registration size warning together with its
+        'Resize and Re-build' button - the button only exists while the
+        warning is visible."""
+        result_coreg_warn_w.value = html or ""
+        coreg_resize_btn.layout.display = "" if (html or "") else "none"
+
     def _show_result_summary(obj):
         # The visualize/export note (a sibling widget below the Max cloud box) only
         # makes sense next to a ready cube - hide it for empty/failed results.
-        result_viz_note_w.value = "" if _result_is_empty(obj) else _RESULT_VIZ_NOTE_HTML
+        empty = _result_is_empty(obj)
+        result_viz_note_w.value = "" if empty else _RESULT_VIZ_NOTE_HTML
+        # The co-registration size warning sits right below that note.
+        _set_coreg_warning("" if empty else _coreg_warn_html())
         with result_out:
             clear_output()
 
@@ -2420,6 +2549,7 @@ def datacube_builder(missions_func=missions):
         # generic 'no data' failure - tell the user to raise the value instead.
         if _result_is_empty(filtered) and not _result_is_empty(state["result"]):
             result_viz_note_w.value = ""
+            _set_coreg_warning("")
             with result_out:
                 clear_output()
                 display(HTML(
@@ -2447,6 +2577,7 @@ def datacube_builder(missions_func=missions):
         filtered = _effective_result(state["result"], composite=False)
         if _result_is_empty(filtered) and not _result_is_empty(state["result"]):
             result_viz_note_w.value = ""
+            _set_coreg_warning("")
             with result_out:
                 clear_output()
                 display(HTML(
@@ -3609,19 +3740,15 @@ def datacube_builder(missions_func=missions):
             params, export_mode, export_target = _prepare_get_stac_layers_params()
             state["last_call_params"] = params
 
-            size_hint = _polygon_coreg_size_hint(
+            # Co-registration size warning is no longer shown in Status (that is
+            # now the "preview ready" message). It is stored and rendered in the
+            # Result panel, below the visualize/export note (see _show_result_summary).
+            state["coreg_size_hint"] = _polygon_coreg_size_hint(
                 params.get("polygon"), params.get("resolution")
             )
 
             with status_out:
                 clear_output()
-                if size_hint:
-                    display(HTML(
-                        "<div style='font-size:12px; color:#92400e; "
-                        "background:#fef3c7; border:1px solid #fcd34d; "
-                        "border-radius:8px; padding:8px 10px; margin:0 0 6px 0;'>"
-                        f"⚠️ {size_hint}</div>"
-                    ))
                 # Browser-side CSS animation so the dots keep moving even while the
                 # kernel is blocked on a slow STAC build - shows the user it isn't
                 # stuck. It's removed by clear_output(wait=True) once the build
@@ -3730,6 +3857,42 @@ def datacube_builder(missions_func=missions):
             _show_result_summary(None)
             _show_status(_friendly_error(e, "Building"))
 
+    def _on_coreg_resize_clicked(_):
+        """'Resize and Re-build Data Cube' (shown next to the co-registration
+        size warning): enlarge the AOI to the suggested minimum edge - for a
+        polygon file a new '<stem>_enlarged' file is written next to the
+        original, for a bbox the values are widened in place - then re-run
+        the normal build. Only the polygon changes; every other parameter is
+        re-read from the widgets exactly like a manual build."""
+        try:
+            polygon = _parse_polygon_input(polygon_w.value)
+            if polygon is None:
+                raise ValueError(
+                    "No polygon/bbox is set in the builder - nothing to resize."
+                )
+            resolution = None if resolution_w.disabled else int(resolution_w.value)
+            enlarged = _enlarge_polygon_for_coreg(polygon, resolution)
+
+            if isinstance(enlarged, list):
+                polygon_w.value = (
+                    "[" + ", ".join(f"{v:.6f}" for v in enlarged) + "]"
+                )
+            else:
+                polygon_w.value = enlarged
+
+            _on_generate_clicked(None)
+
+            # _on_generate_clicked owns (and clears) the Status panel, so the
+            # pointer to the new polygon is appended after it finishes - it is
+            # true whether the rebuild succeeded or failed.
+            with status_out:
+                if isinstance(enlarged, list):
+                    print(f"ℹ️ Enlarged bbox now in use: {polygon_w.value}")
+                else:
+                    print(f"ℹ️ Enlarged polygon saved and now in use: {enlarged}")
+        except Exception as e:
+            _show_status(_friendly_error(e, "Resize and re-build"))
+
     def _on_export_result_clicked(_):
         try:
             export_mode = export_mode_w.value
@@ -3777,6 +3940,7 @@ def datacube_builder(missions_func=missions):
     browse_gif_out_btn.on_click(_on_browse_gif_out_clicked)
 
     generate_btn.on_click(_on_generate_clicked)
+    coreg_resize_btn.on_click(_on_coreg_resize_clicked)
     export_result_btn.on_click(_on_export_result_clicked)
     copy_json_btn.on_click(_copy_json_to_clipboard)
 
@@ -5017,8 +5181,16 @@ def datacube_builder(missions_func=missions):
         ),
     )
 
+    # Warning text on the left, the "Resize and Re-build" button next to it on
+    # the right; both are empty/hidden when the last build carried no warning.
+    result_coreg_warn_row = widgets.HBox(
+        [result_coreg_warn_w, coreg_resize_btn],
+        layout=widgets.Layout(width="100%", gap="8px", align_items="center"),
+    )
+
     result_box = widgets.VBox(
-        [result_out, result_cloud_filter_row, result_date_row, result_viz_note_w],
+        [result_out, result_cloud_filter_row, result_date_row,
+         result_viz_note_w, result_coreg_warn_row],
         layout=widgets.Layout(width="99%", gap="6px"),
     )
     result_acc = widgets.Accordion(children=[result_box], selected_index=None)
@@ -5146,6 +5318,7 @@ def datacube_builder(missions_func=missions):
             "export_target": export_target_w,
             "browse_output_btn": browse_output_btn,
             "generate_btn": generate_btn,
+            "coreg_resize_btn": coreg_resize_btn,
             "export_result_btn": export_result_btn,
             "copy_json_btn": copy_json_btn,
             "viz_dropdown_btn": viz_dropdown_btn,
@@ -5570,6 +5743,11 @@ def datacube_editor():
         mask_file_w.disabled = not enabled
         browse_mask_file_btn.disabled = (not enabled) or (not filechooser_available)
 
+        # Build Cloud Mask Cube (standalone export)
+        build_mask_out_w.disabled = not enabled
+        build_mask_btn.disabled = not enabled
+        browse_build_mask_btn.disabled = (not enabled) or (not filechooser_available)
+
         # Spectral indices widgets
         indices_select_w.disabled = not enabled
         indices_all_btn.disabled = not enabled
@@ -5581,7 +5759,7 @@ def datacube_editor():
         stats_clear_btn.disabled = not enabled
 
         # Update widgets
-        enable_update_w.disabled = not enabled
+        update_run_btn.disabled = not enabled
         update_date_from_w.disabled = not enabled
         update_date_to_w.disabled = not enabled
         update_advanced_dates_w.disabled = not enabled
@@ -5950,12 +6128,14 @@ def datacube_editor():
     gif_fc = None
     clip_fc = None
     mask_file_fc = None
+    build_mask_fc = None
 
     load_fc_box = widgets.VBox([], layout=widgets.Layout(display="none", width="100%"))
     export_fc_box = widgets.VBox([], layout=widgets.Layout(display="none", width="100%"))
     gif_fc_box = widgets.VBox([], layout=widgets.Layout(display="none", width="100%"))
     clip_fc_box = widgets.VBox([], layout=widgets.Layout(display="none", width="100%"))
     mask_file_fc_box = widgets.VBox([], layout=widgets.Layout(display="none", width="100%"))
+    build_mask_fc_box = widgets.VBox([], layout=widgets.Layout(display="none", width="100%"))
 
     def _toggle_box_display(box):
         box.layout.display = "" if box.layout.display == "none" else "none"
@@ -6094,6 +6274,21 @@ def datacube_editor():
             except Exception:
                 pass
 
+    def _sync_build_mask_filechooser_from_text():
+        if not filechooser_available or build_mask_fc is None:
+            return
+        current = (build_mask_out_w.value or "").strip()
+        start_dir = _existing_dir_or_parent(current)
+        suggested_name = Path(current).name if current else ""
+        try:
+            build_mask_fc.reset(path=start_dir, filename=suggested_name)
+        except Exception:
+            try:
+                build_mask_fc.default_path = start_dir
+                build_mask_fc.default_filename = suggested_name
+            except Exception:
+                pass
+
     if filechooser_available:
         try:
             load_fc = FileChooser(
@@ -6157,14 +6352,29 @@ def datacube_editor():
                 pass
             mask_file_fc_box = widgets.VBox([mask_file_fc], layout=widgets.Layout(display="none", width="100%"))
 
+            build_mask_fc = FileChooser(
+                path=str(Path(".").resolve()),
+                filename="",
+                title="Select output for the binary cloud mask (.nc)",
+                show_only_dirs=False,
+                select_default=False,
+            )
+            build_mask_fc.use_dir_icons = True
+            try:
+                build_mask_fc.filter_pattern = ["*.nc", "*.zarr", "*"]
+            except Exception:
+                pass
+            build_mask_fc_box = widgets.VBox([build_mask_fc], layout=widgets.Layout(display="none", width="100%"))
+
         except Exception:
             filechooser_available = False
-            load_fc = export_fc = gif_fc = clip_fc = mask_file_fc = None
+            load_fc = export_fc = gif_fc = clip_fc = mask_file_fc = build_mask_fc = None
             load_fc_box = widgets.VBox([], layout=widgets.Layout(display="none", width="100%"))
             export_fc_box = widgets.VBox([], layout=widgets.Layout(display="none", width="100%"))
             gif_fc_box = widgets.VBox([], layout=widgets.Layout(display="none", width="100%"))
             clip_fc_box = widgets.VBox([], layout=widgets.Layout(display="none", width="100%"))
             mask_file_fc_box = widgets.VBox([], layout=widgets.Layout(display="none", width="100%"))
+            build_mask_fc_box = widgets.VBox([], layout=widgets.Layout(display="none", width="100%"))
 
     # ---------------------------------------------------------------------
     # Widgets
@@ -6172,10 +6382,10 @@ def datacube_editor():
     # Loading
     load_path_w = widgets.Text(
         value="./results/test.nc",
-        description="Cube:",
+        description="",
         placeholder="./results/test.nc or ./results/test.zarr",
         layout=widgets.Layout(width="100%"),
-        style={"description_width": "90px"},
+        style={"description_width": "0px"},
     )
 
     browse_load_btn = widgets.Button(
@@ -6325,6 +6535,38 @@ def datacube_editor():
     )
     browse_mask_file_btn.style.button_color = "#f3f4f6"
 
+    # Build Cloud Mask Cube: reconstruct the SCL binary cloud mask of the loaded
+    # cube - the same file the builder writes with "Export Mask as Binary File".
+    # It re-queries STAC using the cube's stored parameters (get_stac_parameters)
+    # and writes a Cloud_Stack (1=cloud, 0=clear). Standalone export; it does NOT
+    # change the working cube, so it is not part of the Edit chain.
+    build_mask_out_w = widgets.Text(
+        value="",
+        placeholder="./results/<cube>_mask_binary.nc",
+        layout=widgets.Layout(width="100%"),
+        disabled=True,
+    )
+    browse_build_mask_btn = widgets.Button(
+        description="",
+        icon="folder-open",
+        tooltip="Browse output for the binary cloud mask (.nc)",
+        layout=widgets.Layout(width="34px", min_width="34px", height="32px", padding="0px"),
+        disabled=True,
+    )
+    browse_build_mask_btn.style.button_color = "#f3f4f6"
+    build_mask_btn = widgets.Button(
+        description="Build Binary Cloud Mask",
+        button_style="primary",
+        icon="cloud",
+        layout=widgets.Layout(width="230px"),
+        disabled=True,
+    )
+    build_mask_out = widgets.Output(layout=widgets.Layout(width="99%", overflow="auto"))
+
+    # Update Data Cube is a standalone feature too, so it gets its own output
+    # group (instead of printing into the shared Status section).
+    update_out = widgets.Output(layout=widgets.Layout(width="99%", overflow="auto"))
+
     # Spectral indices (applied via Edit button). Options are populated from the
     # loaded cube's mission once a cube is loaded.
     indices_select_w = widgets.SelectMultiple(
@@ -6353,11 +6595,13 @@ def datacube_editor():
     stats_clear_btn = widgets.Button(description="Clear", layout=widgets.Layout(width="70px"), disabled=True)
 
     # Update Data Cube (fetch missing dates and/or missing bands for the
-    # loaded cube path)
-    enable_update_w = widgets.Checkbox(
-        value=False,
-        description="Enable update data cube",
-        indent=False,
+    # loaded cube path). Standalone action: its own button + output group,
+    # not the shared Edit button.
+    update_run_btn = widgets.Button(
+        description="Update Data Cube",
+        button_style="primary",
+        icon="refresh",
+        layout=widgets.Layout(width="200px"),
         disabled=True,
     )
 
@@ -6776,6 +7020,17 @@ def datacube_editor():
                 mask_file_w.value = _normalize_ui_path(selected)
                 mask_file_fc_box.layout.display = "none"
 
+        def _on_build_mask_fc_selected(chooser):
+            # Save path: append .nc when the user picked/typed a name without a
+            # cube extension (mirrors the export chooser's NetCDF behaviour).
+            selected = getattr(chooser, "selected", None)
+            if selected:
+                s = str(selected)
+                if not (s.lower().endswith(".nc") or s.lower().endswith(".zarr")):
+                    s += ".nc"
+                build_mask_out_w.value = _normalize_ui_path(s)
+                build_mask_fc_box.layout.display = "none"
+
         try:
             load_fc.register_callback(_on_load_fc_selected)
             export_fc.register_callback(_on_export_fc_selected)
@@ -6784,6 +7039,8 @@ def datacube_editor():
                 clip_fc.register_callback(_on_clip_fc_selected)
             if mask_file_fc is not None:
                 mask_file_fc.register_callback(_on_mask_file_fc_selected)
+            if build_mask_fc is not None:
+                build_mask_fc.register_callback(_on_build_mask_fc_selected)
         except Exception:
             filechooser_available = False
 
@@ -6830,6 +7087,16 @@ def datacube_editor():
             return
         _sync_mask_file_filechooser_from_text()
         _toggle_box_display(mask_file_fc_box)
+
+    def _on_browse_build_mask_clicked(_):
+        if state["current"] is None:
+            _show_status("ℹ️ Load a cube first to enable editing features.")
+            return
+        if not filechooser_available or build_mask_fc is None:
+            _show_status("ℹ️ Optional dependency 'ipyfilechooser' is not available. Install it to use Browse buttons.")
+            return
+        _sync_build_mask_filechooser_from_text()
+        _toggle_box_display(build_mask_fc_box)
 
     # ---------------------------------------------------------------------
     # Feature helpers
@@ -7026,12 +7293,10 @@ def datacube_editor():
         Update the loaded cube by requesting missing dates and/or bands via:
         - get_stac_layers(update=...) for Spectral_Temporal_Stack cubes
           (dates + bands; the cloud/shadow strategy is restored from the attrs)
-        - get_cloud_layers(update=..., threshold=None) for Cloud_Stack cubes
-          (dates only, probability only)
+        - update_cloud_mask_cube(...) for SCL binary masks (cloud_mask_scl band)
+        - get_cloud_layers(update=..., threshold=None) for cloud-probability
+          Cloud_Stack cubes (dates only, probability only)
         """
-        if not enable_update_w.value:
-            return obj, False, []
-
         loaded_path = state.get("loaded_path")
         if not loaded_path:
             raise ValueError("No loaded cube path available for update.")
@@ -7051,6 +7316,48 @@ def datacube_editor():
                 loaded_var = state.get("loaded_original").name
             except Exception:
                 loaded_var = None
+
+        # ------------------------------------------------------------------
+        # SCL binary cloud-mask update (Cloud_Stack with a cloud_mask_scl band)
+        # ------------------------------------------------------------------
+        _mask_da = obj if isinstance(obj, xr.DataArray) else (
+            obj["Cloud_Stack"] if isinstance(obj, xr.Dataset)
+            and "Cloud_Stack" in obj.data_vars else None
+        )
+        _mask_bands = (
+            [str(b) for b in _mask_da["band"].values]
+            if _mask_da is not None and "band" in getattr(_mask_da, "dims", ())
+            else []
+        )
+        if loaded_var == "Cloud_Stack" and "cloud_mask_scl" in _mask_bands:
+            if add_bands:
+                raise ValueError(
+                    "Band update is not available for a binary cloud mask. Clear "
+                    "the Band Update selection."
+                )
+            if not daterange:
+                raise ValueError("Please provide a daterange for Update Data Cube.")
+            merged = update_cloud_mask_cube(_mask_da, daterange, q=True)
+            _old_days = set(
+                np.asarray(_mask_da.time.values).astype("datetime64[D]")
+            )
+            added = sorted(
+                set(np.asarray(merged.time.values).astype("datetime64[D]"))
+                - _old_days
+            )
+            if not added:
+                return merged, False, [
+                    f"No new dates in {daterange} - the binary mask is already "
+                    "up to date."
+                ]
+            msgs = [
+                f"binary cloud mask updated (SCL): {len(added)} new date(s) "
+                f"in {daterange}",
+                "added: " + ", ".join(
+                    np.datetime_as_string(d, unit="D") for d in added
+                ),
+            ]
+            return merged, True, msgs
 
         # ------------------------------------------------------------------
         # Cloud cube update (Cloud_Stack) -> cloud probability only
@@ -7434,6 +7741,17 @@ def datacube_editor():
             base = _auto_netcdf_export_suggestion()
             export_target_w.value = f"{os.path.splitext(base)[0]}.zarr"
 
+        # Build Cloud Mask output: suggest <cube>_mask_binary.<ext> on load, but
+        # keep a manual edit (same freshening rule as the GIF/export suggestions).
+        _bm_new = _suggest_build_mask_path()
+        if _bm_new:
+            build_mask_out_w.placeholder = _bm_new
+            _bm_cur = (build_mask_out_w.value or "").strip()
+            _bm_prev = state.get("last_auto_build_mask_suggestion")
+            if _bm_cur == "" or (_bm_prev is not None and _bm_cur == _bm_prev):
+                build_mask_out_w.value = _bm_new
+            state["last_auto_build_mask_suggestion"] = _bm_new
+
         print(f"✅ Loaded cube: {path}")
         print(f"   Working layer: {_layer_display_name(var_name)}")
         _print_working_note()
@@ -7601,8 +7919,6 @@ def datacube_editor():
         enable_cloud_filter_w.value = False
         enable_mask_clouds_w.value = False
         enable_clip_w.value = False
-        enable_update_w.value = False
-        update_bands_w.value = ()
 
     def _on_edit_clicked(_):
         if state["current"] is None:
@@ -7618,42 +7934,35 @@ def datacube_editor():
                 changed_any = False
                 messages = []
 
-                if enable_update_w.value:
-                    #print("ℹ️ Update Data Cube is enabled.")
-                    #print("ℹ️ In this run, other feature selections are ignored and the working result will be replaced from the loaded cube path.")
-                    current_obj, changed_update, update_msgs = _apply_update_feature(current_obj)
-                    changed_any = changed_any or changed_update
-                    messages.extend(update_msgs)
-                else:
-                    # 1) Slice
-                    current_obj, changed_slice, slice_msgs = _apply_slice_feature(current_obj)
-                    changed_any = changed_any or changed_slice
-                    messages.extend(slice_msgs)
+                # 1) Slice
+                current_obj, changed_slice, slice_msgs = _apply_slice_feature(current_obj)
+                changed_any = changed_any or changed_slice
+                messages.extend(slice_msgs)
 
-                    # 2) Filter by Cloud Coverage
-                    current_obj, changed_cloud, cloud_msgs = _apply_cloud_filter_feature(current_obj)
-                    changed_any = changed_any or changed_cloud
-                    messages.extend(cloud_msgs)
+                # 2) Filter by Cloud Coverage
+                current_obj, changed_cloud, cloud_msgs = _apply_cloud_filter_feature(current_obj)
+                changed_any = changed_any or changed_cloud
+                messages.extend(cloud_msgs)
 
-                    # 3) Mask Clouds with Binary Masking File
-                    current_obj, changed_mask, mask_msgs = _apply_mask_clouds_feature(current_obj)
-                    changed_any = changed_any or changed_mask
-                    messages.extend(mask_msgs)
+                # 3) Mask Clouds with Binary Masking File
+                current_obj, changed_mask, mask_msgs = _apply_mask_clouds_feature(current_obj)
+                changed_any = changed_any or changed_mask
+                messages.extend(mask_msgs)
 
-                    # 4) Clip Raster
-                    current_obj, changed_clip, clip_msgs = _apply_clip_feature(current_obj)
-                    changed_any = changed_any or changed_clip
-                    messages.extend(clip_msgs)
+                # 4) Clip Raster
+                current_obj, changed_clip, clip_msgs = _apply_clip_feature(current_obj)
+                changed_any = changed_any or changed_clip
+                messages.extend(clip_msgs)
 
-                    # 4) Calculate Spectral Indices
-                    current_obj, changed_idx, idx_msgs = _apply_indices_feature(current_obj)
-                    changed_any = changed_any or changed_idx
-                    messages.extend(idx_msgs)
+                # 5) Calculate Spectral Indices
+                current_obj, changed_idx, idx_msgs = _apply_indices_feature(current_obj)
+                changed_any = changed_any or changed_idx
+                messages.extend(idx_msgs)
 
-                    # 5) Temporal composites (stats)
-                    current_obj, changed_stats, stats_msgs = _apply_stats_feature(current_obj)
-                    changed_any = changed_any or changed_stats
-                    messages.extend(stats_msgs)
+                # 6) Temporal composites (stats)
+                current_obj, changed_stats, stats_msgs = _apply_stats_feature(current_obj)
+                changed_any = changed_any or changed_stats
+                messages.extend(stats_msgs)
 
                 state["current"] = current_obj
 
@@ -7690,6 +7999,49 @@ def datacube_editor():
 
         except Exception as e:
             _show_status(_friendly_error(e, "Editing"))
+
+    def _on_update_clicked(_):
+        """Standalone Update Data Cube action: fetch missing dates/bands for the
+        loaded cube via _apply_update_feature, printing into the Update group."""
+        if state["current"] is None:
+            with update_out:
+                clear_output()
+                print("❌ Load a cube first.")
+            return
+
+        try:
+            with update_out:
+                clear_output()
+                print("Updating data cube...")
+
+                current_obj, changed, msgs = _apply_update_feature(state["current"])
+                state["current"] = current_obj
+
+                _populate_slice_widgets_from_current(select_all=True)
+                _refresh_gif_band_options()
+                _show_result_current()
+
+                if changed:
+                    print("✅ Update finished.")
+                    if msgs:
+                        print("Applied:")
+                        for m in msgs:
+                            print(f"- {m}")
+                else:
+                    print("✅ Update finished (no changes applied).")
+
+                update_bands_w.value = ()
+                _print_working_note()
+
+            try:
+                result_acc.selected_index = 0
+            except Exception:
+                pass
+
+        except Exception as e:
+            with update_out:
+                clear_output()
+                print(_friendly_error(e, "Update"))
 
     def _on_export_current_clicked(_):
         if state["current"] is None:
@@ -8021,6 +8373,120 @@ def datacube_editor():
     cloud_filter_acc.set_title(0, "Filter by Cloud Coverage")
     cloud_filter_acc.layout = widgets.Layout(width="99%")
 
+    # ------------------------------------------------------------------
+    # Build Cloud Mask Cube (standalone export - same as builder's
+    # "Export Mask as Binary File")
+    # ------------------------------------------------------------------
+    def _suggest_build_mask_path():
+        lp = state.get("loaded_path")
+        if not lp:
+            return ""
+        p = Path(lp)
+        ext = ".zarr" if is_zarr_path(lp) else ".nc"
+        # Strip a trailing _cr/_sr etc.? No - keep the cube's own stem so the mask
+        # is unambiguously tied to this cube.
+        return (p.parent / f"{p.stem}_mask_binary{ext}").as_posix()
+
+    def _on_build_mask_clicked(_):
+        with build_mask_out:
+            clear_output()
+
+        if state.get("loaded_path") is None:
+            with build_mask_out:
+                print("❌ Load a cube first.")
+            return
+        if state.get("loaded_var") != "Spectral_Temporal_Stack":
+            with build_mask_out:
+                print(
+                    "❌ Building a binary cloud mask needs the 'Spectral_Temporal_Stack' "
+                    f"cube (the loaded layer is '{state.get('loaded_var')}')."
+                )
+            return
+
+        out_path = (build_mask_out_w.value or "").strip()
+        if not out_path:
+            out_path = _suggest_build_mask_path()
+            build_mask_out_w.value = out_path
+
+        p_out = Path(out_path)
+        try:
+            # All the work happens in stac2cube.cloud_masking.build_cloud_mask_cube
+            # (validation, STAC re-query, exact date match to the cube, metadata
+            # stamping, export); the GUI only wires it to the interface.
+            with build_mask_out:
+                print(
+                    "Rebuilding the binary cloud mask from the cube's parameters..."
+                )
+                mask_out = build_cloud_mask_cube(
+                    state["loaded_path"], output=out_path, q=True
+                )
+
+            if not p_out.exists():
+                with build_mask_out:
+                    print("❌ Build failed: the mask file was not created.")
+                return
+
+            # Report: date coverage vs the loaded cube.
+            cube_days = set(
+                np.asarray(state["loaded_original"]["time"].values)
+                .astype("datetime64[D]")
+            )
+            mask_days = set(
+                np.asarray(mask_out["time"].values).astype("datetime64[D]")
+            )
+            missing_days = sorted(cube_days - mask_days)
+            m_bands = [str(b) for b in mask_out["band"].values]
+            with build_mask_out:
+                clear_output()
+                print(f"✅ Binary cloud mask exported: {out_path}")
+                print(
+                    f"   Scenes: {int(mask_out.sizes.get('time', 0))} (matched to "
+                    f"the cube's {len(cube_days)} date(s)) | bands: {', '.join(m_bands)}"
+                )
+                if missing_days:
+                    print(
+                        f"   ⚠️ {len(missing_days)} cube date(s) had no scene in the "
+                        "fresh STAC query and are not in the mask:"
+                    )
+                    for d in missing_days:
+                        print(f"      - {np.datetime_as_string(d, unit='D')}")
+        except Exception as e:
+            with build_mask_out:
+                clear_output()
+                print(_friendly_error(e, "Build binary cloud mask"))
+
+    build_mask_btn.on_click(_on_build_mask_clicked)
+    browse_build_mask_btn.on_click(_on_browse_build_mask_clicked)
+
+    build_mask_input_row = widgets.HBox(
+        [browse_build_mask_btn, build_mask_out_w],
+        layout=widgets.Layout(width="100%", gap="6px", align_items="center"),
+    )
+    build_mask_input_box = widgets.VBox(
+        [build_mask_input_row, build_mask_fc_box],
+        layout=widgets.Layout(width="100%", gap="4px"),
+    )
+
+    build_mask_feature_box = widgets.VBox(
+        [
+            _chainable_badge(False, "run on its own"),
+            widgets.HTML(
+                "<div style='font-size:12px; color:#666;'>"
+                "Build the <b>binary cloud mask</b> of the loaded data cube "
+                "(SCL-based, 1=cloud, 0=clear). Use it to co-register or mask a "
+                "data cube that isn't masked yet."
+                "</div>"
+            ),
+            _stacked_field(build_mask_input_box, "Output binary mask (NetCDF/Zarr)"),
+            build_mask_btn,
+            build_mask_out,
+        ],
+        layout=widgets.Layout(width="100%", gap="8px"),
+    )
+    build_mask_acc = widgets.Accordion(children=[build_mask_feature_box], selected_index=None)
+    build_mask_acc.set_title(0, "Build Cloud Mask Cube")
+    build_mask_acc.layout = widgets.Layout(width="99%")
+
     # Mask Clouds with Binary Masking File
     mask_file_input_row = widgets.HBox(
         [browse_mask_file_btn, mask_file_w],
@@ -8261,12 +8727,14 @@ def datacube_editor():
                 "<b>This feature is recommended to be used alone without in sequence with other features.</b>"
                 "</div>"
             ),
-            enable_update_w,
             update_date_group,
             update_band_group,
+            update_run_btn,
+            update_out,
         ],
         layout=widgets.Layout(width="100%", gap="8px"),
     )
+    update_run_btn.on_click(_on_update_clicked)
 
     update_acc = widgets.Accordion(children=[update_feature_box], selected_index=None)
     update_acc.set_title(0, "Update Data Cube (Date and/or band)")
@@ -8310,6 +8778,7 @@ def datacube_editor():
             #widgets.HTML("<div style='font-size:12px; color:#666;'>- Do not forget to uncheck boxes after editing a data cube to prevent.</div>"),
             slice_acc,
             cloud_filter_acc,
+            build_mask_acc,
             mask_clouds_acc,
             clip_acc,
             indices_acc,
@@ -8504,7 +8973,7 @@ def datacube_editor():
             "indices_select": indices_select_w,
             "stats_select": stats_select_w,
             "edit_btn": edit_btn,
-            "enable_update": enable_update_w,
+            "update_run_btn": update_run_btn,
             "update_date_from": update_date_from_w,
             "update_date_to": update_date_to_w,
             "update_advanced_dates": update_advanced_dates_w,
@@ -8815,86 +9284,79 @@ def ard_cube_tools():
 
     COREG_HELP = {
         "grid_size": """
-    <b>grid_size</b><br>
-    Window budget of the scan: shifts are estimated at up to grid_size x grid_size + 1 window positions<br>
-    and combined into a robust consensus, so outlier windows (clouds, moving river bars) are outvoted.<br>
-    Windows are placed cloud-aware: only where both the scene and its reference are fully cloud-free<br>
-    (a window fails on even a few masked pixels), with a regular grid as fallback.<br>
-    Higher values take longer but add voters; more windows can only make the consensus more robust.<br>
-    With the adaptive scan enabled, easy scenes are resolved by a coarse 10-window stage and the full<br>
-    budget runs only for difficult scenes - so a large grid_size mainly costs time on cloudy dates.
+    <b>Full scan size (for difficult scenes)</b><br>
+    How many small windows are used to measure each scene's shift. More windows = more votes,
+    so clouds or a shifting river bar get outvoted and the shift is more reliable - but it takes
+    longer.<br>
+    The adaptive scan uses only a few windows on easy scenes and this full number only on hard ones,
+    so raising it mainly costs time on cloudy dates. The default is fine for most cubes.
     """,
         "max_cc": """
-    <b>max_cc</b><br>
-    Maximum cloud percentage of scenes (from cloud-masked data cube; either SCL or s2cloudless). Scenes beyond this threshold are excluded.<br>
-    The algorithm already detects some cloudy scenes that cannot be co-registered and automatically deletes them from the time series.<br>
-    However, filtering cloudy scenes can sometimes improve the performance of the co-registration, especially in highly cloud covered regions.
+    <b>Max Cloud Coverage</b><br>
+    Scenes with more cloud than this (%) are dropped before co-registration.<br>
+    Very cloudy scenes are already detected and removed automatically, but dropping them early
+    can help in very cloudy regions. Needs a cloud-masked cube to know the cloud %.
     """,
         "time_period": """
-    <b>time_period</b><br>
-    Selection of the time range: <code>["YYYY-MM-DD", "YYYY-MM-DD"]</code>.<br>
-    The co-registration is performed on the selected time range.<br> 
-    It can be useful to exclude problematic surfaces for co-registration algorithm (e.g. snow & ice).
+    <b>Time Period</b><br>
+    Limit co-registration to a date range: <code>["YYYY-MM-DD", "YYYY-MM-DD"]</code>.<br>
+    Handy to leave out hard periods (e.g. snow &amp; ice). Leave empty to use all dates.
     """,
         "match_band": """
-    <b>match_band</b><br>
-    Spectral band used for the matching. <code>auto</code> picks the first available native 10-m band<br>
-    in the order nir, red, green, blue. Resampled 20-m bands (rededge*, nir08, swir16, swir22) match<br>
-    far worse and should not be used.
+    <b>Matching Band</b><br>
+    The band used to line up the scenes. <code>auto</code> picks a good native 10-m band
+    (nir, then red, green, blue).<br>
+    Avoid the resampled 20-m bands (rededge*, nir08, swir16, swir22) - they match poorly.
     """,
         "cloud_mask": """
-    <b>cloud_mask</b><br>
-    Optional binary cloud mask cube (1 = cloud) for co-registering a cube that keeps its clouds:<br>
-    shifts are estimated with clouds masked out, while the exported scenes keep the clouds.<br>
-    The mask may contain more dates than the cube; every cube date must be present.
+    <b>Cloud Mask Cube</b><br>
+    A binary cloud mask (1 = cloud) for cubes that still keep their clouds.<br>
+    The clouds are hidden while measuring the shift, but stay in the exported scenes.<br>
+    The mask can have extra dates, but every date in the cube must be present.
     """,
         "min_inliers_keep": """
-    <b>Matching Points to Keep a Scene</b> (<code>min_inliers_keep</code>)<br>
-    The shift of each scene is measured at many points across the image. This is the minimum number<br>
-    of points that must agree for the scene to be kept; scenes with fewer agreeing points (typically<br>
-    heavily clouded) are dropped from the time series.<br>
-    <code>auto</code> = at least 3 points and at least 6% of the points tried for that scene - it scales<br>
-    correctly with Grid Size and the adaptive scan, so it is the recommended setting.
+    <b>Matching Points to Keep a Scene</b><br>
+    Each scene's shift is measured at many points. This is the minimum number that must agree
+    for the scene to be kept; scenes with fewer (usually very cloudy) are dropped.<br>
+    <code>auto</code> scales with the scan size and is recommended.
     """,
         "min_inliers_update_ref": """
-    <b>Matching Points to Trust as Reference</b> (<code>min_inliers_update_ref</code>)<br>
-    A scene becomes the reference that the NEXT scene is aligned to only when at least this many<br>
-    points agree on its shift. Scenes below this stay in the cube but never serve as reference.<br>
-    <code>auto</code> = at least 3 points and at least 16% of the points tried for that scene - it scales<br>
-    correctly with Grid Size and the adaptive scan, so it is the recommended setting.
+    <b>Matching Points to Trust as Reference</b><br>
+    A scene is only used to align the next one when at least this many points agree on its shift.
+    Scenes below this stay in the cube but are not used as a reference.<br>
+    <code>auto</code> scales with the scan size and is recommended.
     """,
         "max_cloud_update_ref": """
-    <b>Max Cloud % for Reference Scenes</b> (<code>max_cloud_update_ref</code>)<br>
-    Scenes cloudier than this never become the reference for the following scene, even when their<br>
-    shift was measured confidently.
+    <b>Max Cloud % for Reference Scenes</b><br>
+    A scene cloudier than this (%) is never used to align the next scene, even if its shift
+    looked confident.
     """,
         "first_scene_mode": """
-    <b>first_scene_mode</b><br>
-    How the reference anchor of the chain is chosen (crucial for the rest of the series).<br>
-    <code>auto</code> picks the most textured low-cloud scene automatically (snow/haze/clouds reduce texture);<br>
-    <code>first</code> anchors at the first scene; <code>composite</code> matches against the median of the first<br>
-    <code>composite_window_days</code> days; <code>select date</code> anchors at the scene you name in Reference Date.<br>
-    With <code>auto</code> or a date, the chain runs in both directions from the anchor.
+    <b>Reference Scene</b><br>
+    The scene everything else is aligned to.<br>
+    <code>auto</code> picks a clear, high-contrast scene for you; <code>select date</code> lets you
+    name one (or pick it visually with Browse Scenes); <code>composite</code> uses a median of the
+    first few days; <code>first</code> uses the first scene.<br>
+    With <code>auto</code> or a chosen date, alignment runs both forward and backward from it.
     """,
         "reference_date": """
-    <b>reference_date</b><br>
-    Only used with <code>select date</code>: the scene to anchor the chain at (<code>YYYY-MM-DD</code>,<br>
-    nearest available scene is used). Click <b>Browse Scenes</b> to look through the cube and pick a<br>
-    cloud-free, high-contrast scene visually - "Select Scene as Reference" fills this field for you.<br>
-    The chain then runs in both directions from that scene, so any date of the series works.
+    <b>Reference Date</b><br>
+    Used only with <code>select date</code>: the scene to align everything to (<code>YYYY-MM-DD</code>,
+    nearest scene is used).<br>
+    Tip: click <b>Browse Scenes</b> to look through the cube and pick a clear, high-contrast scene -
+    it fills this field for you.
     """,
         "composite_window_days": """
-    <b>composite_window_days</b><br>
-    Days used for composite if <code>first_scene_mode="composite"</code>.<br>
-    Example: first scene 2020-01-15 and <code>composite_window_days=30</code> → median of scenes from 2020-01-15 to 2020-02-15.
+    <b>Composite Window (days)</b><br>
+    Only for the <code>composite</code> reference: how many days after the first scene to median.<br>
+    Example: first scene 2020-01-15 with 30 days = median of 2020-01-15 to 2020-02-15.
     """,
         "iteration": """
-    <b>iteration</b><br>
-    Number of shift-ESTIMATION passes. The data itself is always resampled exactly once at the end,<br>
-    so extra iterations refine the estimated shifts without degrading the pixels.<br>
-    <code>auto</code> measures the cube after each pass and keeps a refinement pass only when it<br>
-    actually improves the cube; otherwise it stops (max 5). Usually 1 pass is already converged.<br>
-    If <code>first_scene_mode="composite"</code>, later passes use <code>first</code>.
+    <b>Iteration</b><br>
+    How many times the shift is re-measured. The pixels are resampled only once at the end, so
+    extra passes just sharpen the estimate without degrading the data.<br>
+    <code>auto</code> keeps refining only while it actually helps the cube (max 5). Usually 1 pass
+    is enough.
     """,
     }
 
@@ -10384,9 +10846,9 @@ def ard_cube_tools():
     cr_max_cloud_update_ref_w = widgets.BoundedFloatText(value=20.0, min=0.0, max=100.0, step=1.0, layout=widgets.Layout(width="200px"))
     cr_adaptive_w = widgets.Checkbox(
         value=True,
-        description="Adaptive window scan (coarse first, full budget only when a scene is difficult)",
+        description="Adaptive window scan",
         indent=False,
-        layout=widgets.Layout(width="100%"),
+        layout=widgets.Layout(width="auto"),
     )
 
     def _parse_inlier_value(txt):
@@ -10604,53 +11066,75 @@ def ard_cube_tools():
             "Co-registering...",
         )
 
+        # Capture coregister_cube's printed "Co-registration summary" so it can be
+        # shown BELOW the final status line (the finished/exported message comes
+        # first, the summary after it). tqdm progress bars use display() and still
+        # render live in status_out; only stdout prints are captured here.
+        summary_buf = io.StringIO()
+
+        def _flush_summary():
+            summary_text = summary_buf.getvalue().strip()
+            if summary_text:
+                with status_out:
+                    print()
+                    print(summary_text)
+
         try:
             with status_out:
-                coregister_cube(
-                    input_path=state["loaded_path"],
-                    grid_size=int(cr_grid_size_w.value),
-                    max_cc=int(cr_max_cc_w.value),
-                    time_period=time_period,
-                    cloud_mask=((cr_cloud_mask_w.value or "").strip() or None),
-                    match_band=str(cr_match_band_w.value),
-                    min_inliers_keep=inliers_keep,
-                    min_inliers_update_ref=inliers_update,
-                    adaptive=bool(cr_adaptive_w.value),
-                    max_cloud_update_ref=float(cr_max_cloud_update_ref_w.value),
-                    first_scene_mode=first_scene_mode,
-                    composite_window_days=int(cr_composite_window_days_w.value),
-                    iteration=cr_iteration_w.value,  # "auto" or int
-                    output_path=out_path,
-                )
+                with redirect_stdout(summary_buf):
+                    coregister_cube(
+                        input_path=state["loaded_path"],
+                        grid_size=int(cr_grid_size_w.value),
+                        max_cc=int(cr_max_cc_w.value),
+                        time_period=time_period,
+                        cloud_mask=((cr_cloud_mask_w.value or "").strip() or None),
+                        match_band=str(cr_match_band_w.value),
+                        min_inliers_keep=inliers_keep,
+                        min_inliers_update_ref=inliers_update,
+                        adaptive=bool(cr_adaptive_w.value),
+                        max_cloud_update_ref=float(cr_max_cloud_update_ref_w.value),
+                        first_scene_mode=first_scene_mode,
+                        composite_window_days=int(cr_composite_window_days_w.value),
+                        iteration=cr_iteration_w.value,  # "auto" or int
+                        output_path=out_path,
+                    )
 
-            # --- Verify export actually happened (prevents false ✅).
-            # On failure, append into status_out (never call _status, which
-            # clears) so the tool's own error is never overwritten by success.
+            # --- Verify export actually happened (prevents false ✅). The tool's
+            # own summary is captured above, so it is flushed after the message.
             if not p_out.exists():
-                with status_out:
-                    print("❌ Co-registration failed: output file was not created.")
+                _status("❌ Co-registration failed: output file was not created.")
+                _flush_summary()
                 return
 
             new_mtime, new_size = _output_stat(p_out)
             if existed_before and (new_mtime == old_mtime) and (new_size == old_size):
-                with status_out:
-                    print("❌ Co-registration failed: output file was not updated.")
+                _status("❌ Co-registration failed: output file was not updated.")
+                _flush_summary()
                 return
 
             try:
                 with open_cube(p_out) as _:
                     pass
             except Exception as e:
-                with status_out:
-                    print(f"❌ Co-registration failed: output file is not readable ({type(e).__name__}: {e})")
+                _status(f"❌ Co-registration failed: output file is not readable ({type(e).__name__}: {e})")
+                _flush_summary()
                 return
 
             state["current_result_path"] = out_path
             _show_result_from_path(out_path)
+            # Spectral profiler: point the "after" path at the fresh co-registered
+            # cube, and default the "before" path to the loaded cube if unset.
+            cr_prof_after_w.value = out_path
+            if not (cr_prof_before_w.value or "").strip() and state.get("loaded_path"):
+                cr_prof_before_w.value = str(Path(state["loaded_path"]).as_posix())
+
+            # Finished/exported message FIRST, then the co-registration summary.
             _status(f"✅ Co-registration finished and exported: {out_path}")
+            _flush_summary()
 
         except Exception as e:
             _status(f"❌ {type(e).__name__}: {e}")
+            _flush_summary()
 
     cr_run_btn.on_click(_on_coregister_clicked)
 
@@ -10836,7 +11320,7 @@ def ard_cube_tools():
     )
     cr_ref_acc = widgets.Accordion(children=[cr_ref_box], selected_index=None)
     cr_ref_acc.set_title(0, "Reference Scene")
-    cr_ref_acc.layout = widgets.Layout(width="100%")
+    cr_ref_acc.layout = widgets.Layout(width="99%")
 
     cr_filter_box = widgets.VBox(
         [
@@ -10847,23 +11331,12 @@ def ard_cube_tools():
                 ],
                 gap_px=20,
             ),
-            _stacked_field(
-                cr_mask_box,
-                "Cloud mask cube (optional - only for cubes with clouds kept)",
-            ),
-            widgets.HTML(
-                "<div style='font-size:11px; color:#666; margin-top:-6px;'>"
-                "Provide the binary cloud mask (builder's mask export) to co-register a cube "
-                "that KEEPS its clouds (e.g. for natural animations): clouds are ignored during "
-                "shift estimation but stay in the exported scenes. Leave empty for cloud-masked cubes."
-                "</div>"
-            ),
         ],
         layout=widgets.Layout(width="100%", gap="6px"),
     )
     cr_filter_acc = widgets.Accordion(children=[cr_filter_box], selected_index=None)
     cr_filter_acc.set_title(0, "Filters (optional)")
-    cr_filter_acc.layout = widgets.Layout(width="100%")
+    cr_filter_acc.layout = widgets.Layout(width="99%")
 
     cr_adv_box = widgets.VBox(
         [
@@ -10875,7 +11348,7 @@ def ard_cube_tools():
             ),
             _row(
                 [
-                    _stacked_field_with_help(cr_grid_size_w, "Grid Size", "grid_size"),
+                    _stacked_field_with_help(cr_grid_size_w, "Full scan size (for difficult scenes)", "grid_size"),
                     _stacked_field_with_help(cr_match_band_w, "Matching Band", "match_band"),
                     _stacked_field_with_help(cr_iteration_w, "Iteration", "iteration"),
                 ],
@@ -10890,14 +11363,210 @@ def ard_cube_tools():
                 gap_px=20,
             ),
             cr_adaptive_w,
+            widgets.HTML(
+                "<div style='font-size:11px; color:#666; margin-top:-4px;'>"
+                "Uses a quick coarse scan first and the full scan size only when a "
+                "scene is difficult - fast without losing accuracy."
+                "</div>"
+            ),
         ],
         layout=widgets.Layout(width="100%", gap="6px"),
     )
     cr_adv_acc = widgets.Accordion(children=[cr_adv_box], selected_index=None)
     cr_adv_acc.set_title(0, "Advanced Settings")
-    cr_adv_acc.layout = widgets.Layout(width="100%")
+    cr_adv_acc.layout = widgets.Layout(width="99%")
 
-    section_spacer = widgets.HTML("<div style='height:10px;'></div>")  # adjust 6/8/10/12
+    # ------------------------------------------------------------------
+    # Cloud Mask Cube (standalone, before Reference Scene)
+    # ------------------------------------------------------------------
+    # Only relevant for cubes that still keep their clouds. Shown (with a yellow
+    # warning) for unmasked / clouds-detected cubes; hidden for cloud-masked
+    # cubes, where co-registration already ignores the masked pixels.
+    cr_mask_warn_w = widgets.HTML(value="")
+    cr_mask_section = widgets.VBox(
+        [
+            cr_mask_warn_w,
+            _stacked_field(cr_mask_box, "Cloud Mask Cube (binary mask)"),
+            widgets.HTML(
+                "<div style='font-size:11px; color:#666; margin-top:-6px;'>"
+                "The binary cloud mask (builder's mask export) lets the algorithm ignore clouds "
+                "while measuring the shift; the clouds themselves stay in the exported scenes."
+                "</div>"
+            ),
+        ],
+        layout=widgets.Layout(width="99%", gap="6px", display="none"),
+    )
+
+    def _cube_is_cloud_masked():
+        """True when the loaded cube's cloud_status marks it as cloud-masked
+        (e.g. scl_masked, scl_shadow_masked, cloud_mask_50). clouds_detected /
+        clouds_not_detected count as NOT masked."""
+        for src in (state.get("loaded_obj"), state.get("loaded_ds")):
+            attrs = getattr(src, "attrs", None) or {}
+            cs = str(attrs.get("cloud_status", "") or "").strip().lower()
+            if "mask" in cs:
+                return True
+        return False
+
+    def _refresh_cr_cloud_mask_ui():
+        """Show/hide the Cloud Mask Cube selector from the loaded cube's state."""
+        if state.get("loaded_obj") is None:
+            cr_mask_section.layout.display = "none"
+            cr_mask_warn_w.value = ""
+            return
+        if _cube_is_cloud_masked():
+            # Already masked: the masked (NaN) pixels are ignored automatically,
+            # so no external cloud mask is needed.
+            cr_mask_section.layout.display = "none"
+            cr_mask_warn_w.value = ""
+            cr_cloud_mask_w.value = ""
+        else:
+            cr_mask_section.layout.display = ""
+            cr_mask_warn_w.value = (
+                "<div style='font-size:12px; color:#92400e; "
+                "background:#fef3c7; border:1px solid #fcd34d; "
+                "border-radius:8px; padding:8px 10px; margin:0 0 4px 0;'>"
+                "⚠️ Clouds are not masked in this data cube. Please provide a binary "
+                "cloud mask file to co-register the time series with higher efficiency! "
+                "If you don't have any, use the <b>Build Cloud Mask Cube</b> feature "
+                "from the <b>Data Cube Editor</b>."
+                "</div>"
+            )
+
+    # ------------------------------------------------------------------
+    # Spectral Profiler (after Output NetCDF)
+    # ------------------------------------------------------------------
+    # Click a pixel on a median-RGB base image and compare the chosen band's
+    # time series before (loaded cube) vs after (co-registered cube).
+    cr_prof_before_w = widgets.Text(value="", layout=widgets.Layout(width="100%"))
+    browse_cr_prof_before_btn = widgets.Button(icon="folder-open", description="", layout=widgets.Layout(width="36px"))
+    cr_prof_before_fc = _attach_filechooser(
+        browse_cr_prof_before_btn, cr_prof_before_w,
+        title="Select the BEFORE cube (loaded, non-co-registered)",
+        pattern=["*.nc", "*"], select_dirs=False,
+    )
+    cr_prof_before_row = widgets.HBox(
+        [browse_cr_prof_before_btn, cr_prof_before_w],
+        layout=widgets.Layout(width="100%", gap="6px", align_items="center"),
+    )
+    cr_prof_before_box = widgets.VBox([cr_prof_before_row, cr_prof_before_fc], layout=widgets.Layout(width="100%", gap="4px"))
+
+    cr_prof_after_w = widgets.Text(value="", layout=widgets.Layout(width="100%"))
+    browse_cr_prof_after_btn = widgets.Button(icon="folder-open", description="", layout=widgets.Layout(width="36px"))
+    cr_prof_after_fc = _attach_filechooser(
+        browse_cr_prof_after_btn, cr_prof_after_w,
+        title="Select the AFTER cube (co-registered)",
+        pattern=["*.nc", "*"], select_dirs=False,
+    )
+    cr_prof_after_row = widgets.HBox(
+        [browse_cr_prof_after_btn, cr_prof_after_w],
+        layout=widgets.Layout(width="100%", gap="6px", align_items="center"),
+    )
+    cr_prof_after_box = widgets.VBox([cr_prof_after_row, cr_prof_after_fc], layout=widgets.Layout(width="100%", gap="4px"))
+
+    cr_prof_band_w = widgets.Dropdown(options=["ndvi"], value="ndvi", layout=widgets.Layout(width="200px"))
+    cr_prof_btn = widgets.Button(
+        description="Show Spectral Profiler",
+        button_style="primary",
+        icon="chart-line",
+        layout=widgets.Layout(width="220px"),
+    )
+    cr_prof_out = widgets.Output(layout=widgets.Layout(width="99%", overflow="auto"))
+
+    def _cube_band_list(obj):
+        """Band names of a loaded cube (DataArray or Dataset), or []."""
+        try:
+            if obj is None:
+                return []
+            da = obj
+            if isinstance(obj, xr.Dataset):
+                da = obj.get("Spectral_Temporal_Stack")
+                if da is None:
+                    return []
+            return [str(b) for b in da["band"].values]
+        except Exception:
+            return []
+
+    def _refresh_cr_prof_band_options():
+        bands = _cube_band_list(state.get("loaded_obj"))
+        if not bands:
+            cr_prof_band_w.options = ["ndvi"]
+            cr_prof_band_w.value = "ndvi"
+            return
+        cur = cr_prof_band_w.value
+        cr_prof_band_w.options = bands
+        if cur in bands:
+            cr_prof_band_w.value = cur
+        elif "ndvi" in bands:
+            cr_prof_band_w.value = "ndvi"
+        else:
+            cr_prof_band_w.value = bands[0]
+
+    def _refresh_cr_prof_paths():
+        """Default the before path to the loaded cube and the after path to the
+        co-registered output; only fill blanks so user edits are kept."""
+        if not (cr_prof_before_w.value or "").strip() and state.get("loaded_path"):
+            cr_prof_before_w.value = str(Path(state["loaded_path"]).as_posix())
+        after_default = state.get("current_result_path") or (cr_out_w.value or "").strip()
+        if not (cr_prof_after_w.value or "").strip() and after_default:
+            cr_prof_after_w.value = str(after_default)
+
+    def _on_show_profiler_clicked(_):
+        with cr_prof_out:
+            clear_output()
+        before = (cr_prof_before_w.value or "").strip()
+        after = (cr_prof_after_w.value or "").strip()
+        band = str(cr_prof_band_w.value or "ndvi").strip()
+        if not before or not after:
+            with cr_prof_out:
+                print("❌ Set both the before (loaded) and after (co-registered) cube paths.")
+            return
+        for label, pth in (("before", before), ("after", after)):
+            if not Path(pth).exists():
+                with cr_prof_out:
+                    print(f"❌ {label} cube not found: {pth}")
+                return
+        try:
+            with cr_prof_out:
+                print("Loading cubes and preparing the spectral profiler...")
+            with cr_prof_out:
+                clear_output()
+                spectral_profiler(before, after, band=band, rgb_time="median")
+        except Exception as e:
+            with cr_prof_out:
+                clear_output()
+                print(_friendly_error(e, "Spectral profiler"))
+
+    cr_prof_btn.on_click(_on_show_profiler_clicked)
+
+    cr_prof_box = widgets.VBox(
+        [
+            widgets.HTML(
+                "<div style='font-size:12px; color:#666;'>"
+                "Click a pixel on the median-RGB base image and compare the chosen band's "
+                "time series <b>before</b> (loaded cube) vs <b>after</b> (co-registered cube). "
+                "The paths are pre-filled with your loaded and co-registered cubes."
+                "</div>"
+            ),
+            _stacked_field(cr_prof_before_box, "Before cube (loaded)"),
+            _stacked_field(cr_prof_after_box, "After cube (co-registered)"),
+            _stacked_field(cr_prof_band_w, "Band"),
+            cr_prof_btn,
+            cr_prof_out,
+        ],
+        layout=widgets.Layout(width="100%", gap="8px"),
+    )
+    cr_prof_acc = widgets.Accordion(children=[cr_prof_box], selected_index=None)
+    cr_prof_acc.set_title(0, "Spectral Profiler")
+    cr_prof_acc.layout = widgets.Layout(width="99%")
+    # Same vivid green header as the mask tool's Visualization section.
+    cr_prof_acc.add_class("stac2cube-acc-vivid")
+
+    def _on_prof_acc_open(change):
+        if change.get("name") == "selected_index" and change.get("new") == 0:
+            _refresh_cr_prof_band_options()
+            _refresh_cr_prof_paths()
+    cr_prof_acc.observe(_on_prof_acc_open, names="selected_index")
 
     cr_tool_box = widgets.VBox(
         [
@@ -10909,16 +11578,19 @@ def ard_cube_tools():
                 "file and click Co-register</b>. Larger, varied areas align best."
                 "</div>"
             ),
+            cr_mask_section,
             cr_ref_acc,
             cr_filter_acc,
             cr_adv_acc,
-            section_spacer,
+            widgets.HTML("<div style='height:10px;'></div>"),
             _stacked_field(cr_out_box, "Output NetCDF"),
-            section_spacer,
+            widgets.HTML("<div style='height:10px;'></div>"),
             widgets.HBox(
                 [cr_run_btn, cr_copy_json_btn],
                 layout=widgets.Layout(gap="8px", align_items="center"),
             ),
+            widgets.HTML("<div style='height:10px;'></div>"),
+            cr_prof_acc,
         ],
         layout=widgets.Layout(width="100%", gap="10px"),
     )
@@ -11313,6 +11985,13 @@ def ard_cube_tools():
         #reset_btn.disabled = False
         _set_enabled_after_load(True)
         _refresh_output_suggestions()
+
+        # Co-register tool: refresh the cloud-mask section (shown only for
+        # unmasked cubes) and the spectral profiler defaults for this cube.
+        _refresh_cr_cloud_mask_ui()
+        _refresh_cr_prof_band_options()
+        cr_prof_before_w.value = str(Path(path_posix).as_posix())
+        cr_prof_after_w.value = ""
 
         _show_loaded_summary(obj)
         loaded_summary_acc.selected_index = 0
