@@ -81,6 +81,12 @@ def get_stac_parameters(stac_existing):
         "daterange": daterange,
         "stac_api": stac_existing.attrs.get("stac_api", "element84"),
         "resampling": stac_existing.attrs.get("resampling", "bilinear"),
+        # Scene-metadata coordinate selection (None on cubes built without
+        # it). Restored by update mode so new scenes carry the same coords.
+        "scene_metadata": stac_existing.attrs.get("scene_metadata"),
+        # How AOI-straddling tiles were handled ("mosaic"/"separate"). Update
+        # mode refuses to touch a "separate" cube (sub-day per-tile times).
+        "tile_handling": stac_existing.attrs.get("tile_handling", "mosaic"),
         "cloud_status": cloud_status,
         # Shadow projection params (present only on scl_shadow_masked cubes).
         "nir_dark_threshold": stac_existing.attrs.get("nir_dark_threshold"),

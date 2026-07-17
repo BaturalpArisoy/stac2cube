@@ -1,11 +1,17 @@
 import os
 
-from .get_data import get_stac, _S2_BNUM_TO_COMMON
+from .get_data import (
+    get_stac,
+    _S2_BNUM_TO_COMMON,
+    _SCENE_METADATA_FIELDS,
+    export_granule_metadata,
+)
 from .vector_refiner import (
     proj_check,
     polygon_2_bbox,
     read_polygon_file,
     polygon_2_features,
+    polygon_2_gdf,
 )
 from .stac_processing import scale_factor, cloud_mask, build_scl_mask_cube
 from .get_spectral_indices import calculate_spectral_index
@@ -13,7 +19,14 @@ from .export_cfg import export_stac
 
 # from .get_topo import calculate_topo
 # from .time_series_tools import generate_animation
-from .clip import clip_stac, compute_cloud_percentage
+from .clip import (
+    clip_stac,
+    compute_cloud_percentage,
+    compute_scene_coverage,
+    compute_scene_coverage_from_imaged,
+    drop_partial_scenes,
+    _aoi_mask_from_geometries,
+)
 from .get_statistics import calculate_statistics
 from .get_update import get_stac_parameters, update_stac
 
@@ -86,6 +99,11 @@ def get_stac_layers(
     update=None,
     source=None,
     resampling_method=None,
+    scene_metadata=None,
+    metadata_output=None,
+    tile_handling="mosaic",
+    partial_scene_handling="keep",
+    min_scene_coverage=0.9,
     q=None,
     compress=False,
 ):
@@ -163,7 +181,123 @@ def get_stac_layers(
     # With a temporal aggregator, the composite must describe the SURVIVING
     # scenes (GUI order: build -> filter -> composite), so the collapse is
     # deferred until after the scene filter instead of running at build time.
-    _defer_agg = bool(aggregator) and scene_cloud_coverage is not None and float(scene_cloud_coverage) < 100.0
+    # Both scene filters (cloud % and partial-coverage removal) trigger the
+    # deferral so the composite only ever averages the kept scenes.
+    _scc_active = scene_cloud_coverage is not None and float(scene_cloud_coverage) < 100.0
+    _remove_partial = partial_scene_handling == "remove"
+    _defer_agg = bool(aggregator) and (_scc_active or _remove_partial)
+
+    # --- Scene-level metadata coordinate preconditions -------------------------
+    # scene_metadata attaches per-scene STAC item properties (solar/viewing
+    # geometry, orbit, baseline, full acquisition timestamp) as (time,)
+    # coordinates - see _SCENE_METADATA_FIELDS in get_data.py for the canonical
+    # names and per-source availability.
+    if scene_metadata:
+        if isinstance(scene_metadata, str):
+            scene_metadata = [scene_metadata]
+        _unknown = [
+            str(f) for f in scene_metadata
+            if str(f) not in _SCENE_METADATA_FIELDS
+        ]
+        if _unknown:
+            raise ValueError(
+                f"Unknown scene_metadata field(s) {_unknown}. "
+                f"Valid options: {_SCENE_METADATA_FIELDS}."
+            )
+        if update:
+            raise ValueError(
+                "scene_metadata cannot be changed in update mode: the cube's "
+                "stored selection is restored automatically so the new scenes "
+                "carry the same coordinates."
+            )
+        if mission not in ("sentinel_2_l2a", "sentinel_2_l1c"):
+            raise ValueError(
+                "scene_metadata is available for Sentinel-2 cubes only."
+            )
+        if aggregator:
+            raise ValueError(
+                "scene_metadata cannot be combined with an aggregator: the "
+                "composite collapses the time dimension the per-scene "
+                "coordinates live on."
+            )
+
+    # --- Granule metadata XML export preconditions ------------------------------
+    # metadata_output is a directory: the granule metadata XML (MTD_TL.xml) of
+    # every scene in the finished cube is downloaded there, one file per
+    # granule (see export_granule_metadata). Independent of scene_metadata.
+    if metadata_output:
+        if aggregator:
+            raise ValueError(
+                "metadata_output cannot be combined with an aggregator: the "
+                "composite has no per-scene time axis to match XMLs against."
+            )
+        # In update mode the mission is only known after the restore; the
+        # helper itself rejects non-Sentinel-2 cubes at call time.
+        if not update and mission not in ("sentinel_2_l2a", "sentinel_2_l1c"):
+            raise ValueError(
+                "metadata_output (granule metadata XML export) is available "
+                "for Sentinel-2 cubes only."
+            )
+
+    # --- Tile handling preconditions -----------------------------------------
+    # tile_handling="separate" keeps AOI-straddling N-S Sentinel-2 tiles as
+    # distinct timesteps instead of mosaicing them into one (see get_stac). It
+    # keeps full-precision, per-tile acquisition times so two tiles of the same
+    # solar day stay unique - which the day-floored update/date logic does not
+    # expect, and which the time-collapsing aggregator would erase.
+    if tile_handling not in ("mosaic", "separate"):
+        raise ValueError(
+            "tile_handling must be 'mosaic' (default, current behaviour) or "
+            "'separate'."
+        )
+    if tile_handling == "separate":
+        if mission != "sentinel_2_l2a":
+            raise ValueError(
+                "tile_handling='separate' is available for Sentinel-2 L2A "
+                "only (L1C keeps one item per solar day via its processing-"
+                "baseline dedup, which would defeat tile separation)."
+            )
+        if update:
+            raise ValueError(
+                "tile_handling='separate' is not supported in update mode: it "
+                "keeps sub-day per-tile timestamps that the day-precision "
+                "update matching does not handle. Build the separated cube in "
+                "one pass over the full date range instead."
+            )
+        if aggregator:
+            raise ValueError(
+                "tile_handling='separate' cannot be combined with an "
+                "aggregator: the composite collapses the time dimension the "
+                "separated per-tile scenes live on."
+            )
+
+    # --- Partial-scene removal preconditions ----------------------------------
+    # partial_scene_handling="remove" drops scenes that image only PART of the
+    # AOI (across-track / swath-edge coverage gaps, which load as NaN), keeping
+    # only scenes whose coverage of the AOI footprint is >= min_scene_coverage.
+    # "keep" (default) is the current behaviour: no filtering.
+    if partial_scene_handling not in ("keep", "remove"):
+        raise ValueError(
+            "partial_scene_handling must be 'keep' (default) or 'remove'."
+        )
+    _remove_partial = partial_scene_handling == "remove"
+    if _remove_partial:
+        try:
+            _msc = float(min_scene_coverage)
+        except (TypeError, ValueError):
+            raise ValueError("min_scene_coverage must be a fraction between 0 and 1.")
+        if not (0.0 <= _msc <= 1.0):
+            raise ValueError(
+                "min_scene_coverage must be a fraction in [0, 1] (e.g. 0.9 = a "
+                "scene must image at least 90% of the AOI to be kept; 0 keeps "
+                "everything)."
+            )
+        if update:
+            raise ValueError(
+                "partial_scene_handling='remove' is not supported in update "
+                "mode: it would permanently drop already-stored partial scenes. "
+                "Build the filtered cube in one pass instead."
+            )
 
     # --- Native multi-feature batching ---------------------------------------
     # When a polygon FILE containing more than one feature is supplied (i.e. not
@@ -188,6 +322,9 @@ def get_stac_layers(
                 if cloud_mask_output:
                     _cstem, _cext = os.path.splitext(cloud_mask_output)
                     cmo_i = f"{_cstem}_{idx}{_cext}"
+
+                # One granule-metadata folder per feature (<dir>_<idx>).
+                mdo_i = f"{metadata_output}_{idx}" if metadata_output else None
 
                 # Build this feature LAZILY (output=None) so nothing is computed yet.
                 res = get_stac_layers(
@@ -217,6 +354,13 @@ def get_stac_layers(
                     update=update,
                     source=source,
                     resampling_method=resampling_method,
+                    scene_metadata=(
+                        list(scene_metadata) if scene_metadata else scene_metadata
+                    ),
+                    metadata_output=mdo_i,
+                    tile_handling=tile_handling,
+                    partial_scene_handling=partial_scene_handling,
+                    min_scene_coverage=min_scene_coverage,
                     q=q,
                     compress=compress,
                 )
@@ -265,6 +409,16 @@ def get_stac_layers(
         stac_parameters = get_stac_parameters(update)
         existing_times = stac_parameters["times"]
 
+        # A separate-tile cube carries sub-day per-tile timestamps and a `tile`
+        # coordinate that the day-precision update matching cannot reconcile;
+        # refuse rather than silently corrupt its time axis.
+        if stac_parameters.get("tile_handling") == "separate":
+            raise ValueError(
+                "This cube was built with tile_handling='separate' (per-tile "
+                "timesteps) and cannot be updated: rebuild it in one pass over "
+                "the extended date range instead."
+            )
+
         mission = stac_parameters["mission"]
         resolution = stac_parameters["resolution"]
         polygon = stac_parameters["polygon"]
@@ -272,8 +426,12 @@ def get_stac_layers(
         user_bands = bands  # bands passed alongside update = bands to ADD
         bands = stac_parameters["spectral_bands"]
         if not isinstance(bands, list):
-            # NetCDF stores the attr as an ndarray, Zarr returns a list.
-            bands = np.asarray(bands).tolist()
+            # NetCDF stores the attr as an ndarray, Zarr returns a list. A
+            # SINGLE-band cube arrives as a scalar string, and tolist() on the
+            # 0-d array hands the string back unchanged - which would then be
+            # iterated per character ("red" -> "r","e","d"). ravel() makes it
+            # a 1-element list first.
+            bands = np.asarray(bands).ravel().tolist()
         indices = stac_parameters["indices"]
         if indices is None:
             # Cube built without any spectral indices - nothing to restore.
@@ -333,6 +491,15 @@ def get_stac_layers(
             source = stac_parameters.get("stac_api", "element84")
         if resampling_method is None:
             resampling_method = stac_parameters.get("resampling", "bilinear")
+        # Restore the cube's scene-metadata coordinate selection so the fresh
+        # query builds the SAME (time,) coords on the new scenes - without
+        # this the time concat in update_stac fails on the coord mismatch.
+        # (The precondition block rejected any user-passed scene_metadata.)
+        _sm = stac_parameters.get("scene_metadata")
+        if _sm is not None:
+            # NetCDF attrs arrive as ndarray (or scalar str for one field),
+            # Zarr JSON attrs as list - normalize like the indices attr above.
+            scene_metadata = [str(f) for f in np.asarray(_sm).ravel().tolist()]
         # Reproduce the original cube's SCL cloud strategy on the new scenes,
         # unless the caller overrode it explicitly. Without this, new scenes
         # would miss the cloud_percentage coordinate (concat fails) or be
@@ -450,7 +617,18 @@ def get_stac_layers(
         mission, polygon, resolution, daterange, bands, max_cc, cloud_masking,
         source=source or "element84",
         resampling=resampling_method,
+        scene_metadata=scene_metadata,
+        tile_handling=tile_handling,
     )
+    # Separate-tile cubes keep full-precision, per-tile timestamps so two tiles
+    # of one solar day stay unique; the day-floor below is skipped for them.
+    _separate_tiles = (tile_handling == "separate") and (
+        "tile" in getattr(stac, "coords", {})
+    )
+    # On how many solar days the scene-metadata values were reduced from >1
+    # STAC item (tile overlap). Grabbed now because the Dataset attrs are lost
+    # in the band concat below; re-attached in the metadata block.
+    _meta_multiday = stac.attrs.get("scene_metadata_multiday")
     crs = stac.spatial_ref.projected_crs_name
     transform = stac.rio.transform()
 
@@ -479,6 +657,7 @@ def get_stac_layers(
 
     # Cloud masking
     cloud_bool = None
+    imaged_bool = None  # per-pixel "was imaged" (SCL/QA != no-data); scene-coverage source
     mask_cube = None  # in-memory binary SCL mask (built lazily when requested)
     if cloud_masking is True:
         # keep_clouds=True -> pixels stay intact, only the cloud % is derived from
@@ -490,7 +669,7 @@ def get_stac_layers(
         # intact here and cloud AND shadow are masked together right after the
         # shadow step (verified bit-identical to get_shadow_layers).
         _defer_cloud_removal = bool(shadow_masking) and not bool(keep_clouds)
-        stac, cloud_bool = cloud_mask(
+        stac, cloud_bool, imaged_bool = cloud_mask(
             stac, mission,
             keep_clouds=bool(keep_clouds) or _defer_cloud_removal,
             keep_layer=keep_class_layer,
@@ -559,6 +738,30 @@ def get_stac_layers(
             stac.attrs["cloud_status"] = "clouds_not_detected"
         _source_aliases = {"e84": "element84", "tb": "terrabyte", "pc": "planetary_computer"}
         stac.attrs["stac_api"] = _source_aliases.get(source or "element84", source or "element84")
+        # How AOI-straddling tiles were handled, recorded for provenance and
+        # so a separated cube is self-describing (the `tile` coordinate is the
+        # per-timestep identity).
+        stac.attrs["tile_handling"] = tile_handling
+        # Partial-scene handling (across-track coverage). Recorded for
+        # provenance; the scene_coverage coordinate (attached to every freshly
+        # built cube above) is the per-scene AOI coverage fraction.
+        stac.attrs["partial_scene_handling"] = partial_scene_handling
+        if _remove_partial:
+            stac.attrs["min_scene_coverage"] = float(min_scene_coverage)
+        if scene_metadata:
+            # Recorded so update mode can rebuild the same coords on newly
+            # added scenes (see get_stac_parameters and the restore above).
+            stac.attrs["scene_metadata"] = [str(f) for f in scene_metadata]
+            if _meta_multiday is not None:
+                stac.attrs["scene_metadata_multiday"] = int(_meta_multiday)
+                if int(_meta_multiday) > 0 and not q:
+                    print(
+                        f"Note: on {int(_meta_multiday)} date(s) the polygon "
+                        "is covered by more than one Sentinel-2 granule "
+                        "(tile overlap): angle metadata is the per-date mean, "
+                        "acq_datetime the earliest acquisition.",
+                        flush=True,
+                    )
         if mission in ("sentinel_2_l2a", "sentinel_2_l1c"):
             tile_list = np.array(tiles, dtype="U10").tolist()
             stac.attrs["tile_id"] = tile_list
@@ -594,7 +797,12 @@ def get_stac_layers(
 
     # Finalizing
     if not aggregator or _defer_agg:
-        stac["time"] = stac["time"].dt.floor("D")
+        # Separate-tile mode intentionally keeps the full-precision acquisition
+        # time so two tiles of the same solar day remain distinct timesteps;
+        # flooring them to the day would collide into a duplicate index that
+        # the downstream .sel(time=...) / set-based logic cannot handle.
+        if not _separate_tiles:
+            stac["time"] = stac["time"].dt.floor("D")
 
         # _has_new_dates guard: in update mode with nothing new to add, these
         # passes (shadow projection, cloud%) read pixels eagerly and would
@@ -667,10 +875,52 @@ def get_stac_layers(
             _pct_mask = cloud_bool
             if shadow_bool is not None:
                 _pct_mask = cb_aligned | shadow_bool
-            pct = compute_cloud_percentage(stac, cloud_mask=_pct_mask)
-            if pct is not None:
+
+            # AOI mask so a non-rectangular polygon clip is respected by both
+            # metrics (a plain bbox needs none - the whole grid is the AOI). It
+            # also keeps outside-polygon clouds out of the cloud-% footprint.
+            _aoi_mask = None
+            if not (isinstance(polygon, (list, tuple)) and len(polygon) == 4):
+                try:
+                    _pproj = polygon_2_gdf(polygon).to_crs(stac.rio.crs)
+                    _aoi_mask = _aoi_mask_from_geometries(
+                        stac, _pproj.geometry.values
+                    )
+                except Exception:
+                    _aoi_mask = None
+
+            # Cloud % and scene coverage both reduce the SAME SCL/QA read, so
+            # materialize them together: dask dedups the shared read and the SCL
+            # file is fetched once per date (not twice, and NOT the heavier 10 m
+            # blue band the coverage used to read). Coverage uses the SCL
+            # "imaged" boolean - reliable even when a swath gap loads as 0 rather
+            # than NaN, and cloud-aware for free - so it becomes a ready (eager)
+            # scene_coverage coord and the GUI warning needs no further read.
+            pct_lazy = compute_cloud_percentage(
+                stac, aoi_mask=_aoi_mask, cloud_mask=_pct_mask, lazy=True
+            )
+            cov_lazy = (
+                compute_scene_coverage_from_imaged(
+                    stac, imaged_bool, aoi_mask=_aoi_mask
+                )
+                if imaged_bool is not None
+                else None
+            )
+            import dask
+            if cov_lazy is not None:
+                pct_c, cov_c = dask.compute(pct_lazy, cov_lazy)
+            else:
+                (pct_c,) = dask.compute(pct_lazy)
+                cov_c = None
+            if pct_c is not None:
                 stac = stac.assign_coords(
-                    cloud_percentage=("time", np.asarray(pct.data))
+                    cloud_percentage=("time", np.asarray(pct_c.data))
+                )
+            # scene_coverage attached here (eagerly, from SCL) when cloud
+            # detection ran; the lazy band-0 fallback below is skipped then.
+            if cov_c is not None:
+                stac = stac.assign_coords(
+                    scene_coverage=("time", np.asarray(cov_c.data, dtype="float64"))
                 )
 
             # Binary SCL cloud-mask time series (1=cloud, 0=clear). Built when
@@ -731,6 +981,68 @@ def get_stac_layers(
                 stac.attrs["spectral_bands"] = [
                     b for b in stac.attrs.get("spectral_bands", []) if b != "scl"
                 ]
+
+        # ---- Per-scene AOI coverage (default coordinate) --------------------
+        # Attach scene_coverage (time,) to EVERY freshly built cube: the
+        # fraction (0..1) of the AOI footprint each scene actually images
+        # (across-track / swath completeness). Making it a default coord lets a
+        # cube be inspected or filtered by coverage later without a rebuild.
+        #
+        # When cloud detection ran, scene_coverage was ALREADY attached above -
+        # eagerly, from the SCL "imaged" boolean, sharing the cloud-% read (the
+        # common, preferred path). This block is only the FALLBACK for when there
+        # was no cloud detection (no SCL): it attaches a LAZY band-0 coverage so a
+        # build that never reads it triggers no extra band read; it materializes
+        # only on first use (export, a coverage filter) or when partial-scene
+        # removal below reads it. Skipped in update mode, where the newly built
+        # dates are concatenated onto an existing cube that may predate the coord.
+        _scene_cov = None
+        if not update and "scene_coverage" not in stac.coords:
+            try:
+                _scene_cov = compute_scene_coverage(
+                    stac, cloud_mask=cloud_bool, compute=False
+                )
+            except Exception:
+                _scene_cov = None
+            if _scene_cov is not None:
+                stac = stac.assign_coords(
+                    scene_coverage=("time", _scene_cov.data)
+                )
+
+        # ---- Partial-scene removal (across-track / swath-edge coverage) -----
+        # Drop scenes that image only PART of the AOI (the missing part loads
+        # as NaN), keeping those covering >= min_scene_coverage of the AOI
+        # footprint and keeping the scene_coverage (time,) coordinate.
+        #
+        # Runs BEFORE the cloud % filter: at this point no scene has been
+        # dropped yet, so cloud_bool is still 1:1 with the time axis (the
+        # cloud-aware alignment relies on it) and the footprint is measured over
+        # every scene. Both filters are commutative AND-selections on time, so
+        # the final surviving set is the same either way, and the deferred
+        # composite still runs after both.
+        #
+        # cloud_bool (when cloud detection ran) makes coverage cloud-aware: on a
+        # cloud-MASKED cube the masked clouds are NaN, so without it a fully-
+        # imaged but cloudy scene would look partial and be wrongly dropped.
+        # Passing the cloud boolean counts cloud-flagged pixels as imaged, so
+        # only genuine swath/orbit no-data reduces coverage. None (no detection)
+        # -> plain NaN coverage, correct for an unmasked cube.
+        if _remove_partial:
+            # Reuse the scene_coverage already attached above (SCL-based and
+            # eager when cloud detection ran, else the lazy band-0 fallback in
+            # _scene_cov) so removal never re-measures coverage.
+            _cov_for_drop = (
+                stac["scene_coverage"]
+                if "scene_coverage" in stac.coords
+                else _scene_cov
+            )
+            stac = drop_partial_scenes(
+                stac,
+                min_coverage=float(min_scene_coverage),
+                cloud_mask=cloud_bool,
+                q=q,
+                coverage=_cov_for_drop,  # reuse the read above, don't re-measure
+            )
 
         # ---- Scene-level cloud filter (headless "Max cloud %") --------------
         # Same semantics as the GUI Result panel box: keep only timesteps with
@@ -821,6 +1133,13 @@ def get_stac_layers(
             stac = stac.rio.write_transform(transform, inplace=True)
         except Exception:
             pass
+
+    # Granule metadata XML download (optional). Runs on the FINISHED cube
+    # (after scene filters / update merge) so the XMLs match exactly the dates
+    # the cube carries. Item-metadata search + small XML downloads only - no
+    # pixel compute is triggered.
+    if metadata_output:
+        export_granule_metadata(stac, metadata_output, q=bool(q))
 
     if not output:
         stac.rio.write_crs(crs, inplace=True)

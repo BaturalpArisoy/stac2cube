@@ -23,7 +23,7 @@ def _aoi_mask_from_geometries(stac, geometries):
     )
 
 
-def compute_cloud_percentage(stac, aoi_mask=None, cloud_mask=None):
+def compute_cloud_percentage(stac, aoi_mask=None, cloud_mask=None, lazy=False):
     """
     Per-time cloud percentage computed against the AOI footprint.
 
@@ -52,6 +52,11 @@ def compute_cloud_percentage(stac, aoi_mask=None, cloud_mask=None):
 
     For single-time cubes cloud and missing cannot be separated temporally, so
     all in-AOI NaN are counted as cloud (missing pixels assumed negligible).
+
+    ``lazy=True`` returns the percentage without the final ``.compute()`` so the
+    caller can materialize it together with another SCL/QA-derived reduction
+    (e.g. scene coverage) in a single ``dask.compute`` - the shared SCL read is
+    then done once instead of twice. Default False keeps the eager behaviour.
 
     Returns an int DataArray indexed by ``time`` (or None if there is no time dim).
     """
@@ -113,7 +118,7 @@ def compute_cloud_percentage(stac, aoi_mask=None, cloud_mask=None):
 
         frac = xr.where(denom_t > 0, (nan_in / denom_t) * 100.0, 0.0)
         pct = np.floor(frac + 0.5).astype("int16")
-        if getattr(pct, "chunks", None) is not None:
+        if not lazy and getattr(pct, "chunks", None) is not None:
             pct = pct.compute()
         return pct
     else:
@@ -130,9 +135,177 @@ def compute_cloud_percentage(stac, aoi_mask=None, cloud_mask=None):
     # noise, so exact integer percentages are never nudged off.
     frac = (nan_in / denom) * 100.0
     pct = np.floor(frac + 0.5).astype("int16")
-    if getattr(pct, "chunks", None) is not None:
+    if not lazy and getattr(pct, "chunks", None) is not None:
         pct = pct.compute()
     return pct
+
+
+def compute_scene_coverage(stac, cloud_mask=None, compute=True):
+    """Per-time fraction (0..1) of the observable AOI footprint a scene images.
+
+    Across-track / swath-edge scenes cover only part of the AOI; the missing
+    part loads as NaN. This returns, per timestep, how much of the AOI that
+    scene actually holds:
+
+      coverage(t) = (pixels imaged at t) / (pixels imaged in ANY scene)
+
+    The denominator is the footprint - pixels imaged at least once - so pixels
+    that are NaN in *every* scene (outside a non-rectangular clip) are excluded
+    and a scene that fully covers the AOI reads ~1.0. This mirrors the footprint
+    logic of :func:`compute_cloud_percentage`.
+
+    "Imaged" is measured on a single representative band (``band=0``, a spectral
+    band since the cube is built spectral-bands-first): a genuine swath/tile gap
+    is NaN across every band, so one band identifies it, and using a spectral
+    band avoids miscounting a pixel that is merely NaN in a derived index.
+
+    ``cloud_mask`` (per-pixel cloud boolean, time/y/x, True = cloud) makes the
+    measure cloud-aware, which is what keeps a cloud-MASKED cube honest: masked
+    clouds are NaN too, so without this a fully-imaged but cloudy scene would
+    read as low coverage and be wrongly dropped. A pixel is counted as IMAGED
+    when it holds data OR is flagged cloud (observed, just masked out), exactly
+    like the cloud term in :func:`compute_cloud_percentage`; only NaN-and-not-
+    cloud (genuine swath/orbit no-data) reduces coverage. Omit it for keep-
+    clouds / unmasked cubes, where NaN already means no-data.
+
+    ``compute=True`` (default) materializes the result eagerly (one band read);
+    ``compute=False`` returns a fully lazy dask-backed DataArray so a build can
+    attach the coverage as a coordinate without reading any data until the coord
+    is first used (export, a filter, or the GUI warning).
+
+    Returns a float DataArray indexed by ``time`` (or None if no time dim).
+    """
+    if "time" not in stac.dims:
+        return None
+
+    da = stac
+    if "band" in da.dims:
+        da = da.isel(band=0)
+
+    observed = da.notnull()               # (time, y, x): holds data
+    if cloud_mask is not None:
+        # Align the cloud boolean to the (possibly clipped) cube grid and time,
+        # then count cloud-flagged pixels as imaged: they were observed, only
+        # masked. Same treatment as compute_cloud_percentage's footprint term.
+        cm = cloud_mask.sel(y=stac["y"], x=stac["x"]).astype(bool)
+        cm = cm.assign_coords(time=stac["time"])
+        observed = observed | cm
+
+    footprint = observed.any(dim="time")  # (y, x): imaged at least once
+    per_time = observed.sum(dim=("y", "x")).astype("float64")
+
+    if not compute:
+        # Fully deferred: keep the denominator lazy too, so on a dask-backed
+        # cube nothing is read until the coord is actually used. This is what
+        # lets get_stac_layers attach scene_coverage to every cube without
+        # forcing an eager band read on an otherwise-lazy build. A degenerate
+        # all-empty footprint (denom==0) yields NaN here instead of the eager
+        # path's explicit zeros - acceptable, as such a cube carries no scene
+        # to judge.
+        return per_time / footprint.sum().astype("float64")
+
+    denom = int(footprint.sum())
+    if denom == 0:
+        return xr.zeros_like(stac["time"], dtype="float64")
+
+    cov = per_time / denom
+    if getattr(cov, "chunks", None) is not None:
+        cov = cov.compute()
+    return cov
+
+
+def compute_scene_coverage_from_imaged(stac, imaged_mask, aoi_mask=None):
+    """Per-time AOI coverage fraction (0..1) from the SCL/QA "imaged" boolean.
+
+    ``imaged_mask`` (time, y, x; True where the pixel was imaged) is the reliable
+    per-scene signal derived from the scene-classification band: a swath / orbit
+    gap is SCL class 0 (No Data), so it is caught even when the cube loads gaps
+    as 0 rather than NaN (which a band's ``notnull`` would miss). It is also
+    cloud-aware for free - clouds are imaged classes, so a cloudy-but-complete
+    scene reads ~1.0 with no extra handling.
+
+    Preferred over :func:`compute_scene_coverage` when cloud detection ran,
+    because it needs no separate band read: ``imaged_mask`` comes from the SAME
+    SCL/QA fetch as the cloud boolean, and returning a lazy result lets the
+    caller compute it together with the cloud percentage in one pass (one read).
+
+      coverage(t) = (imaged AOI pixels at t) / (imaged AOI pixels in ANY scene)
+
+    ``aoi_mask`` (rasterized AOI polygon, y/x bool) intersects the footprint so a
+    non-rectangular clip is respected: without it, in-bbox-but-outside-polygon
+    pixels (imaged in the raw scene, clipped away in the cube) would inflate the
+    denominator. For a plain bbox the AOI is the whole grid, so it may be omitted.
+
+    Returns a LAZY float DataArray indexed by ``time`` (or None if no time dim).
+    """
+    if "time" not in stac.dims:
+        return None
+
+    # Align the raw (pre-clip) boolean to the cube grid and re-stamp the cube's
+    # (floored) time positionally - same treatment as the cloud boolean in
+    # compute_cloud_percentage; time is still 1:1 at this point in the build.
+    im = imaged_mask.sel(y=stac["y"], x=stac["x"]).astype(bool)
+    im = im.assign_coords(time=stac["time"])
+    if aoi_mask is not None:
+        im = im & aoi_mask.astype(bool)
+
+    footprint = im.any(dim="time")                    # (y, x) imaged in any scene
+    per_time = im.sum(dim=("y", "x")).astype("float64")
+    return per_time / footprint.sum().astype("float64")
+
+
+def drop_partial_scenes(stac, min_coverage=0.9, cloud_mask=None, q=False, coverage=None):
+    """Remove partially-imaged (across-track / swath-edge) scenes.
+
+    A scene is kept when it images at least ``min_coverage`` (fraction 0..1) of
+    the AOI footprint, per :func:`compute_scene_coverage`. Survivors gain a
+    ``scene_coverage`` (time,) coordinate (fraction 0..1) so the kept cube is
+    self-describing. Filtering is positional (``isel``) so the data stays lazy.
+
+    ``cloud_mask`` (per-pixel cloud boolean) makes the coverage cloud-aware so a
+    cloudy-but-complete scene is NOT mistaken for a partial one on a masked cube
+    (see :func:`compute_scene_coverage`).
+
+    ``coverage`` (an already-computed per-time coverage DataArray) is reused as
+    is when supplied, so the single band-0 read is not repeated by callers that
+    have already measured it (e.g. get_stac_layers attaches scene_coverage to
+    every cube before deciding whether to drop). Omit it to measure here.
+
+    Raises if the threshold would drop every scene. Returns the cube unchanged
+    when there is no time dimension.
+    """
+    if "time" not in stac.dims:
+        return stac
+
+    cov = coverage if coverage is not None else compute_scene_coverage(stac, cloud_mask=cloud_mask)
+    if cov is None:
+        return stac
+
+    cov_vals = np.asarray(cov.values, dtype="float64")
+    thr = float(min_coverage)
+    keep = cov_vals >= thr
+    n_total = int(keep.size)
+
+    if not keep.any():
+        _mx = float(np.nanmax(cov_vals)) if cov_vals.size else 0.0
+        raise ValueError(
+            f"Partial-scene removal (min_coverage={thr:.0%}) keeps no scenes: "
+            f"the most complete scene covers only {_mx:.0%} of the AOI. Lower "
+            "the coverage threshold (or widen the date range) and rerun."
+        )
+
+    if not keep.all():
+        stac = stac.isel(time=np.flatnonzero(keep))
+        cov_vals = cov_vals[keep]
+        if not q:
+            print(
+                f"Partial-scene removal (min_coverage={thr:.0%}): kept "
+                f"{int(keep.sum())}/{n_total} scenes.",
+                flush=True,
+            )
+
+    stac = stac.assign_coords(scene_coverage=("time", cov_vals))
+    return stac
 
 
 def clip_stac(stac, polygon, crs=None, bbox_crs="EPSG:4326"):

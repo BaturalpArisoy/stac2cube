@@ -6,7 +6,7 @@ def cloud_mask(stac, mission, keep_clouds=False, keep_layer=False):
     """Build the per-pixel cloud boolean from the scene-classification / QA layer
     and either remove the cloudy pixels (default) or leave the imagery untouched.
 
-    Returns ``(cube, cloud_bool)``:
+    Returns ``(cube, cloud_bool, imaged_bool)``:
       * ``cube``       - cloudy pixels set to NaN (default), OR, when
                          ``keep_clouds`` is True, the cube with pixels intact and
                          only the auxiliary cloud layer dropped.
@@ -14,6 +14,13 @@ def cloud_mask(stac, mission, keep_clouds=False, keep_layer=False):
                          the caller compute a cloud percentage even in keep-clouds
                          mode (where there are no NaN holes to count). ``None`` for
                          missions without a configured cloud layer.
+      * ``imaged_bool``- the per-pixel "was this pixel imaged" boolean (time, y,
+                         x), derived from the SAME SCL/QA read: True where the
+                         pixel carries a real class (not SCL No-Data / not the QA
+                         fill bit). It is the reliable per-scene footprint signal
+                         for scene coverage - a swath/orbit gap is SCL 0, caught
+                         even when the cube loads gaps as 0 rather than NaN.
+                         ``None`` for missions without a configured cloud layer.
 
     ``keep_clouds`` exists for users (e.g. artists) who want the clouds visible
     but still want a per-scene cloud percentage to filter the fully-clouded
@@ -30,7 +37,10 @@ def cloud_mask(stac, mission, keep_clouds=False, keep_layer=False):
 
     if mission == "sentinel_2_l2a":
         # For Sentinel-2, use the classification directly with isin().
-        cloud_bool = getattr(stac, layer_name).isin(classes)
+        scl = getattr(stac, layer_name)
+        cloud_bool = scl.isin(classes)
+        # Imaged = any real SCL class; class 0 (No Data) and NaN mark a gap.
+        imaged_bool = scl.notnull() & (scl != 0)
     elif mission == "landsat_c2_l2":
         # For Landsat, qa_pixel is bit-packed. Extract three flags:
         #   dilated_cloud is in bit offset 1,
@@ -41,10 +51,15 @@ def cloud_mask(stac, mission, keep_clouds=False, keep_layer=False):
         mask_cloud = ((stac.qa_pixel >> 3) & 1).astype(bool)
         # Combine the three flags: a pixel is cloud if any of the flags are True.
         cloud_bool = mask_dilated | mask_cirrus | mask_cloud
+        # qa_pixel bit 0 = "Designated Fill" (no-data). Imaged = fill bit clear
+        # and not the odc fill value 0. (Untested without a Landsat fixture; the
+        # scene-coverage caller falls back to a band read if this is wrong.)
+        _qa = stac.qa_pixel.fillna(0).astype("int64")
+        imaged_bool = (_qa != 0) & ((_qa & 1) == 0)
     else:
         # If no cloud masking is implemented for the mission, do nothing.
         print(f"No cloud masking configured for mission {mission}")
-        return stac, None
+        return stac, None, None
 
     if keep_clouds:
         # Keep the imagery exactly as observed (no NaN holes); only the auxiliary
@@ -58,7 +73,7 @@ def cloud_mask(stac, mission, keep_clouds=False, keep_layer=False):
     if not keep_layer and layer_name is not None and layer_name in out:
         out = out.drop_vars(layer_name)
 
-    return out, cloud_bool
+    return out, cloud_bool, imaged_bool
 
 
 def build_scl_mask_cube(stac, cloud_bool):

@@ -48,6 +48,8 @@ from stac2cube import (
     check_scene_availability,
 )
 
+from .get_data import SCENE_METADATA_AVAILABILITY
+
 from .gui_common import (
     human_readable_bytes as _human_readable_bytes,
     estimated_data_size_bytes as _estimated_data_size_bytes,
@@ -1004,6 +1006,232 @@ def datacube_builder(missions_func=missions):
     )
 
     # -------------------------------------------------------------------------
+    # Tile handling (Advanced): how AOIs that straddle two adjacent Sentinel-2
+    # MGRS tiles are handled. "mosaic" (default) merges the tiles of each solar
+    # day into one timestep (current behaviour); "separate" keeps each tile's
+    # acquisition as its own timestep with a `tile` coordinate. Sentinel-2 L2A
+    # only (get_stac_layers rejects it elsewhere); greyed otherwise.
+    # -------------------------------------------------------------------------
+    tile_handling_w = widgets.Dropdown(
+        options=[("Mosaic tiles", "mosaic"),
+                 ("Separate tiles", "separate")],
+        value="mosaic",
+        description="Tiles:",
+        layout=widgets.Layout(width="100%"),
+        style={"description_width": "120px"},
+    )
+    tile_handling_note = widgets.HTML("")
+
+    def _sync_tile_handling(change=None):
+        """Enable only for Sentinel-2 L2A; show a one-line reason otherwise, and
+        an explainer when 'Separate tiles' is chosen."""
+        s2l2a = mission_dd.value == "sentinel_2_l2a"
+        if not s2l2a:
+            if tile_handling_w.value != "mosaic":
+                tile_handling_w.value = "mosaic"
+            tile_handling_w.disabled = True
+            tile_handling_note.value = (
+                "<div style='font-size:12px; color:#9a3412;'>"
+                "Separating tiles is available for Sentinel-2 L2A only.</div>"
+            )
+            return
+        tile_handling_w.disabled = False
+        if tile_handling_w.value == "separate":
+            tile_handling_note.value = (
+                "<div style='font-size:12px; color:#1e40af; background:#eff6ff; "
+                "border:1px solid #bfdbfe; border-radius:6px; padding:6px 8px;'>"
+                "Each scene that straddles two adjacent Sentinel-2 tiles is kept "
+                "as its own timestep (with a <b>tile</b> coordinate) instead of "
+                "being merged. Cannot be combined with a Temporal Composite.</div>"
+            )
+        else:
+            tile_handling_note.value = ""
+
+    tile_handling_w.observe(_sync_tile_handling, names="value")
+    mission_dd.observe(_sync_tile_handling, names="value")
+
+    # -------------------------------------------------------------------------
+    # Across-track (East-West): partial-scene handling. Scenes near a swath /
+    # orbit edge image only part of the AOI (the rest loads as NaN). This lets
+    # the user drop those partial scenes. Optical time-series missions only.
+    # -------------------------------------------------------------------------
+    _PARTIAL_OK_MISSIONS = ("sentinel_2_l2a", "sentinel_2_l1c", "landsat_c2_l2")
+    partial_scene_w = widgets.Dropdown(
+        options=[("Keep all scenes", "keep"),
+                 ("Remove partially missing scenes", "remove")],
+        value="keep",
+        description="Coverage:",
+        layout=widgets.Layout(width="100%"),
+        style={"description_width": "120px"},
+    )
+    # Minimum share of the area a scene must image to be kept (percent). Maps to
+    # min_scene_coverage = value / 100. Shown only in "Remove" mode.
+    min_coverage_w = widgets.BoundedIntText(
+        value=90, min=0, max=100, step=1,
+        description="Min coverage %:",
+        layout=widgets.Layout(width="100%"),
+        style={"description_width": "120px"},
+    )
+    min_coverage_box = widgets.VBox(
+        [_boxed(min_coverage_w)],
+        layout=widgets.Layout(width="100%", display="none"),  # shown in Remove mode
+    )
+    partial_scene_note = widgets.HTML("")
+
+    def _sync_partial_scene(change=None):
+        """Enable for optical time-series missions; reveal the threshold and
+        explain when 'Remove' is on."""
+        ok = mission_dd.value in _PARTIAL_OK_MISSIONS
+        if not ok:
+            if partial_scene_w.value != "keep":
+                partial_scene_w.value = "keep"
+            partial_scene_w.disabled = True
+            min_coverage_box.layout.display = "none"
+            partial_scene_note.value = (
+                "<div style='font-size:12px; color:#9a3412;'>"
+                "Available for optical missions (Sentinel-2, Landsat).</div>"
+            )
+            return
+        partial_scene_w.disabled = False
+        _remove = partial_scene_w.value == "remove"
+        min_coverage_box.layout.display = "" if _remove else "none"
+        if _remove:
+            partial_scene_note.value = (
+                "<div style='font-size:12px; color:#1e40af; background:#eff6ff; "
+                "border:1px solid #bfdbfe; border-radius:6px; padding:6px 8px;'>"
+                "Scenes imaging less than the <b>Min coverage %</b> of the area "
+                "(swath / orbit edge) are dropped. Clouds do not count as "
+                "missing - a fully-imaged but cloudy scene is kept. "
+                "Note: building the preview can take longer.</div>"
+            )
+        else:
+            partial_scene_note.value = ""
+
+    partial_scene_w.observe(_sync_partial_scene, names="value")
+    mission_dd.observe(_sync_partial_scene, names="value")
+
+    # -------------------------------------------------------------------------
+    # Scene Specific Metadata (Advanced): optional per-scene STAC item
+    # properties attached to the cube as (time,) coordinates, so scenes can be
+    # queried/filtered by them later (e.g. keep only relative orbit 65). The
+    # option list follows the selected Data Source: fields a source does not
+    # publish are hidden entirely, so nothing all-NaN can be selected
+    # (availability verified per source in get_data.SCENE_METADATA_AVAILABILITY).
+    # -------------------------------------------------------------------------
+    _SCENE_METADATA_LABELS = [
+        ("acq_datetime - full acquisition timestamp", "acq_datetime"),
+        ("sun_azimuth - mean solar azimuth [deg]", "sun_azimuth"),
+        ("sun_elevation - mean solar elevation [deg]", "sun_elevation"),
+        ("view_azimuth - mean viewing azimuth [deg]", "view_azimuth"),
+        ("incidence_angle - mean viewing incidence angle [deg]", "incidence_angle"),
+        ("relative_orbit - relative orbit number", "relative_orbit"),
+        ("processing_baseline - processing baseline version", "processing_baseline"),
+    ]
+    scene_metadata_w = widgets.SelectMultiple(
+        options=[],
+        value=(),
+        description="Metadata:",
+        rows=7,
+        layout=widgets.Layout(width="100%", height="190px"),
+        style={"description_width": "120px"},
+    )
+    scene_meta_all_btn = widgets.Button(
+        description="All fields", layout=widgets.Layout(width="110px")
+    )
+    scene_meta_none_btn = widgets.Button(
+        description="Clear fields", layout=widgets.Layout(width="110px")
+    )
+    # One-line availability note under the list (why some fields are hidden).
+    scene_meta_note = widgets.HTML("")
+
+    # Download the granule metadata XML (MTD_TL.xml) of every scene at export
+    # time, into <export target>_granule_metadata/. Off by default. Greyed on
+    # terrabyte: its STAC publishes cluster-local file:// asset paths that are
+    # not downloadable from outside the cluster. 99% width (not 100%): at 100%
+    # the checkbox's internal margins overflow the group by a sliver and draw
+    # a useless horizontal scrollbar (same fix as the seasonal-dates checkbox).
+    export_granule_meta_w = widgets.Checkbox(
+        value=False,
+        description="Export Granule Metadata",
+        indent=False,
+        disabled=True,
+        layout=widgets.Layout(width="99%"),
+    )
+    export_granule_meta_note = widgets.HTML("")
+
+    def _sync_scene_metadata_options(change=None):
+        """Rebuild the option list from the mission + Data Source. Fields the
+        source does not publish are hidden (not greyed), and any selection of
+        a now-hidden field is dropped."""
+        m_name = mission_dd.value
+        src = source_w.value
+        s2 = m_name in ("sentinel_2_l2a", "sentinel_2_l1c")
+        if s2 and src:
+            avail = SCENE_METADATA_AVAILABILITY.get(src, [])
+            keep = tuple(v for v in scene_metadata_w.value if v in avail)
+            scene_metadata_w.options = [
+                (lbl, v) for lbl, v in _SCENE_METADATA_LABELS if v in avail
+            ]
+            scene_metadata_w.value = keep
+            scene_metadata_w.disabled = False
+            scene_meta_all_btn.disabled = False
+            scene_meta_none_btn.disabled = False
+            hidden = [v for _, v in _SCENE_METADATA_LABELS if v not in avail]
+            scene_meta_note.value = (
+                ""
+                if not hidden
+                else (
+                    "<div style='font-size:12px; color:#9a3412;'>"
+                    f"Not published by this data source (hidden): "
+                    f"<b>{', '.join(hidden)}</b>. Available with "
+                    "<b>terrabyte</b> and <b>cdse</b>.</div>"
+                )
+            )
+            # Granule metadata XML download: terrabyte's asset hrefs are
+            # cluster-local file:// paths - not downloadable from here.
+            if src == "terrabyte":
+                if export_granule_meta_w.value:
+                    export_granule_meta_w.value = False
+                export_granule_meta_w.disabled = True
+                export_granule_meta_note.value = (
+                    "<div style='font-size:12px; color:#9a3412;'>"
+                    "Not downloadable from the terrabyte catalogue (it stores "
+                    "cluster-local file paths).</div>"
+                )
+            else:
+                export_granule_meta_w.disabled = False
+                export_granule_meta_note.value = ""
+        else:
+            scene_metadata_w.options = []
+            scene_metadata_w.value = ()
+            scene_metadata_w.disabled = True
+            scene_meta_all_btn.disabled = True
+            scene_meta_none_btn.disabled = True
+            scene_meta_note.value = (
+                "<div style='font-size:12px; color:#9a3412;'>"
+                "Available for Sentinel-2 missions only.</div>"
+            )
+            if export_granule_meta_w.value:
+                export_granule_meta_w.value = False
+            export_granule_meta_w.disabled = True
+            export_granule_meta_note.value = ""
+
+    scene_meta_all_btn.on_click(
+        lambda _b: setattr(
+            scene_metadata_w, "value",
+            tuple(v for _, v in scene_metadata_w.options),
+        )
+    )
+    scene_meta_none_btn.on_click(
+        lambda _b: setattr(scene_metadata_w, "value", ())
+    )
+    # Follow BOTH: a mission switch rewrites the source options (see
+    # _update_from_mission, which also calls this sync directly so the widget
+    # can never lag one event behind), and a source change refilters the list.
+    source_w.observe(_sync_scene_metadata_options, names="value")
+    mission_dd.observe(_sync_scene_metadata_options, names="value")
+
+    # -------------------------------------------------------------------------
     # Guided cloud presets: four plain-language choices that drive the three raw
     # cloud parameters for the user, so most people never have to touch the raw
     # widgets. Selecting 1-3 sets the parameters AND greys them out (so it feels
@@ -1217,6 +1445,15 @@ def datacube_builder(missions_func=missions):
     # _show_result_summary from state["coreg_size_hint"]; cleared otherwise.
     result_coreg_warn_w = widgets.HTML(
         value="", layout=widgets.Layout(flex="1 1 auto")
+    )
+
+    # Overlapping-tile (multi-swath) warning: shown ABOVE the result when the
+    # built AOI straddles two swaths so some scenes image only part of it. Sits
+    # at the very top of the Result section, before the co-registration size
+    # warning. Filled by _show_result_summary from state["multiswath_hint"];
+    # hidden (display:none) when there is nothing to flag so it adds no gap.
+    result_multiswath_warn_w = widgets.HTML(
+        value="", layout=widgets.Layout(width="100%", display="none")
     )
     # One-click fix for the warning above: writes an enlarged copy of the
     # polygon (short bbox edges expanded to the minimum co-registration edge,
@@ -1749,6 +1986,45 @@ def datacube_builder(missions_func=missions):
         if extra_layers:
             info_rows.append(_row("Additional layers", ", ".join(extra_layers)))
 
+        # Sentinel-2 scene metadata coords + the multi-granule merge note.
+        # np.asarray().ravel(): the attr is a list in memory / Zarr but an
+        # ndarray (or scalar string for one field) after a NetCDF roundtrip.
+        sm_attr = attrs.get("scene_metadata")
+        sm_fields = (
+            [str(s) for s in np.asarray(sm_attr).ravel()] if sm_attr is not None else []
+        )
+        if sm_fields:
+            info_rows.append(_row("Scene metadata", ", ".join(sm_fields)))
+        try:
+            _sm_multi = int(attrs.get("scene_metadata_multiday", 0) or 0)
+        except Exception:
+            _sm_multi = 0
+        scene_meta_info_html = ""
+        if sm_fields and _sm_multi > 0:
+            _tiles_attr = attrs.get("tile_id")
+            _tiles = (
+                [str(t) for t in np.asarray(_tiles_attr).ravel()]
+                if _tiles_attr is not None
+                else []
+            )
+            _tiles_txt = f" (tiles: {', '.join(_tiles)})" if len(_tiles) > 1 else ""
+            _n_dates = (
+                int(da.sizes.get("time", 0))
+                if da is not None and hasattr(da, "sizes")
+                else 0
+            )
+            scene_meta_info_html = (
+                "<div style='font-size:12px; color:#1e40af; line-height:1.5; "
+                "background:#eff6ff; border:1px solid #bfdbfe; border-radius:8px; "
+                "padding:8px 10px; margin-top:10px;'>"
+                f"ℹ️ On <b>{_sm_multi}</b> of {_n_dates} dates your polygon is "
+                f"covered by more than one Sentinel-2 granule{_tiles_txt}. The "
+                "scene metadata of those dates merges the granules: angle "
+                "values are the <b>per-date mean</b> and acq_datetime is the "
+                "<b>earliest</b> acquisition."
+                "</div>"
+            )
+
         # Per-date table with cloud % when the cube carries it; '-' otherwise.
         dates_html = ""
         has_time = da is not None and "time" in getattr(da, "coords", {})
@@ -1760,6 +2036,28 @@ def datacube_builder(missions_func=missions):
                     cloud = list(da.coords["cloud_percentage"].values)
                 except Exception:
                     cloud = None
+            # Separate-tile cubes carry a per-timestep `tile` coordinate; show
+            # it as a middle column so the two same-date tiles are legible.
+            tiles_per_step = None
+            if "tile" in da.coords:
+                try:
+                    tiles_per_step = [str(t) for t in da.coords["tile"].values]
+                except Exception:
+                    tiles_per_step = None
+            # Every cube now carries a per-scene `scene_coverage` fraction
+            # (0..1), but the Dates table shows the coverage column ONLY when the
+            # cube was built with "Remove partially missing scenes" (recorded in
+            # the partial_scene_handling attr) - otherwise it is just noise on a
+            # single-swath AOI where every scene reads ~100%.
+            coverage = None
+            if (
+                str(da.attrs.get("partial_scene_handling", "keep")) == "remove"
+                and "scene_coverage" in da.coords
+            ):
+                try:
+                    coverage = list(da.coords["scene_coverage"].values)
+                except Exception:
+                    coverage = None
             th = "padding:4px 12px; border-bottom:1px solid #d1d5db; color:#374151;"
             rows = []
             for i, t in enumerate(tv):
@@ -1769,9 +2067,24 @@ def datacube_builder(missions_func=missions):
                         cp = f"{int(cloud[i])}%"
                     except Exception:
                         cp = "-"
+                # Separate mode keeps sub-day timestamps, so show the time too
+                # (two tiles of one day would otherwise read as the same row).
+                date_txt = str(t)[:16] if tiles_per_step is not None else str(t)[:10]
+                tile_cell = ""
+                if tiles_per_step is not None:
+                    tv_i = tiles_per_step[i] if i < len(tiles_per_step) else "-"
+                    tile_cell = f"<td style='{lcell}'>{tv_i}</td>"
+                cov_cell = ""
+                if coverage is not None:
+                    try:
+                        cov_cell = f"<td style='{rcell}'>{int(round(float(coverage[i]) * 100))}%</td>"
+                    except Exception:
+                        cov_cell = f"<td style='{rcell}'>-</td>"
                 rows.append(
-                    f"<tr><td style='{lcell}'>{str(t)[:10]}</td>"
-                    f"<td style='{rcell}'>{cp}</td></tr>"
+                    f"<tr><td style='{lcell}'>{date_txt}</td>"
+                    f"{tile_cell}"
+                    f"<td style='{rcell}'>{cp}</td>"
+                    f"{cov_cell}</tr>"
                 )
             # Show at most 4 dates up front (matches the height of the info block
             # on the left); the rest folds behind a native <details> expander so a
@@ -1780,9 +2093,21 @@ def datacube_builder(missions_func=missions):
                 "<table style='border-collapse:collapse; margin-top:4px; width:100%; "
                 "font-size:12.5px;'>"
             )
+            _tile_th = (
+                f"<th style='{th} text-align:left;'>tile</th>"
+                if tiles_per_step is not None
+                else ""
+            )
+            _cov_th = (
+                f"<th style='{th} text-align:right;'>coverage</th>"
+                if coverage is not None
+                else ""
+            )
             header_row = (
                 f"<tr style='background:#f3f4f6;'><th style='{th} text-align:left;'>date</th>"
-                f"<th style='{th} text-align:right;'>cloud %</th></tr>"
+                f"{_tile_th}"
+                f"<th style='{th} text-align:right;'>cloud %</th>"
+                f"{_cov_th}</tr>"
             )
             dates_html = (
                 f"<div style='font-weight:600;'>Dates ({len(tv)})</div>"
@@ -1823,6 +2148,7 @@ def datacube_builder(missions_func=missions):
             f"<div style='flex:1 1 340px; min-width:280px;'>{info_table}</div>"
             + dates_col
             + "</div>"
+            + scene_meta_info_html
             + "</div>"
         )
 
@@ -1854,6 +2180,68 @@ def datacube_builder(missions_func=missions):
             return all(_cube_is_empty(c) for c in cubes)
         return _cube_is_empty(obj)
 
+    def _compute_multiswath_hint(obj):
+        """GUI-only detection: does the built AOI sit across multiple swaths, so
+        some scenes image only part of it? Returns a Result-panel hint pointing
+        at the Across-track partial-scene removal, or "" when there's nothing to
+        flag. Never raises (a hint must never break a build).
+
+        Reads NOTHING: it uses the eager scene_coverage coord that get_stac_layers
+        already computed from the SCL "imaged" boolean (sharing the cloud-% read).
+        That coord is the true swath coverage - cloud-aware by construction (a
+        cloudy-but-complete scene reads ~1.0). When cloud detection was OFF there
+        is no SCL, so scene_coverage is left lazy (band-0) and unread; the warning
+        deliberately stays silent there rather than force a read.
+        """
+        try:
+            da = obj
+            if isinstance(obj, xr.Dataset):
+                da = obj.get("Spectral_Temporal_Stack")
+                if da is None and len(obj.data_vars):
+                    da = obj[list(obj.data_vars)[0]]
+            if da is None or "time" not in getattr(da, "dims", ()):
+                return ""
+            if int(da.sizes.get("time", 0)) < 2:
+                return ""
+            # Already handled by the user -> nothing to suggest.
+            if str(da.attrs.get("partial_scene_handling", "keep")) == "remove":
+                return ""
+            # Only suggest the tool where it actually applies (optical missions).
+            if str(da.attrs.get("mission", "")) not in _PARTIAL_OK_MISSIONS:
+                return ""
+
+            # Use the ready coverage coord only. If it is absent (old cube) or
+            # still lazy (cloud detection was off), stay silent - do not trigger
+            # a read just to show a warning.
+            sc = da.coords.get("scene_coverage")
+            if sc is None:
+                return ""
+            if getattr(getattr(sc, "data", None), "chunks", None) is not None:
+                return ""  # lazy -> no SCL was read -> no warning by design
+            swath = np.asarray(sc.values, dtype=float)
+
+            meas = swath[~np.isnan(swath)]
+            if meas.size < 2:
+                return ""
+            n_partial = int(np.sum(meas < 0.9))
+            if n_partial == 0:
+                return ""
+            n_total = int(meas.size)
+            return (
+                "<div style='font-size:12px; color:#92400e; background:#fffbeb; "
+                "border:1px solid #fde68a; border-radius:8px; padding:8px 10px; "
+                "margin:0;'>"
+                "⚠️ <b>Overlapping Tile Warning:</b> This area is potentially "
+                "covered by "
+                f"<b>multiple swaths</b>: <b>{n_partial}</b> of {n_total} scenes "
+                "image less than 90% of it. To drop these partially-missing "
+                "scenes, rebuild with <b>Advanced Parameters → Overlapping "
+                "Tile Handling → Across-track → Remove partially "
+                "missing scenes</b>.</div>"
+            )
+        except Exception:
+            return ""
+
     def _coreg_warn_html():
         """Yellow co-registration size warning for the Result panel, or empty
         string when the last build carried no such hint."""
@@ -1864,22 +2252,30 @@ def datacube_builder(missions_func=missions):
             "<div style='font-size:12px; color:#92400e; "
             "background:#fef3c7; border:1px solid #fcd34d; "
             "border-radius:8px; padding:8px 10px; margin:0;'>"
-            f"⚠️ {hint}</div>"
+            f"⚠️ <b>Area Size Warning:</b> {hint}</div>"
         )
 
     def _set_coreg_warning(html):
         """Show/clear the co-registration size warning together with its
-        'Resize and Re-build' button - the button only exists while the
-        warning is visible."""
-        result_coreg_warn_w.value = html or ""
-        coreg_resize_btn.layout.display = "" if (html or "") else "none"
+        'Resize and Re-build' button - the button (and the row itself) only
+        exist while the warning is visible, so an empty warning adds no gap at
+        the top of the Result section."""
+        html = html or ""
+        result_coreg_warn_w.value = html
+        coreg_resize_btn.layout.display = "" if html else "none"
+        result_coreg_warn_row.layout.display = "" if html else "none"
 
     def _show_result_summary(obj):
         # The visualize/export note (a sibling widget below the Max cloud box) only
         # makes sense next to a ready cube - hide it for empty/failed results.
         empty = _result_is_empty(obj)
         result_viz_note_w.value = "" if empty else _RESULT_VIZ_NOTE_HTML
-        # The co-registration size warning sits right below that note.
+        # Both warnings live at the TOP of the Result section. The multi-swath
+        # (overlapping-tile) hint comes first, the co-registration size warning
+        # second; each is hidden entirely when it has nothing to say.
+        _ms_hint = "" if empty else (state.get("multiswath_hint") or "")
+        result_multiswath_warn_w.value = _ms_hint
+        result_multiswath_warn_w.layout.display = "" if _ms_hint else "none"
         _set_coreg_warning("" if empty else _coreg_warn_html())
         with result_out:
             clear_output()
@@ -1902,6 +2298,9 @@ def datacube_builder(missions_func=missions):
             if isinstance(obj, list):
                 _show_multi_feature_summary(obj)
                 return
+
+            # (The multi-swath hint is rendered above result_out, in
+            # result_multiswath_warn_w - see the top of this function.)
 
             # Single cube: friendly summary by default; the bold toggle swaps in
             # the raw xarray repr for power users.
@@ -2549,6 +2948,8 @@ def datacube_builder(missions_func=missions):
         # generic 'no data' failure - tell the user to raise the value instead.
         if _result_is_empty(filtered) and not _result_is_empty(state["result"]):
             result_viz_note_w.value = ""
+            result_multiswath_warn_w.value = ""
+            result_multiswath_warn_w.layout.display = "none"
             _set_coreg_warning("")
             with result_out:
                 clear_output()
@@ -2577,6 +2978,8 @@ def datacube_builder(missions_func=missions):
         filtered = _effective_result(state["result"], composite=False)
         if _result_is_empty(filtered) and not _result_is_empty(state["result"]):
             result_viz_note_w.value = ""
+            result_multiswath_warn_w.value = ""
+            result_multiswath_warn_w.layout.display = "none"
             _set_coreg_warning("")
             with result_out:
                 clear_output()
@@ -2802,6 +3205,22 @@ def datacube_builder(missions_func=missions):
             "stats": stats,
             "source": source,
             "resampling_method": resampling_w.value,
+            # Sentinel-2 only; the widget is cleared + disabled for other
+            # missions, so this is None there.
+            "scene_metadata": (
+                list(scene_metadata_w.value)
+                if len(scene_metadata_w.value) > 0
+                else None
+            ),
+            # Mosaic (default) vs separate N-S tiles. Greyed to "mosaic" for
+            # non-S2-L2A missions, so this is always "mosaic" there.
+            "tile_handling": tile_handling_w.value,
+            # Across-track: keep (default) vs remove partial swath/orbit-edge
+            # scenes. Greyed to "keep" for non-optical missions.
+            "partial_scene_handling": partial_scene_w.value,
+            # Min share of the AOI a scene must image to be kept (percent box
+            # -> fraction). Only used in remove mode.
+            "min_scene_coverage": float(min_coverage_w.value) / 100.0,
             "q": True,  # hidden in UI, keep output cleaner while progress bars still show where applicable
         }
 
@@ -2929,6 +3348,59 @@ def datacube_builder(missions_func=missions):
         export_stac(mask, path, var_name="Cloud_Stack",
                     compress=bool(export_compress_w.value))
         return path
+
+    def _write_granule_metadata_xmls():
+        """Download the granule metadata XMLs (MTD_TL.xml) for the scenes of
+        the just-exported result, into <export target>_granule_metadata/
+        (for COGs: <folder>/granule_metadata/). Runs only when the Export
+        Granule Metadata box is ticked; a metadata-only STAC re-query, no
+        pixels. Uses the PRE-composite filtered view so the XMLs match the
+        scenes that actually fed the export even when a Temporal Composite
+        collapsed the time axis. Returns the folder(s) written, or None.
+        """
+        if export_granule_meta_w.value is not True or export_granule_meta_w.disabled:
+            return None
+        target = (export_target_w.value or "").strip()
+        if not target:
+            return None
+        from stac2cube.get_data import export_granule_metadata
+
+        if export_mode_w.value == "cogs":
+            base_dir = str(Path(target) / "granule_metadata")
+        else:
+            stem, ext = os.path.splitext(target)
+            base_dir = (
+                stem if ext.lower() in (".nc", ".zarr") else target
+            ) + "_granule_metadata"
+
+        # composite=False: keep the per-scene time axis for date matching.
+        obj = _effective_result(state["result"], composite=False)
+
+        def _main_da(c):
+            if isinstance(c, xr.Dataset):
+                da = c.get("Spectral_Temporal_Stack")
+                if da is None and len(c.data_vars):
+                    da = c[list(c.data_vars)[0]]
+                return da
+            return c
+
+        if isinstance(obj, list):
+            written = []
+            i = 0
+            for c in obj:
+                da = _main_da(c)
+                if da is None:
+                    continue
+                i += 1
+                export_granule_metadata(da, f"{base_dir}_{i}", q=True)
+                written.append(f"{base_dir}_{i}")
+            return written or None
+
+        da = _main_da(obj)
+        if da is None:
+            return None
+        export_granule_metadata(da, base_dir, q=True)
+        return base_dir
 
     def _export_current_result(export_mode: str, export_target: str):
         if state["result"] is None:
@@ -3110,6 +3582,37 @@ def datacube_builder(missions_func=missions):
                 "output": output_for_json,
                 "clip_raster": clip_raster,
                 "resampling_method": resampling_w.value,
+                # A temporal composite collapses the time dimension the
+                # per-scene coords live on - get_stac_layers rejects the
+                # combination, so emit null when an aggregator is set.
+                "scene_metadata": (
+                    list(scene_metadata_w.value)
+                    if (len(scene_metadata_w.value) > 0 and not aggregator)
+                    else None
+                ),
+                # Granule metadata XML folder, derived from the output path.
+                # Needs a concrete output (lazy/COG JSON runs have none) and
+                # no aggregator (get_stac_layers rejects that combination).
+                "metadata_output": (
+                    os.path.splitext(output_for_json)[0] + "_granule_metadata"
+                    if (
+                        export_granule_meta_w.value is True
+                        and not export_granule_meta_w.disabled
+                        and output_for_json
+                        and not aggregator
+                    )
+                    else None
+                ),
+                # Separate tiles are incompatible with a temporal composite
+                # (get_stac_layers rejects the combination), so fall back to
+                # mosaic when an aggregator is set.
+                "tile_handling": (
+                    "mosaic" if aggregator else tile_handling_w.value
+                ),
+                # Across-track partial-scene removal (compatible with a
+                # composite: partials are dropped before the collapse).
+                "partial_scene_handling": partial_scene_w.value,
+                "min_scene_coverage": float(min_coverage_w.value) / 100.0,
                 "aggregator": aggregator,
                 "stats": stats,
                 "compress": bool(export_compress_w.value),
@@ -3505,6 +4008,15 @@ def datacube_builder(missions_func=missions):
             source_w.value = None
             source_w.disabled = True
 
+        # Refilter the Scene Specific Metadata list against the (possibly
+        # unchanged) source value - the source_w observer alone misses mission
+        # switches that keep the same source selected.
+        _sync_scene_metadata_options()
+        # Tile handling availability (Sentinel-2 L2A only).
+        _sync_tile_handling()
+        # Partial-scene (across-track) availability (optical missions).
+        _sync_partial_scene()
+
         # The "Check data availability" button compares catalogues, which only
         # makes sense for the multi-catalogue Sentinel-2 missions.
         check_avail_btn.disabled = m_name not in (
@@ -3788,6 +4300,12 @@ def datacube_builder(missions_func=missions):
                     )
 
                 state["result"] = result
+                # Multi-swath hint (GUI-only): flag AOIs that sit across swaths
+                # so some scenes are partial. Single cubes only; never fatal.
+                state["multiswath_hint"] = (
+                    "" if isinstance(result, list)
+                    else _compute_multiswath_hint(result)
+                )
                 export_result_btn.disabled = False
                 _set_visualization_enabled(True)
                 _refresh_viz_feature_options()
@@ -3919,6 +4437,16 @@ def datacube_builder(missions_func=missions):
                 _mask_written = _write_held_cloud_mask()
                 if _mask_written:
                     print(f"✅ Binary cloud mask exported: {_mask_written}")
+
+                # Granule metadata XMLs (own try: the cube export above already
+                # succeeded, so an XML download problem must not read as a
+                # failed export - report it as its own warning instead).
+                try:
+                    _meta_written = _write_granule_metadata_xmls()
+                    if _meta_written:
+                        print(f"✅ Granule metadata exported: {_meta_written}")
+                except Exception as _me:
+                    print(f"⚠️ Granule metadata export failed: {_me}")
 
         except Exception as e:
             _show_status(_friendly_error(e, "Export"))
@@ -4723,11 +5251,119 @@ def datacube_builder(missions_func=missions):
         open=False,
     )
 
+    tile_handling_group = _field_group(
+        "Overlapping Tile Handling",
+        [
+            widgets.HTML(
+                "<div style='font-size:12px; color:#475569; margin:0 0 6px 0;'>"
+                "Control how overlapping Sentinel-2 tiles are handled when your "
+                "area falls across a tile boundary."
+                "</div>"
+            ),
+            # Along-track (North-South): tiles from the SAME satellite pass,
+            # stacked in latitude (e.g. 47TPK/47TPL).
+            _param_panel(
+                "Along-track (North-South)",
+                widgets.VBox(
+                    [
+                        widgets.HTML(
+                            "<div style='font-size:12px; color:#475569; "
+                            "margin:0 0 4px 0;'>Two tiles from the same pass, "
+                            "stacked north-south: <b>mosaic</b> them into one "
+                            "image per date, or keep them <b>separate</b>.</div>"
+                        ),
+                        _boxed(tile_handling_w),
+                        tile_handling_note,
+                    ],
+                    layout=widgets.Layout(width="100%", overflow="hidden"),
+                ),
+            ),
+            # Across-track (East-West): swath / orbit edge - a scene covers only
+            # part of the AOI, the rest is missing (NaN).
+            _param_panel(
+                "Across-track (East-West)",
+                widgets.VBox(
+                    [
+                        widgets.HTML(
+                            "<div style='font-size:12px; color:#475569; "
+                            "margin:0 0 4px 0;'>At a swath or orbit edge a scene "
+                            "images only part of your area: <b>keep</b> these "
+                            "partial scenes, or <b>remove</b> them.</div>"
+                        ),
+                        _boxed(partial_scene_w),
+                        min_coverage_box,
+                        partial_scene_note,
+                    ],
+                    layout=widgets.Layout(width="100%", overflow="hidden"),
+                ),
+            ),
+        ],
+        collapsible=True,
+        open=False,
+    )
+
+    # ------------------------------------------------------------------------
+    # Scene Specific Metadata group: LAST entry of Advanced Parameters. The
+    # option list is rebuilt from the selected Data Source (see
+    # _sync_scene_metadata_options), so a field the source does not publish
+    # can never be selected. The Export Granule Metadata checkbox downloads
+    # the per-scene MTD_TL.xml files at export time (greyed on terrabyte).
+    # ------------------------------------------------------------------------
+    scene_metadata_group = _field_group(
+        "Scene Specific Metadata",
+        [
+            widgets.HTML(
+                "<div style='font-size:12px; color:#475569; margin:0 0 6px 0;'>"
+                "Attach per-scene metadata from the STAC catalogue to the data "
+                "cube as extra <b>time coordinates</b>, so scenes can be "
+                "queried and filtered by them later. The list follows the "
+                "selected <b>Data Source</b>: fields it does not publish are "
+                "hidden."
+                "</div>"
+                "<div style='font-size:12px; color:#92400e; background:#fffbeb; "
+                "border:1px solid #fde68a; border-radius:6px; padding:6px 8px; "
+                "margin:0 0 6px 0;'>⚠️ When the polygon is covered by more "
+                "than one Sentinel-2 granule on the same date (tile overlap), "
+                "angles are stored as the per-date mean and acq_datetime as "
+                "the earliest acquisition.</div>"
+            ),
+            _param_panel(
+                "Scene Metadata Fields",
+                widgets.VBox(
+                    [
+                        _boxed(scene_metadata_w),
+                        widgets.HBox(
+                            [scene_meta_all_btn, scene_meta_none_btn],
+                            layout=widgets.Layout(gap="8px", margin="6px 0 0 0"),
+                        ),
+                        scene_meta_note,
+                    ],
+                    layout=widgets.Layout(width="100%"),
+                ),
+            ),
+            # Plain checkbox row (no extra title/explanation by design); the
+            # subpanel gives it the boxed look of the other fields. overflow
+            # hidden clips the classic 1px horizontal sliver.
+            _subpanel(
+                [
+                    widgets.VBox(
+                        [export_granule_meta_w, export_granule_meta_note],
+                        layout=widgets.Layout(width="100%", overflow="hidden"),
+                    )
+                ],
+            ),
+        ],
+        collapsible=True,
+        open=False,
+    )
+
     advanced_box = widgets.VBox(
         [
             cloud_masking_group,
             shadow_masking_group,
             resampling_group,
+            tile_handling_group,
+            scene_metadata_group,
             stats_box,
             _collapse_row(advanced_collapse_btn),
         ],
@@ -5185,12 +5821,17 @@ def datacube_builder(missions_func=missions):
     # the right; both are empty/hidden when the last build carried no warning.
     result_coreg_warn_row = widgets.HBox(
         [result_coreg_warn_w, coreg_resize_btn],
-        layout=widgets.Layout(width="100%", gap="8px", align_items="center"),
+        layout=widgets.Layout(width="100%", gap="8px", align_items="center",
+                              display="none"),
     )
 
+    # Both warnings sit at the TOP of the Result section (user request): the
+    # overlapping-tile / multi-swath warning first, then the area-size
+    # co-registration warning, then the cube summary and its controls.
     result_box = widgets.VBox(
-        [result_out, result_cloud_filter_row, result_date_row,
-         result_viz_note_w, result_coreg_warn_row],
+        [result_multiswath_warn_w, result_coreg_warn_row,
+         result_out, result_cloud_filter_row, result_date_row,
+         result_viz_note_w],
         layout=widgets.Layout(width="99%", gap="6px"),
     )
     result_acc = widgets.Accordion(children=[result_box], selected_index=None)
@@ -5313,6 +5954,11 @@ def datacube_builder(missions_func=missions):
             "cloud_preset2": cloud_preset2_cb,
             "cloud_preset3": cloud_preset3_cb,
             "stats": stats_w,
+            "scene_metadata": scene_metadata_w,
+            "export_granule_metadata": export_granule_meta_w,
+            "tile_handling": tile_handling_w,
+            "partial_scene_handling": partial_scene_w,
+            "min_scene_coverage": min_coverage_w,
             "aggregator": aggregator_w,
             "export_mode": export_mode_w,
             "export_target": export_target_w,
