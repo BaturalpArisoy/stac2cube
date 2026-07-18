@@ -49,6 +49,7 @@ from stac2cube import (
 )
 
 from .get_data import SCENE_METADATA_AVAILABILITY
+from .clip import compute_scene_coverage
 
 from .gui_common import (
     human_readable_bytes as _human_readable_bytes,
@@ -1072,8 +1073,10 @@ def datacube_builder(missions_func=missions):
         layout=widgets.Layout(width="100%"),
         style={"description_width": "120px"},
     )
+    # _boxed() strips the widget's own description, so the threshold field would
+    # show as a bare "90". Use a stacked label instead to keep it self-explaining.
     min_coverage_box = widgets.VBox(
-        [_boxed(min_coverage_w)],
+        [_stacked_field(min_coverage_w, "Min coverage %")],
         layout=widgets.Layout(width="100%", display="none"),  # shown in Remove mode
     )
     partial_scene_note = widgets.HTML("")
@@ -1407,6 +1410,11 @@ def datacube_builder(missions_func=missions):
     # single-cube build with a time dimension; hidden/greyed for multi-feature
     # batches or cubes without a time axis. No pixels are read - times and
     # cloud_percentage are metadata, so this stays fully lazy.
+    # Back to the original fixed 240x88 - a relative width overflows its
+    # container here (the select's border/padding are added on top of 100%,
+    # which is what produced the horizontal scrollbar). The entries are kept
+    # SHORT ("2024-04-01 · 0% · 100%") so both percentages still fit at this
+    # size, with the meaning carried by the legend above the box.
     result_date_w = widgets.SelectMultiple(
         options=[],
         value=(),
@@ -1415,6 +1423,10 @@ def datacube_builder(missions_func=missions):
         layout=widgets.Layout(width="240px", height="88px"),
         style={"description_width": "0px"},
         disabled=True,
+    )
+    result_date_legend = widgets.HTML(
+        "<div style='font-size:11px; color:#6b7280; line-height:1.3;'>"
+        "date &nbsp;·&nbsp; cloud % &nbsp;·&nbsp; coverage %</div>"
     )
     result_date_all_btn = widgets.Button(
         description="All dates", layout=widgets.Layout(width="100px"), disabled=True
@@ -1429,7 +1441,8 @@ def datacube_builder(missions_func=missions):
     # to empty (renders nothing) otherwise.
     _RESULT_VIZ_NOTE_HTML = (
         "<div style='font-size:12px; color:#1e3a8a; background:#eff6ff; "
-        "border:1px solid #bfdbfe; border-radius:6px; padding:6px 8px;'>"
+        "border:1px solid #bfdbfe; border-radius:6px; padding:6px 8px; "
+        "margin:10px 0 0 0;'>"
         "ℹ️ Now you can <b>visualize</b> the data cube in the <b>Visualization</b> "
         "section below or save it via <b>Export Options</b>. You can also pick "
         "specific <b>dates</b> and/or, if available, filter by <b>max cloud %</b>. "
@@ -1452,8 +1465,12 @@ def datacube_builder(missions_func=missions):
     # at the very top of the Result section, before the co-registration size
     # warning. Filled by _show_result_summary from state["multiswath_hint"];
     # hidden (display:none) when there is nothing to flag so it adds no gap.
+    # width="auto" (not 100%): with 100% plus the div's own padding/border the box
+    # overflowed the Result panel and forced a horizontal scrollbar. Now it sizes
+    # like the blue visualize/export note below it.
     result_multiswath_warn_w = widgets.HTML(
-        value="", layout=widgets.Layout(width="100%", display="none")
+        value="", layout=widgets.Layout(width="auto", max_width="100%",
+                                        display="none")
     )
     # One-click fix for the warning above: writes an enlarged copy of the
     # polygon (short bbox edges expanded to the minimum co-registration edge,
@@ -2044,18 +2061,19 @@ def datacube_builder(missions_func=missions):
                     tiles_per_step = [str(t) for t in da.coords["tile"].values]
                 except Exception:
                     tiles_per_step = None
-            # Every cube now carries a per-scene `scene_coverage` fraction
-            # (0..1), but the Dates table shows the coverage column ONLY when the
-            # cube was built with "Remove partially missing scenes" (recorded in
-            # the partial_scene_handling attr) - otherwise it is just noise on a
-            # single-swath AOI where every scene reads ~100%.
+            # Per-scene AOI coverage (0..1), shown as a standard column right
+            # after cloud % - it is a normal property of every cube now, not tied
+            # to the warning or to the Across-track setting. The one exclusion is
+            # a still-LAZY coord (cloud detection was off): reading it would force
+            # a band read, so the column is simply omitted rather than slow the
+            # preview down.
             coverage = None
-            if (
-                str(da.attrs.get("partial_scene_handling", "keep")) == "remove"
-                and "scene_coverage" in da.coords
+            _cov_c = da.coords.get("scene_coverage")
+            if _cov_c is not None and (
+                getattr(getattr(_cov_c, "data", None), "chunks", None) is None
             ):
                 try:
-                    coverage = list(da.coords["scene_coverage"].values)
+                    coverage = list(_cov_c.values)
                 except Exception:
                     coverage = None
             th = "padding:4px 12px; border-bottom:1px solid #d1d5db; color:#374151;"
@@ -2106,7 +2124,7 @@ def datacube_builder(missions_func=missions):
             header_row = (
                 f"<tr style='background:#f3f4f6;'><th style='{th} text-align:left;'>date</th>"
                 f"{_tile_th}"
-                f"<th style='{th} text-align:right;'>cloud %</th>"
+                f"<th style='{th} text-align:right;'>cloud</th>"
                 f"{_cov_th}</tr>"
             )
             dates_html = (
@@ -2186,6 +2204,14 @@ def datacube_builder(missions_func=missions):
         at the Across-track partial-scene removal, or "" when there's nothing to
         flag. Never raises (a hint must never break a build).
 
+        Two modes, chosen by the FRACTION of partial scenes, so the message names
+        the actual cause instead of always blaming swath overlap:
+          * >= 20% partial -> "Overlapping Tile Warning" (systematic: an AOI
+            straddling two swaths is partial on roughly every other orbit).
+          * < 20% partial  -> "Incomplete Scene Warning" (sporadic: a faulty or
+            partially-missing acquisition), naming the offending dates when few
+            so they can be unticked in Dates before export - no rebuild needed.
+
         Reads NOTHING: it uses the eager scene_coverage coord that get_stac_layers
         already computed from the SCL "imaged" boolean (sharing the cloud-% read).
         That coord is the true swath coverage - cloud-aware by construction (a
@@ -2220,24 +2246,66 @@ def datacube_builder(missions_func=missions):
                 return ""  # lazy -> no SCL was read -> no warning by design
             swath = np.asarray(sc.values, dtype=float)
 
-            meas = swath[~np.isnan(swath)]
-            if meas.size < 2:
+            valid = ~np.isnan(swath)
+            if int(valid.sum()) < 2:
                 return ""
-            n_partial = int(np.sum(meas < 0.9))
+            partial = valid & (swath < 0.9)
+            n_partial = int(partial.sum())
             if n_partial == 0:
                 return ""
-            n_total = int(meas.size)
-            return (
+            n_total = int(valid.sum())
+            frac = n_partial / float(n_total)
+            pct_txt = f"{frac * 100:.1f}%" if frac < 0.01 else f"{round(frac * 100)}%"
+            _verb = "images" if n_partial == 1 else "image"
+
+            _rebuild = (
+                "rebuild with <b>Advanced Parameters → Overlapping Tile "
+                "Handling → Across-track → Remove partially missing scenes</b>"
+            )
+            _box = (
                 "<div style='font-size:12px; color:#92400e; background:#fffbeb; "
-                "border:1px solid #fde68a; border-radius:8px; padding:8px 10px; "
-                "margin:0;'>"
-                "⚠️ <b>Overlapping Tile Warning:</b> This area is potentially "
-                "covered by "
-                f"<b>multiple swaths</b>: <b>{n_partial}</b> of {n_total} scenes "
-                "image less than 90% of it. To drop these partially-missing "
-                "scenes, rebuild with <b>Advanced Parameters → Overlapping "
-                "Tile Handling → Across-track → Remove partially "
-                "missing scenes</b>.</div>"
+                "border:1px solid #fde68a; border-radius:6px; padding:6px 8px; "
+                "margin:0; box-sizing:border-box;'>"
+            )
+
+            # Which cause? An AOI straddling two swaths is partial on roughly
+            # every other orbit (systematic, tens of percent), whereas a faulty /
+            # incomplete acquisition is a handful of scenes. The 20% cut sits
+            # between the two regimes; the sporadic wording says "most likely"
+            # because an AOI barely clipping a swath edge can also land low.
+            if frac >= 0.20:
+                return (
+                    f"{_box}"
+                    "⚠️ <b>Overlapping Tile Warning:</b> This area is potentially "
+                    "covered by "
+                    f"multiple swaths: <b>{n_partial}</b> of {n_total} scenes "
+                    f"({pct_txt}) {_verb} less than 90% of it. To drop these "
+                    f"partially-missing scenes, {_rebuild}.</div>"
+                )
+
+            # Sporadic: name the offending dates (when few) so they can simply be
+            # unticked in the Dates list before exporting - no rebuild needed.
+            dates_txt = ""
+            if n_partial <= 5:
+                try:
+                    tv = np.asarray(da["time"].values)
+                    items = [
+                        f"{str(tv[i])[:10]} ({round(float(swath[i]) * 100)}%)"
+                        for i in np.flatnonzero(partial)
+                    ]
+                    label = "Affected date" + ("s" if len(items) > 1 else "")
+                    dates_txt = f" <b>{label}:</b> {', '.join(items)}."
+                except Exception:
+                    dates_txt = ""
+            _them = "them" if n_partial > 1 else "it"
+            return (
+                f"{_box}"
+                "⚠️ <b>Incomplete Scene Warning:</b> "
+                f"<b>{n_partial}</b> of {n_total} scenes ({pct_txt}) {_verb} less "
+                "than 90% of this area. "
+                f"{dates_txt} You can untick "
+                f"{_them} in <b>Dates</b> below before exporting, or {_rebuild}."
+                "</div>"
             )
         except Exception:
             return ""
@@ -2909,16 +2977,37 @@ def datacube_builder(missions_func=missions):
             except Exception:
                 cvals = None
 
+        # Scene coverage % per timestep (a default coord on every new cube).
+        # Skipped while it is still LAZY (cloud detection off) so filling the
+        # picker never forces a band read.
+        covvals = None
+        try:
+            _sc = obj.coords.get("scene_coverage")
+            if _sc is not None and (
+                getattr(getattr(_sc, "data", None), "chunks", None) is None
+            ):
+                _cv = np.asarray(_sc.values, dtype=float)
+                if _cv.shape[0] == len(tvals):
+                    covvals = _cv
+        except Exception:
+            covvals = None
+
         options = []
         for i, t in enumerate(tvals):
             iso = str(t)  # unique per timestamp -> stable option value
             date_str = iso.split("T")[0] if "T" in iso else iso
-            label = date_str
+            # Same order as the Dates table: cloud % first, then coverage %.
+            # Bare numbers keep the row narrow enough to avoid a horizontal
+            # scrollbar; result_date_legend above the box names the columns.
+            parts = []
             if cvals is not None:
                 try:
-                    label = f"{date_str}  ·  {float(cvals[i]):.0f}% cloud"
+                    parts.append(f"{float(cvals[i]):.0f}%")
                 except Exception:
-                    label = date_str
+                    pass
+            if covvals is not None and not np.isnan(covvals[i]):
+                parts.append(f"{covvals[i] * 100:.0f}%")
+            label = f"{date_str} · " + " · ".join(parts) if parts else date_str
             options.append((label, iso))
 
         _date_filter_guard["busy"] = True
@@ -5278,6 +5367,8 @@ def datacube_builder(missions_func=missions):
                     layout=widgets.Layout(width="100%", overflow="hidden"),
                 ),
             ),
+            # Breathing room so the two panels do not read as one block.
+            widgets.HTML("<div style='height:10px;'></div>"),
             # Across-track (East-West): swath / orbit edge - a scene covers only
             # part of the AOI, the rest is missing (NaN).
             _param_panel(
@@ -5795,6 +5886,7 @@ def datacube_builder(missions_func=missions):
     # and export via _effective_result.
     result_date_box = widgets.VBox(
         [
+            result_date_legend,
             result_date_w,
             widgets.HBox(
                 [result_date_all_btn, result_date_clear_btn],
@@ -6021,6 +6113,15 @@ def datacube_editor():
         Works if your cube was already cloud-masked before (e.g. SCL masking during generation or probabilistic cloud masking workflow).<br>
         Best used before clipping and before temporal composites.<br>
         Cloud percentages are not recalculated in the editor after clipping.
+        """,
+        "scene_coverage_filter": """
+        <b>filter by scene coverage</b><br>
+        Uses the <code>scene_coverage</code> coordinate stored in the data cube
+        (the fraction 0-100% of the AOI each scene actually images).<br><br>
+        Keeps only time steps where <code>scene_coverage &gt;= min coverage</code>,
+        dropping scenes that image only part of the area - across-track / swath
+        edge, or a faulty / partially-missing acquisition.<br><br>
+        Best used before clipping and before temporal composites.
         """,
         "clip_raster": """
         <b>clip raster</b><br>
@@ -6378,6 +6479,10 @@ def datacube_editor():
         # Cloud filter
         enable_cloud_filter_w.disabled = not enabled
         cloud_max_w.disabled = not enabled
+
+        # Scene coverage filter
+        enable_coverage_filter_w.disabled = not enabled
+        coverage_min_w.disabled = not enabled
 
         # Clip widgets
         enable_clip_w.disabled = not enabled
@@ -7122,6 +7227,27 @@ def datacube_editor():
 
     cloud_max_w = widgets.IntText(
         value=100,
+        description="",
+        layout=widgets.Layout(width="20%"),
+        disabled=True,
+    )
+
+    # Scene coverage filter feature (applied via Edit button). Same shape as the
+    # cloud filter, but keyed on the scene_coverage coord: drops scenes imaging
+    # less than the given % of the AOI (swath / orbit edge, or faulty / missing
+    # acquisitions). Reuses the across-track coverage code (compute_scene_coverage).
+    enable_coverage_filter_w = widgets.Checkbox(
+        value=False,
+        description="Enable filter",
+        indent=False,
+        layout=widgets.Layout(width="140px"),
+        disabled=True,
+    )
+
+    coverage_min_w = widgets.BoundedIntText(
+        value=90,
+        min=0,
+        max=100,
         description="",
         layout=widgets.Layout(width="20%"),
         disabled=True,
@@ -7914,7 +8040,89 @@ def datacube_editor():
 
         raise TypeError(f"Unsupported object type for cloud filtering: {type(obj)}")
 
-    
+    def _apply_coverage_filter_feature(obj):
+        """Filter by Scene Coverage: keep only time steps imaging at least the
+        chosen percentage of the AOI, dropping partial / faulty / missing scenes.
+
+        Reuses the across-track coverage code: the stored scene_coverage coord
+        when present (cheap, no read), otherwise compute_scene_coverage() measured
+        from the cube's own no-data pattern. Mirrors _apply_cloud_filter_feature -
+        a Dataset input is filtered on Spectral_Temporal_Stack and stale stats are
+        dropped; an empty result is a warning, not an error.
+        """
+        if not enable_coverage_filter_w.value:
+            return obj, False, []
+
+        min_cov = int(coverage_min_w.value)
+        if min_cov < 0 or min_cov > 100:
+            raise ValueError("Min scene coverage % must be between 0 and 100.")
+        thr = min_cov / 100.0
+
+        stats_dropped = isinstance(obj, xr.Dataset)
+        if isinstance(obj, xr.Dataset):
+            if "Spectral_Temporal_Stack" not in obj.data_vars:
+                raise ValueError(
+                    "Current Dataset does not contain 'Spectral_Temporal_Stack' "
+                    "for scene-coverage filtering."
+                )
+            da = obj["Spectral_Temporal_Stack"]
+        elif isinstance(obj, xr.DataArray):
+            da = obj
+        else:
+            raise TypeError(
+                f"Unsupported object type for scene-coverage filtering: {type(obj)}"
+            )
+
+        if "time" not in da.dims:
+            raise ValueError("Scene-coverage filtering requires a 'time' dimension.")
+
+        # Coverage source: the stored coord (default on new cubes, no read) or a
+        # fresh measurement for cubes built before scene_coverage was default.
+        if "scene_coverage" in da.coords:
+            cov_vals = np.asarray(da["scene_coverage"].values, dtype=float)
+            cov_src = "stored scene_coverage coord"
+        else:
+            cov = compute_scene_coverage(da)
+            if cov is None:
+                raise ValueError("Could not measure scene coverage (no time dim).")
+            cov_vals = np.asarray(cov.values, dtype=float)
+            cov_src = "measured now (no stored coord)"
+
+        before_n = int(da.sizes.get("time", 0))
+        keep = np.asarray(cov_vals >= thr)
+        attrs_ref = dict(getattr(da, "attrs", {}) or {})
+        if keep.any():
+            filtered = da.isel(time=np.flatnonzero(keep))
+            # Refresh the coord so survivors stay self-describing and re-runs are
+            # 1:1 with the time axis.
+            filtered = filtered.assign_coords(
+                scene_coverage=("time", cov_vals[keep])
+            )
+        else:
+            filtered = da.isel(time=slice(0, 0))
+        try:
+            filtered.attrs.update(attrs_ref)
+        except Exception:
+            pass
+        after_n = int(keep.sum())
+
+        msgs = [
+            "scene coverage filter applied",
+            f"min_coverage={min_cov}%  ({cov_src})",
+            f"Scenes kept: {after_n} / {before_n}",
+            f"Removed scenes: {max(0, before_n - after_n)}",
+        ]
+        if stats_dropped:
+            msgs.append(
+                "Previous stats were removed because coverage filtering changes "
+                "the selected time steps."
+            )
+        if after_n == 0:
+            msgs.append(
+                "Warning: no scenes remain after filtering. Lower the Min coverage %."
+            )
+        return filtered, True, msgs
+
     def _resolve_update_daterange():
         """Builder-style Time Period resolution: the simple From/To pickers, or
         the seasonal text field when the 'advanced' checkbox is ticked. Returns
@@ -8563,6 +8771,7 @@ def datacube_editor():
     def _reset_feature_checkboxes_after_edit():
         # Uncheck feature toggles to prevent accidental re-application
         enable_cloud_filter_w.value = False
+        enable_coverage_filter_w.value = False
         enable_mask_clouds_w.value = False
         enable_clip_w.value = False
 
@@ -8589,6 +8798,11 @@ def datacube_editor():
                 current_obj, changed_cloud, cloud_msgs = _apply_cloud_filter_feature(current_obj)
                 changed_any = changed_any or changed_cloud
                 messages.extend(cloud_msgs)
+
+                # 2b) Filter by Scene Coverage (drop partial / faulty scenes)
+                current_obj, changed_cov, cov_msgs = _apply_coverage_filter_feature(current_obj)
+                changed_any = changed_any or changed_cov
+                messages.extend(cov_msgs)
 
                 # 3) Mask Clouds with Binary Masking File
                 current_obj, changed_mask, mask_msgs = _apply_mask_clouds_feature(current_obj)
@@ -9019,6 +9233,39 @@ def datacube_editor():
     cloud_filter_acc.set_title(0, "Filter by Cloud Coverage")
     cloud_filter_acc.layout = widgets.Layout(width="99%")
 
+    # Scene coverage filter feature (drop partial / faulty / missing scenes)
+    coverage_filter_controls = widgets.VBox(
+        [
+            enable_coverage_filter_w,
+            _stacked_field_with_help(
+                coverage_min_w, "Min coverage %", "scene_coverage_filter"
+            ),
+        ],
+        layout=widgets.Layout(width="100%", gap="6px"),
+    )
+
+    coverage_filter_feature_box = widgets.VBox(
+        [
+            _chainable_badge(True),
+            widgets.HTML(
+                "<div style='font-size:12px; color:#666;'>"
+                "Keeps only scenes imaging at least the chosen % of the area, "
+                "dropping partial ones (across-track / swath edge, or a faulty / "
+                "partially-missing acquisition). Uses the stored "
+                "<code>scene_coverage</code>, or measures it if the cube predates it."
+                "</div>"
+            ),
+            coverage_filter_controls,
+        ],
+        layout=widgets.Layout(width="100%", gap="8px"),
+    )
+
+    coverage_filter_acc = widgets.Accordion(
+        children=[coverage_filter_feature_box], selected_index=None
+    )
+    coverage_filter_acc.set_title(0, "Filter by Scene Coverage")
+    coverage_filter_acc.layout = widgets.Layout(width="99%")
+
     # ------------------------------------------------------------------
     # Build Cloud Mask Cube (standalone export - same as builder's
     # "Export Mask as Binary File")
@@ -9424,6 +9671,7 @@ def datacube_editor():
             #widgets.HTML("<div style='font-size:12px; color:#666;'>- Do not forget to uncheck boxes after editing a data cube to prevent.</div>"),
             slice_acc,
             cloud_filter_acc,
+            coverage_filter_acc,
             build_mask_acc,
             mask_clouds_acc,
             clip_acc,
@@ -9612,6 +9860,8 @@ def datacube_editor():
             "slice_band": slice_band_w,
             "enable_cloud_filter": enable_cloud_filter_w,
             "cloud_max": cloud_max_w,
+            "enable_coverage_filter": enable_coverage_filter_w,
+            "coverage_min": coverage_min_w,
             "enable_mask_clouds": enable_mask_clouds_w,
             "mask_file": mask_file_w,
             "enable_clip": enable_clip_w,
