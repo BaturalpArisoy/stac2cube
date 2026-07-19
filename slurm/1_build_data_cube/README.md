@@ -10,10 +10,22 @@ The easiest and safest way to produce a valid config is the **Data Cube Builder*
 
 1. Open `interactive/User_Interface_Tools.ipynb`.
 2. Run **Data Cube Builder** and set your parameters interactively.
-3. Click the **Copy JSON** button.
+3. Click the **Copy Settings** button.
 4. Paste the result into `build_data_cube.json` (replacing the content) and save.
 
 > The GUI also documents what each parameter means, so it doubles as a reference.
+
+## Going the other way: load a config back into the GUI
+
+Click **Paste Settings** (next to Copy Settings) and paste the content of a
+`build_data_cube.json` into the box that appears - the form fills itself with
+those settings, so an HPC config can be inspected, tweaked and previewed
+interactively.
+
+Note that the config is a `get_stac_layers` call, so a few GUI-only choices are
+not part of it and are reported as "not restored": the COG export mode (it
+writes `"output": null`), the animation settings and the Result-panel date
+ticks.
 
 ---
 

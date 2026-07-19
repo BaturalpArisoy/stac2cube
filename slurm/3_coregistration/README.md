@@ -10,7 +10,7 @@ The easiest and safest way to produce a valid config is the
 1. Open `interactive/User_Interface_Tools.ipynb`.
 2. Run **Analysis Ready Data Cube Tools** and open **2) Co-register Data Cube**.
 3. Set your parameters interactively.
-4. Click the **Copy JSON** button.
+4. Click the **Copy Settings** button.
 5. Paste the result into `coregistration.json` (replacing the content) and save.
 
 > The GUI also documents what each parameter means, so it doubles as a reference.

@@ -81,16 +81,22 @@ _EXPORT_MODE_REMINDER = (
 # Tempo of the busy indicator, in seconds.
 _BEAR_HOP = 0.55            # one bear hop
 _BEAR_FALL = 0.35           # crumb falling from the cookie into the row
-_BEAR_BOUNCE = 0.225        # one crumb's up-down in the wave
-_BEAR_STAGGER = 0.11        # delay between neighbouring crumbs
+_BEAR_BOUNCE = 0.225        # one crumb's up-down in the wave (stays constant)
 _BEAR_COOKIE_GAP = 0.5      # beat while a fresh cookie arrives
 _BEAR_PAUSE = 1.2           # final beat before the whole loop restarts
-_BEAR_COOKIES = 5           # cookies on the plate
+_BEAR_COOKIES = 20          # cookies on the plate (~76s loop, repeats on longer builds)
 _BEAR_BITES = 4             # quarters per cookie
 
 _BEAR_BITE_AT = _BEAR_HOP * 0.45   # bite lands at the top of the hop
 _BEAR_FALL_FROM = -16.0            # px above the row where a crumb spawns
 _BEAR_CRUMBS = _BEAR_COOKIES * _BEAR_BITES
+
+# The bear eats at a constant pace: every round takes the same time, whatever
+# the crumb count. The wave has to fit inside that fixed round, so as crumbs
+# pile up the crest simply travels faster (the gap between neighbouring crumbs
+# shrinks) while each crumb's own bounce stays the same length.
+_BEAR_ROUND = _BEAR_BITE_AT + _BEAR_FALL + _BEAR_BOUNCE
+_BEAR_WAVE_WINDOW = _BEAR_ROUND - _BEAR_BITE_AT   # bite -> end of the round
 
 
 def _bear_schedule():
@@ -98,9 +104,14 @@ def _bear_schedule():
 
     Each hop is a bite: the bear takes a quarter of the current cookie and the
     bite drops a crumb into the row underneath it. Once a cookie is finished a
-    fresh one pops in, but the crumbs are never cleared - so the wave running
-    through them gets longer with every bite of every cookie, and each round
-    takes longer than the last because the bear waits the wave out.
+    fresh one pops in, but the crumbs are never cleared - so the wave has more
+    ground to cover with every bite of every cookie.
+
+    The bear's pace never changes: a round is always _BEAR_ROUND long. The wave
+    is what adapts - the bite kicks it off, and the gap between neighbouring
+    crumbs shrinks just enough for the crest to cross the whole row within the
+    round. That makes the crest reach the newest crumb exactly as it lands, for
+    any number of crumbs, so the wave always keeps pace with the eating.
 
     Returns (cycle_length, hop_starts, bite_times, crumb_land_times,
     {crumb_index: [wave_start_times]}, fresh_cookie_times).
@@ -114,9 +125,18 @@ def _bear_schedule():
         land = bite + _BEAR_FALL
         bites.append(bite)
         lands.append(land)
-        for i in range(1, n + 1):          # wave across every crumb so far
-            waves[i].append(land + _BEAR_STAGGER * (i - 1))
-        t = land + _BEAR_BOUNCE + _BEAR_STAGGER * (n - 1)
+        if n == 1:
+            # Nothing to travel through yet, so the lone crumb bounces on
+            # landing rather than on the bite.
+            waves[1].append(land)
+        else:
+            # Crest leaves at the bite and has (window - bounce) to reach the
+            # last crumb; that lands it there exactly at _BEAR_FALL, which is
+            # the moment the newest crumb touches down.
+            stagger = (_BEAR_WAVE_WINDOW - _BEAR_BOUNCE) / (n - 1)
+            for i in range(1, n + 1):      # wave across every crumb so far
+                waves[i].append(bite + stagger * (i - 1))
+        t += _BEAR_ROUND
         if n % _BEAR_BITES == 0 and n < _BEAR_CRUMBS:
             fresh.append(t + _BEAR_COOKIE_GAP * 0.4)
             t += _BEAR_COOKIE_GAP
@@ -1791,9 +1811,33 @@ def datacube_builder(missions_func=missions):
     # from the green Build button without the alarm of the old red (danger).
     export_result_btn.style.button_color = "#f97316"
     copy_json_btn = widgets.Button(
-        description="Copy JSON",
+        description="Copy Settings",
         icon="copy",
-        layout=widgets.Layout(width="140px"),  # colorless like old Generate JSON button
+        layout=widgets.Layout(width="150px"),  # colorless like old Generate JSON button
+    )
+    # Counterpart of Copy Settings: take a settings JSON (from this GUI or from a
+    # SLURM config file) and push it back into the widgets. The browser clipboard
+    # cannot be read from the kernel, so the button reveals a paste box instead;
+    # the settings are applied as soon as valid JSON lands in it.
+    paste_json_btn = widgets.Button(
+        description="Paste Settings",
+        icon="paste",
+        layout=widgets.Layout(width="150px"),
+    )
+    paste_json_area_w = widgets.Textarea(
+        value="",
+        placeholder='Paste the copied settings here (Ctrl+V) - {"parameters": {...}}',
+        layout=widgets.Layout(width="99%", height="120px"),
+        continuous_update=True,   # paste syncs immediately, no blur needed
+    )
+    paste_json_hint = widgets.HTML(
+        "<div style='font-size:12px; color:#6b7280;'>"
+        "Paste a settings JSON here (Ctrl+V). It is applied to the form "
+        "automatically as soon as it parses.</div>"
+    )
+    paste_json_box = widgets.VBox(
+        [paste_json_hint, paste_json_area_w],
+        layout=widgets.Layout(width="100%", display="none"),  # toggled by the button
     )
 
     # -------------------------------------------------------------------------
@@ -3437,7 +3481,7 @@ def datacube_builder(missions_func=missions):
             # Temporal Composite is intentionally NOT sent to the build. The GUI
             # builds the full time series so the user can filter by date/cloud
             # first, then applies the composite client-side over the filtered
-            # result (see _apply_temporal_composite / _effective_result). Copy JSON
+            # result (see _apply_temporal_composite / _effective_result). Copy Settings
             # still writes aggregator for headless/SLURM runs where interactive
             # filtering isn't available.
             "aggregator": None,
@@ -3773,6 +3817,11 @@ def datacube_builder(missions_func=missions):
         clip_raster = bool(clip_raster_w.value)
         cloud_masking = cloud_masking_w.value
         keep_clouds = (cloud_masking is True) and (keep_clouds_w.value == "keep")
+        shadow_masking = (
+            (shadow_masking_w.value is True)
+            and (cloud_masking is True)
+            and not keep_clouds
+        )
         cloud_mask_output = None
         if (cloud_masking is True) and (export_mask_w.value is True):
             cloud_mask_output = (cloud_mask_output_w.value or "").strip() or None
@@ -3817,6 +3866,12 @@ def datacube_builder(missions_func=missions):
                 "scene_cloud_coverage": scene_cloud_coverage,
                 "cloud_masking": cloud_masking,
                 "keep_clouds": keep_clouds,
+                # Shadow masking rides on the SCL cloud mask, so it is only
+                # meaningful when clouds are actually masked (same gate the
+                # build applies in _collect_params).
+                "shadow_masking": shadow_masking,
+                "nir_dark_threshold": float(shadow_nir_dark_w.value),
+                "shadow_proj_distance": float(shadow_proj_dist_w.value),
                 "cloud_mask_output": cloud_mask_output,
                 "output": output_for_json,
                 "clip_raster": clip_raster,
@@ -3909,10 +3964,309 @@ def datacube_builder(missions_func=missions):
                 )
             )
 
-            _show_status("✅ JSON syntax copied to clipboard.")
+            _show_status("✅ Settings copied to clipboard.")
 
         except Exception as e:
-            _show_status(_friendly_error(e, "Copying the JSON"))
+            _show_status(_friendly_error(e, "Copying the settings"))
+
+    # -------------------------------------------------------------------------
+    # Paste Settings: the reverse of Copy Settings - read a settings JSON and
+    # push every parameter it carries back into the widgets.
+    #
+    # The JSON is the get_stac_layers config (same file SLURM runs), so a few
+    # GUI-only choices simply are not in it and cannot be restored: the COG
+    # export mode (its JSON "output" is null by design), the animation / GIF
+    # settings and the Result-panel date ticks. Those are reported back to the
+    # user instead of being guessed.
+    # -------------------------------------------------------------------------
+    # Mission alias ("s2") -> full mission name ("sentinel_2_l2a"), from the
+    # missions table itself, so it stays correct when missions are added.
+    def _mission_name_from_json(value):
+        if value is None:
+            return None
+        v = str(value)
+        if v in mission_meta:
+            return v
+        for name, meta in mission_meta.items():
+            alias = meta.get("alias", meta.get("allias"))
+            if alias is not None and str(alias) == v:
+                return name
+        return None
+
+    def _option_values(widget):
+        """The selectable VALUES of a widget, whatever shape its options take:
+        ipywidgets accepts both plain entries (stats, metadata) and
+        (label, value) pairs (missions, bands, dropdowns)."""
+        return [
+            opt[1] if (isinstance(opt, tuple) and len(opt) == 2) else opt
+            for opt in widget.options
+        ]
+
+    def _set_dropdown_if_valid(widget, value, label, warnings):
+        """Set a dropdown only to a value it actually offers; warn otherwise."""
+        valid = _option_values(widget)
+        if value in valid:
+            widget.value = value
+            return True
+        warnings.append(f"{label}: '{value}' is not available here - kept '{widget.value}'.")
+        return False
+
+    def _apply_daterange_from_json(dr, warnings):
+        if dr is None:
+            warnings.append("Time period: not set in the settings - kept as is.")
+            return
+        # ["YYYY-MM-DD", "YYYY-MM-DD"] -> the simple From / To pickers.
+        if (
+            isinstance(dr, (list, tuple))
+            and len(dr) == 2
+            and all(isinstance(d, str) and re.match(r"^\d{4}-\d{2}-\d{2}$", d) for d in dr)
+        ):
+            advanced_dates_w.value = False
+            date_from_w.value = _date.fromisoformat(dr[0])
+            date_to_w.value = _date.fromisoformat(dr[1])
+            return
+        # {"season": [...], "years": ...} -> the seasonal text field.
+        if isinstance(dr, dict) and "season" in dr and "years" in dr:
+            years = dr["years"]
+            if years == "all":
+                mode = "seasonal_all"
+            elif isinstance(years, str):
+                mode = "seasonal_range"
+            else:
+                mode = "seasonal_selected"
+            advanced_dates_w.value = True
+            daterange_mode_w.value = mode          # may rewrite the text field...
+            daterange_w.value = json.dumps(dr)     # ...so write the text after it
+            return
+        warnings.append(
+            f"Time period: unsupported daterange {dr!r} - kept the current dates."
+        )
+
+    def _apply_cloud_settings_from_json(p, warnings):
+        """Restore the cloud block. The three guided presets are exact shortcuts
+        for particular raw settings, so a pasted config that matches one selects
+        that preset; anything else lands on 'Free Settings' with the raw values."""
+        cloud_masking = p.get("cloud_masking")
+        keep_clouds = bool(p.get("keep_clouds"))
+        max_cc = p.get("max_cc")
+        mask_out = p.get("cloud_mask_output")
+
+        preset_1 = cloud_masking is True and keep_clouds and max_cc in (None, 100)
+        preset_2 = (
+            cloud_masking is True
+            and not keep_clouds
+            and max_cc in (None, 100)
+            and not mask_out
+        )
+
+        if preset_1:
+            _select_cloud_preset(1)
+        elif preset_2:
+            _select_cloud_preset(2)
+        else:
+            _select_cloud_preset(3)   # free settings: unlock the raw widgets
+            # A config that simply omits cloud_masking (hand-written SLURM JSON)
+            # keeps whatever the mission defaults to, without a warning.
+            if cloud_masking is not None:
+                _set_dropdown_if_valid(
+                    cloud_masking_w, cloud_masking, "Cloud detection", warnings
+                )
+            keep_clouds_w.value = "keep" if keep_clouds else "mask"
+            if max_cc is not None and not max_cc_w.disabled:
+                max_cc_w.value = int(max_cc)
+
+        # Export mask (+ its path) is the user's under presets 1 and 3.
+        if mask_out and cloud_masking is True:
+            export_mask_w.value = True
+            cloud_mask_output_w.value = str(mask_out)
+        elif not export_mask_w.disabled:
+            export_mask_w.value = False
+        _sync_export_mask_visibility()
+        _sync_export_mask_path_enabled()
+
+    def _apply_json_settings(payload):
+        """Push a parsed settings payload into the widgets. Returns the list of
+        things that could not be restored, so the user is told rather than left
+        with a silently half-applied form."""
+        params = payload.get("parameters") if isinstance(payload, dict) else None
+        if not isinstance(params, dict):
+            raise ValueError(
+                'The pasted JSON has no "parameters" object. Paste the settings '
+                'exactly as Copy Settings produced them.'
+            )
+        warnings = []
+
+        # 1) Mission first: it rebuilds the band / index / stats / source lists
+        #    every later step writes into.
+        m_name = _mission_name_from_json(params.get("mission"))
+        if m_name is None:
+            warnings.append(
+                f"Mission: '{params.get('mission')}' is unknown - kept "
+                f"'{mission_dd.value}'."
+            )
+        elif m_name != mission_dd.value:
+            mission_dd.value = m_name       # fires _update_from_mission
+        else:
+            _update_from_mission()          # re-assert the mission defaults
+
+        # 2) Data source (Sentinel-2 only; the dropdown is "Not applicable"
+        #    elsewhere, so an unmatched value is reported).
+        if params.get("source") is not None and not source_w.disabled:
+            _set_dropdown_if_valid(source_w, params["source"], "Data source", warnings)
+
+        # 3) Area of interest: a path string, or a bbox list written back as text.
+        polygon = params.get("polygon")
+        if isinstance(polygon, (list, tuple)):
+            polygon_w.value = json.dumps(list(polygon))
+        elif polygon is not None:
+            polygon_w.value = str(polygon)
+
+        # 4) Resolution (greyed for fixed-resolution missions).
+        if params.get("resolution") is not None and not resolution_w.disabled:
+            resolution_w.value = int(params["resolution"])
+
+        # 5) Time period.
+        _apply_daterange_from_json(params.get("daterange"), warnings)
+
+        # 6) Bands, then indices: index availability follows the band selection.
+        band_values = _option_values(bands_w)
+        wanted_bands = [str(b) for b in (params.get("bands") or [])]
+        bands_w.value = tuple(b for b in wanted_bands if b in band_values)
+        missing_bands = [b for b in wanted_bands if b not in band_values]
+        if missing_bands:
+            warnings.append(
+                "Bands not offered by this mission: " + ", ".join(missing_bands)
+            )
+        _refresh_index_availability()
+
+        wanted_idx = {str(i) for i in (params.get("indices") or [])}
+        for idx, cb in _index_rows.items():
+            cb.value = (idx in wanted_idx) and not cb.disabled
+        unavailable_idx = [
+            i for i in wanted_idx
+            if i not in _index_rows or _index_rows[i].disabled
+        ]
+        if unavailable_idx:
+            warnings.append(
+                "Indices that need unselected bands (or are not available): "
+                + ", ".join(sorted(unavailable_idx))
+            )
+
+        # 7) Clipping + the whole cloud block (presets included).
+        if not clip_raster_w.disabled:
+            clip_raster_w.value = bool(params.get("clip_raster"))
+        _apply_cloud_settings_from_json(params, warnings)
+
+        # 8) Shadow masking: its gate (Mask Clouds + nir + S2 L2A) has just been
+        #    re-evaluated by the cloud block, so only set it when allowed.
+        _sync_shadow_masking_enabled()
+        want_shadow = bool(params.get("shadow_masking"))
+        if want_shadow and shadow_masking_w.disabled:
+            warnings.append(
+                "Shadow masking: needs Mask Clouds + the nir band on Sentinel-2 "
+                "L2A - left off."
+            )
+        else:
+            shadow_masking_w.value = want_shadow
+        if params.get("nir_dark_threshold") is not None:
+            shadow_nir_dark_w.value = float(params["nir_dark_threshold"])
+        if params.get("shadow_proj_distance") is not None:
+            shadow_proj_dist_w.value = float(params["shadow_proj_distance"])
+
+        # 9) Remaining advanced parameters.
+        if params.get("resampling_method") is not None:
+            _set_dropdown_if_valid(
+                resampling_w, params["resampling_method"], "Resampling", warnings
+            )
+        if params.get("tile_handling") is not None and not tile_handling_w.disabled:
+            _set_dropdown_if_valid(
+                tile_handling_w, params["tile_handling"], "Tile handling", warnings
+            )
+        if params.get("partial_scene_handling") is not None and not partial_scene_w.disabled:
+            _set_dropdown_if_valid(
+                partial_scene_w, params["partial_scene_handling"],
+                "Scene coverage", warnings,
+            )
+        if params.get("min_scene_coverage") is not None:
+            min_coverage_w.value = int(round(float(params["min_scene_coverage"]) * 100))
+
+        meta_values = _option_values(scene_metadata_w)
+        wanted_meta = [str(m) for m in (params.get("scene_metadata") or [])]
+        scene_metadata_w.value = tuple(m for m in wanted_meta if m in meta_values)
+        missing_meta = [m for m in wanted_meta if m not in meta_values]
+        if missing_meta:
+            warnings.append(
+                "Scene metadata not published by this source: " + ", ".join(missing_meta)
+            )
+
+        # 10) Temporal composite + statistics.
+        _set_dropdown_if_valid(
+            aggregator_w, params.get("aggregator"), "Temporal composite", warnings
+        )
+        stats_values = _option_values(stats_w)
+        wanted_stats = [str(s) for s in (params.get("stats") or [])]
+        stats_w.value = tuple(s for s in wanted_stats if s in stats_values)
+        missing_stats = [s for s in wanted_stats if s not in stats_values]
+        if missing_stats:
+            warnings.append(
+                "Statistics not available for this mission: " + ", ".join(missing_stats)
+            )
+
+        # 11) Export. The JSON only carries a file output (NetCDF / Zarr); the
+        #     COG folder mode writes null there, so it cannot be told apart from
+        #     "no output set".
+        output = params.get("output")
+        if output:
+            export_mode_w.value = "zarr" if str(output).lower().endswith(".zarr") else "netcdf"
+            export_target_w.value = str(output)
+        else:
+            warnings.append(
+                "Export mode / output path: not stored in the settings - "
+                "kept the current choice."
+            )
+        export_compress_w.value = bool(params.get("compress"))
+        if not export_granule_meta_w.disabled:
+            export_granule_meta_w.value = params.get("metadata_output") is not None
+
+        # 12) Result-panel cloud filter (greyed until a build produces cloud %).
+        scc = params.get("scene_cloud_coverage")
+        result_cloud_max_w.value = 100 if scc is None else int(scc)
+
+        return warnings
+
+    def _paste_settings_clicked(_):
+        """Show / hide the paste box. The kernel cannot read the browser
+        clipboard, so the user pastes into a text area and the settings are
+        applied from its content."""
+        showing = paste_json_box.layout.display != "none"
+        paste_json_box.layout.display = "none" if showing else ""
+        if not showing:
+            paste_json_area_w.value = ""
+            _show_status("📋 Paste the copied settings into the box below.")
+
+    def _on_paste_area_change(change):
+        text = (change["new"] or "").strip()
+        if not text:
+            return
+        try:
+            payload = json.loads(text)
+        except Exception:
+            # Half a paste, or free text: stay quiet until it parses.
+            return
+        try:
+            warnings = _apply_json_settings(payload)
+        except Exception as e:
+            _show_status(_friendly_error(e, "Applying the pasted settings"))
+            return
+
+        paste_json_area_w.value = ""
+        paste_json_box.layout.display = "none"
+        if warnings:
+            _show_status(
+                "✅ Settings applied, except:\n  - " + "\n  - ".join(warnings)
+            )
+        else:
+            _show_status("✅ Settings applied.")
 
     # -------------------------------------------------------------------------
     # File chooser helpers / callbacks (ipyfilechooser)
@@ -4710,6 +5064,8 @@ def datacube_builder(missions_func=missions):
     coreg_resize_btn.on_click(_on_coreg_resize_clicked)
     export_result_btn.on_click(_on_export_result_clicked)
     copy_json_btn.on_click(_copy_json_to_clipboard)
+    paste_json_btn.on_click(_paste_settings_clicked)
+    paste_json_area_w.observe(_on_paste_area_change, names="value")
 
     viz_dropdown_btn.on_click(_on_viz_dropdown_clicked)
     viz_make_gif_btn.on_click(_on_viz_make_gif_clicked)
@@ -6089,9 +6445,11 @@ def datacube_builder(missions_func=missions):
 
     # The Export Current Result button sits right under the Export Options
     # accordion so the "choose format -> export" flow reads top to bottom.
-    # Copy JSON rides along here: both are ways of taking the result away.
+    # Copy Settings rides along here: both are ways of taking the result away.
+    # Paste Settings sits next to it as its counterpart, with the paste box
+    # unfolding underneath the row when it is clicked.
     export_action_row = widgets.HBox(
-        [export_result_btn, copy_json_btn],
+        [export_result_btn, copy_json_btn, paste_json_btn],
         layout=widgets.Layout(gap="8px", flex_flow="row wrap", margin="6px 0 0 0"),
     )
 
@@ -6115,7 +6473,8 @@ def datacube_builder(missions_func=missions):
     # Export Options now lives below Visualization as its own card, with the
     # Export Current Result button attached directly beneath it.
     export_card = widgets.VBox(
-        [export_acc, export_action_row], layout=widgets.Layout(width="100%")
+        [export_acc, export_action_row, paste_json_box],
+        layout=widgets.Layout(width="100%"),
     )
     export_card.add_class("stac2cube-card")
 
@@ -6209,6 +6568,8 @@ def datacube_builder(missions_func=missions):
             "coreg_resize_btn": coreg_resize_btn,
             "export_result_btn": export_result_btn,
             "copy_json_btn": copy_json_btn,
+            "paste_json_btn": paste_json_btn,
+            "paste_json_area": paste_json_area_w,
             "viz_dropdown_btn": viz_dropdown_btn,
             "gif_section": gif_section_w,
             "gif_display_mode": gif_display_mode_w,
@@ -12035,9 +12396,9 @@ def ard_cube_tools():
     )
 
     cr_copy_json_btn = widgets.Button(
-        description="Copy JSON",
+        description="Copy Settings",
         icon="copy",
-        layout=widgets.Layout(width="140px"),  # colorless, like the data cube builder
+        layout=widgets.Layout(width="150px"),  # colorless, like the data cube builder
     )
 
     def _on_first_scene_mode_change(change):
