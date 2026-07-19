@@ -78,30 +78,180 @@ _EXPORT_MODE_REMINDER = (
 )
 
 
+# Tempo of the busy indicator, in seconds.
+_BEAR_HOP = 0.55            # one bear hop
+_BEAR_FALL = 0.35           # crumb falling from the cookie into the row
+_BEAR_BOUNCE = 0.225        # one crumb's up-down in the wave
+_BEAR_STAGGER = 0.11        # delay between neighbouring crumbs
+_BEAR_COOKIE_GAP = 0.5      # beat while a fresh cookie arrives
+_BEAR_PAUSE = 1.2           # final beat before the whole loop restarts
+_BEAR_COOKIES = 5           # cookies on the plate
+_BEAR_BITES = 4             # quarters per cookie
+
+_BEAR_BITE_AT = _BEAR_HOP * 0.45   # bite lands at the top of the hop
+_BEAR_FALL_FROM = -16.0            # px above the row where a crumb spawns
+_BEAR_CRUMBS = _BEAR_COOKIES * _BEAR_BITES
+
+
+def _bear_schedule():
+    """Timeline of one indicator cycle.
+
+    Each hop is a bite: the bear takes a quarter of the current cookie and the
+    bite drops a crumb into the row underneath it. Once a cookie is finished a
+    fresh one pops in, but the crumbs are never cleared - so the wave running
+    through them gets longer with every bite of every cookie, and each round
+    takes longer than the last because the bear waits the wave out.
+
+    Returns (cycle_length, hop_starts, bite_times, crumb_land_times,
+    {crumb_index: [wave_start_times]}, fresh_cookie_times).
+    """
+    t = 0.0
+    hops, bites, lands, fresh = [], [], [], []
+    waves = {i: [] for i in range(1, _BEAR_CRUMBS + 1)}
+    for n in range(1, _BEAR_CRUMBS + 1):
+        hops.append(t)
+        bite = t + _BEAR_BITE_AT
+        land = bite + _BEAR_FALL
+        bites.append(bite)
+        lands.append(land)
+        for i in range(1, n + 1):          # wave across every crumb so far
+            waves[i].append(land + _BEAR_STAGGER * (i - 1))
+        t = land + _BEAR_BOUNCE + _BEAR_STAGGER * (n - 1)
+        if n % _BEAR_BITES == 0 and n < _BEAR_CRUMBS:
+            fresh.append(t + _BEAR_COOKIE_GAP * 0.4)
+            t += _BEAR_COOKIE_GAP
+    return t + _BEAR_PAUSE, hops, bites, lands, waves, fresh
+
+
+def _bear_pct(t, total):
+    return round(100.0 * t / total, 3)
+
+
+def _bear_snap(total):
+    """Epsilon for a change that should be instant rather than interpolated.
+
+    It has to be a fraction of the cycle, not a fixed number of seconds: keyframe
+    positions are percentages rounded to 3 decimals, so a fixed epsilon collapses
+    onto the same percentage once the cycle gets long, and CSS then smoothly
+    interpolates the step instead of snapping it.
+    """
+    return total * 0.0005
+
+
+def _bear_hop_keyframes(total, hops):
+    frames = [(0.0, "translateY(0)")]
+    for s in hops:
+        frames += [
+            (s, "translateY(0)"),
+            (s + _BEAR_HOP * 0.45, "translateY(-8px)"),
+            (s + _BEAR_HOP * 0.9, "translateY(0)"),
+        ]
+    frames.append((total, "translateY(0)"))
+    body = "".join(f"{_bear_pct(t, total)}%{{transform:{v};}}" for t, v in frames)
+    return "@keyframes s2cBearHop{" + body + "}"
+
+
+def _bear_cookie_keyframes(total, bites, fresh):
+    """A quarter vanishes at each bite, with a small recoil; when a cookie is
+    finished the next one pops in at full size."""
+    eps = _bear_snap(total)
+    frames = [(0.0, 0, "translateX(0) scale(1)")]
+    for k, b in enumerate(bites):
+        j = k % _BEAR_BITES
+        frames += [
+            (max(b - eps, 0.0), 25 * j, "translateX(0) scale(1)"),
+            (b, 25 * (j + 1), "translateX(2px) scale(1)"),
+            (min(b + 0.12, total), 25 * (j + 1), "translateX(0) scale(1)"),
+        ]
+    for c in fresh:
+        frames += [
+            (max(c - eps, 0.0), 100, "translateX(0) scale(1)"),
+            (c, 0, "translateX(0) scale(0.5)"),
+            (min(c + 0.22, total), 0, "translateX(0) scale(1)"),
+        ]
+    frames.append((total, 100, "translateX(0) scale(1)"))
+    frames.sort(key=lambda f: f[0])
+    # Clipped from the LEFT: the bear stands to the left of the cookie, so the
+    # edge nearest him is the one that disappears.
+    body = "".join(
+        "%s%%{clip-path:inset(0 0 0 %s%%);-webkit-clip-path:inset(0 0 0 %s%%);"
+        "transform:%s;}" % (_bear_pct(t, total), c, c, tr)
+        for t, c, tr in frames
+    )
+    return "@keyframes s2cCookie{" + body + "}"
+
+
+def _bear_crumb_keyframes(total, bites, lands, waves, i):
+    """Crumb i: hidden -> spawns at the cookie on bite i -> falls into the row
+    below -> then bounces once per wave that follows."""
+    eps = _bear_snap(total)
+    b, land = bites[i - 1], lands[i - 1]
+    frames = [
+        (0.0, 0.0, _BEAR_FALL_FROM),
+        (max(b - eps, 0.0), 0.0, _BEAR_FALL_FROM),   # invisible until bitten
+        (b, 1.0, _BEAR_FALL_FROM),                   # pops in at the cookie
+        (land, 0.55, 0.0),                           # lands in the row
+    ]
+    for s in waves[i]:
+        frames += [
+            (s, 0.55, 0.0),
+            (s + _BEAR_BOUNCE * 0.5, 1.0, -4.0),
+            (s + _BEAR_BOUNCE, 0.55, 0.0),
+        ]
+    frames.append((total, 0.55, 0.0))
+    frames.sort(key=lambda f: f[0])
+    body = "".join(
+        f"{_bear_pct(t, total)}%{{opacity:{o};transform:translateY({y}px);}}"
+        for t, o, y in frames
+    )
+    return "@keyframes s2cCrumb%d{%s}" % (i, body)
+
+
 def _busy_bear_html(lead, tail=""):
-    """Hopping-Mr.-Bear progress indicator with animated dots.
+    """Mr.-Bear-eating-cookies progress indicator.
 
     Browser-side CSS, so it keeps moving even while the kernel is blocked on a
     slow STAC call - shows the user it isn't stuck. `lead` is the main message;
-    optional `tail` is shown after the dots (e.g. a parenthetical note).
+    optional `tail` is shown after it (e.g. a parenthetical note).
     """
+    total, hops, bites, lands, waves, fresh = _bear_schedule()
+    dur = round(total, 3)
+    css = [
+        _bear_hop_keyframes(total, hops),
+        _bear_cookie_keyframes(total, bites, fresh),
+    ]
+    css += [
+        _bear_crumb_keyframes(total, bites, lands, waves, i)
+        for i in range(1, _BEAR_CRUMBS + 1)
+    ]
+    crumb_rules = "".join(
+        ".s2c-crumbs span:nth-child(%d){animation:s2cCrumb%d %ss infinite linear;}"
+        % (i, i, dur)
+        for i in range(1, _BEAR_CRUMBS + 1)
+    )
     tail_span = f"<span style='font-size:13px;'> {tail}</span>" if tail else ""
     return (
         "<style>"
-        "@keyframes s2cBounce{0%,100%{opacity:0.3;transform:translateY(0);}"
-        "50%{opacity:1;transform:translateY(-3px);}}"
-        "@keyframes s2cHop{0%,100%{transform:translateY(0);}"
-        "30%{transform:translateY(-7px);}60%{transform:translateY(0);}}"
-        ".s2c-gen-dots span{display:inline-block;font-weight:700;"
-        "animation:s2cBounce 1.2s infinite;}"
-        ".s2c-gen-dots span:nth-child(2){animation-delay:0.2s;}"
-        ".s2c-gen-dots span:nth-child(3){animation-delay:0.4s;}"
-        ".s2c-bunny{display:inline-block;animation:s2cHop 0.9s infinite ease-in-out;}"
-        "</style>"
-        "<span class='s2c-bunny' style='font-size:13px;'>ʕ•ᴥ•ʔ</span>"
-        f"<span style='font-size:13px;'> {lead}</span>"
-        "<span class='s2c-gen-dots' style='font-size:13px;'>"
-        "<span>.</span><span>.</span><span>.</span></span>"
+        + "".join(css)
+        + ".s2c-bunny{display:inline-block;"
+        "animation:s2cBearHop %ss infinite linear;}" % dur
+        + ".s2c-cookie{display:inline-block;"
+        "animation:s2cCookie %ss infinite linear;}" % dur
+        + ".s2c-crumbs span{display:inline-block;font-weight:700;opacity:0;}"
+        + crumb_rules
+        + "</style>"
+        "<span class='s2c-bunny' style='font-size:13px;'>\u0295\u2022\u1d25\u2022\u0294</span>"
+        # The cookie gets its own positioning context so the crumb row can sit
+        # directly underneath it - the crumbs fall off the cookie, so that is
+        # where they should land.
+        "<span class='s2c-cookie-stack' style='position:relative;"
+        "display:inline-block;margin-left:4px;padding-bottom:16px;'>"
+        "<span class='s2c-cookie' style='font-size:15px;'>\U0001f36a</span>"
+        "<span class='s2c-crumbs' style='position:absolute;left:0;top:15px;"
+        "font-size:16px;letter-spacing:2px;white-space:nowrap;'>"
+        + "".join("<span>.</span>" for _ in range(_BEAR_CRUMBS))
+        + "</span></span>"
+        + f"<span style='font-size:13px;'> {lead}</span>"
         + tail_span
     )
 
