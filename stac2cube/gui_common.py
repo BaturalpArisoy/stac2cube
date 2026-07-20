@@ -665,6 +665,43 @@ def boxed_control(widget):
     return widgets.Box([widget], layout=widgets.Layout(width="100%"))
 
 
+def make_viz_renderer_control():
+    """Renderer picker for the interactive time viewer.
+
+    Returns ``(widget, box)``: the ToggleButtons carrying the renderer value
+    ("static" or "interactive") and a labelled box ready to drop into a layout.
+
+    Both GUIs (builder and editor) offer the same choice, so the control and
+    its wording live here rather than being duplicated per GUI.
+    """
+    w = widgets.ToggleButtons(
+        options=[("Static (fast)", "static"), ("Zoom & pan", "interactive")],
+        value="static",
+        style={"button_width": "130px"},
+        layout=widgets.Layout(margin="0"),
+    )
+    hint = widgets.HTML(
+        "<div style='font-size:11px; color:#6b7280; margin-top:2px;'>"
+        "<b>Static</b>: a plain picture of each scene - lightest and quickest, "
+        "and enough for simply stepping through dates.<br>"
+        "<b>Zoom &amp; pan</b>: the same scene in a live map - scroll to zoom, "
+        "drag to pan, and the zoomed area is kept when you change date or "
+        "bands. Slower per scene and makes the notebook heavier."
+        "</div>"
+    )
+    box = widgets.VBox(
+        [
+            widgets.HTML(
+                "<div style='font-weight:500; line-height:1.2;'>View mode</div>"
+            ),
+            w,
+            hint,
+        ],
+        layout=widgets.Layout(width="100%", gap="2px", margin="0 0 6px 0"),
+    )
+    return w, box
+
+
 def stacked_field(widget, label_text=None):
     """Label on its own row, widget directly below (no help icon)."""
     if label_text is None and hasattr(widget, "description"):

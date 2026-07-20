@@ -53,6 +53,10 @@ dependencies:
   - ipywidgets
   - jupyterlab
   - ipykernel
+  # zoom/pan renderer of the interactive time viewer; anywidget is what lets
+  # plotly's FigureWidget render in JupyterLab.
+  - plotly
+  - anywidget
 
   # --- other tools ---
   - opencv

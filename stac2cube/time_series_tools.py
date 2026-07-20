@@ -790,6 +790,59 @@ def save_timeseries_gif(
     return out_path
 
 
+# ==========================================================
+# PLOTLY (ZOOM/PAN) RENDERING HELPERS
+# ==========================================================
+# The zoomable viewer sends real pixel values to the browser as a go.Image
+# trace rather than a pre-scaled picture. That is deliberate: plotly.js applies
+# crisp-edges (image-rendering: pixelated) styling to image and heatmap traces
+# ONLY - a layout image or any plain <img> gets browser-smoothed, which turns
+# Sentinel-2 pixels into mush exactly when you zoom in to look at them. The
+# cost is payload: plotly 6 serialises uint8 arrays as base64 (~1.33x raw), so
+# a 1000x1000 RGB scene is ~4 MB per redraw. _MAX_DISPLAY_PX bounds that.
+_MAX_DISPLAY_PX = 2500
+
+# On-screen height per figsize inch for the zoomable view. Above matplotlib's
+# 100 dpi on purpose: square-pixel lock means height caps how big the map can
+# be drawn, so a larger value fills more of a wide panel.
+_ZOOM_PX_PER_INCH = 115
+
+
+def _zoom_frame_uint8(img: np.ndarray, max_px: int = _MAX_DISPLAY_PX):
+    """uint8 image (HxW grey, HxWx3 RGB, HxWx4 RGBA) -> (HxWx3 uint8, shrunk).
+
+    go.Image needs three channels, so grey is replicated and any alpha is
+    dropped. Downsampling is nearest-neighbour and reported back to the caller
+    rather than done silently, because a downsampled frame no longer shows
+    true sensor pixels - which is the whole point of this renderer.
+    """
+    arr = np.asarray(img)
+    if arr.dtype != np.uint8:
+        arr = arr.astype(np.uint8, copy=False)
+
+    if arr.ndim == 2:
+        rgb = np.repeat(arr[:, :, None], 3, axis=2)
+    elif arr.ndim == 3 and arr.shape[2] == 3:
+        rgb = arr
+    elif arr.ndim == 3 and arr.shape[2] == 4:
+        rgb = arr[:, :, :3]
+    else:
+        raise ValueError(
+            f"Cannot render an image of shape {arr.shape}; expected 2D grey "
+            "or 3D RGB/RGBA."
+        )
+
+    h, w = rgb.shape[:2]
+    if max(h, w) <= max_px:
+        return np.ascontiguousarray(rgb), False
+
+    scale = max_px / float(max(h, w))
+    new_w, new_h = max(1, int(round(w * scale))), max(1, int(round(h * scale)))
+    # NEAREST: never invent pixel values that were not in the data.
+    pil = Image.fromarray(rgb, mode="RGB").resize((new_w, new_h), Image.NEAREST)
+    return np.ascontiguousarray(np.asarray(pil, dtype=np.uint8)), True
+
+
 def interactive_time_view(
     stac: xr.DataArray,
     widget_type: str = "slider",  # "slider" or "dropdown" (for time)
@@ -797,6 +850,11 @@ def interactive_time_view(
     crop=None,
     modes=("rgb", "false_color", "ndvi", "ndwi"),
     return_time_widget: bool = False,
+    renderer: str = "static",  # "static" (matplotlib) or "interactive" (plotly)
+    max_display_px: int = _MAX_DISPLAY_PX,
+    show_grid: bool = True,
+    show_coords: bool = False,
+    height: int = None,
 ):
     """
     Interactive cube viewer with three visualization sections:
@@ -815,7 +873,73 @@ def interactive_time_view(
     Also accepts a single image without a 'time' dimension (e.g. a temporal
     composite such as a median layer): the time control is hidden and the
     frame is titled with the layer name instead of a date.
+
+    renderer
+    --------
+    "static"      : matplotlib (default). Draws a fresh PNG per interaction.
+                    Lowest overhead and the smallest notebook footprint, but
+                    the frame is a flat picture: no zoom, no pan.
+    "interactive" : plotly FigureWidget. Same pixels and the same stretch
+                    logic, drawn into a live figure with box zoom, scroll
+                    zoom and pan over projected-coordinate axes. The zoomed
+                    area is deliberately kept across date/band changes, so a
+                    feature can be tracked through the time series without
+                    re-zooming ("Reset view" restores the full extent).
+
+    Both renderers share one rendering path, so a scene looks the same in
+    either; only the presentation layer differs.
+
+    The zoomable view sends true pixel values (a go.Image trace), which
+    plotly.js renders with crisp edges - zooming in shows individual sensor
+    pixels as hard squares rather than a smoothed blur. The price is payload:
+    roughly 1.33x the raw uint8 size per redraw (a 1000x1000 RGB scene is
+    ~4 MB), so it is heavier per scene and per saved notebook than "static".
+
+    max_display_px
+        Longest edge sent to the browser (default 2500). Above it the frame is
+        downsampled nearest-neighbour, and zooming then no longer shows true
+        sensor pixels - a note says so when it happens. Raise it to inspect a
+        large cube at full resolution, at the cost of a heavier notebook.
+    show_grid
+        Draw the (deliberately faint grey) coordinate grid. Zoomable view only.
+    show_coords
+        Zoomable view only, default False: show Easting/Northing axis titles
+        and tick labels. Off because the labels take a large share of a screen
+        panel, and this renderer is for exploring pixels rather than for
+        producing figures. The static renderer always keeps its labelled axes,
+        so screenshots for papers and docs are unaffected either way.
+
+    height
+        Zoomable view only: figure height in pixels, overriding the figsize
+        default. This is the direct size control, and it matters because
+        square pixels are locked: the map can never be drawn wider than it is
+        tall, so on a panel wider than it is tall the height is what caps the
+        image and any remaining width shows as side margin. Filling a wide
+        panel completely therefore needs a height close to the panel's width
+        (e.g. height=1200), which is a genuine geometric trade-off, not a bug
+        - the alternative would be stretching pixels out of square.
+
+    Note that hiding the labels is cosmetic only - the image stays
+    georeferenced and zoom/pan still operate in projected coordinates.
     """
+    renderer = str(renderer).lower().strip()
+    if renderer in ("plotly", "zoom", "interactive"):
+        renderer = "interactive"
+    elif renderer in ("matplotlib", "static"):
+        renderer = "static"
+    else:
+        raise ValueError(
+            f"renderer must be 'static' or 'interactive', got {renderer!r}"
+        )
+
+    if renderer == "interactive":
+        try:
+            import plotly.graph_objects as go  # noqa: F401
+        except Exception as e:
+            raise ImportError(
+                "renderer='interactive' needs plotly. Install it "
+                "(`pip install plotly`) or use renderer='static'."
+            ) from e
     has_time = "time" in stac.dims
     static_label = None
     if not has_time:
@@ -1138,7 +1262,12 @@ def interactive_time_view(
         ax.xaxis.offsetText.set_visible(False)
         ax.yaxis.offsetText.set_visible(False)
 
-    def plot_current():
+    def _frame_title(idx, suffix):
+        if has_time:
+            return time_values[idx].strftime("%d-%m-%Y") + suffix
+        return str(static_label) + suffix
+
+    def _plot_static():
         idx = int(time_w.value)
 
         with out:
@@ -1150,10 +1279,7 @@ def interactive_time_view(
                 print(f"View not available: {e}")
                 return
 
-            if has_time:
-                title = time_values[idx].strftime("%d-%m-%Y") + suffix
-            else:
-                title = str(static_label) + suffix
+            title = _frame_title(idx, suffix)
 
             fig, ax = plt.subplots(figsize=figsize)
 
@@ -1179,6 +1305,182 @@ def interactive_time_view(
             plt.show()
             plt.close(fig)
 
+    # ------------------------------------------------------------------
+    # Zoomable renderer (plotly)
+    # ------------------------------------------------------------------
+    # Built lazily so the static path never imports plotly.
+    fig_w = None
+    reset_btn = None
+
+    # Pixel geometry straight from the cube's own coordinates. dx/dy carry the
+    # step INCLUDING its sign, so a descending-y cube (dy < 0) is placed
+    # north-up without flipping any array.
+    _xs = np.asarray(stac_c["x"].values, dtype="float64")
+    _ys = np.asarray(stac_c["y"].values, dtype="float64")
+    _nx_full, _ny_full = int(_xs.size), int(_ys.size)
+    _dx_full = float(_xs[1] - _xs[0]) if _nx_full > 1 else 1.0
+    _dy_full = float(_ys[1] - _ys[0]) if _ny_full > 1 else -1.0
+
+    # x0/y0 are the OUTER EDGE of the first pixel, not its centre: the trace
+    # spans dx*nx from there, so this is what makes the drawn footprint equal
+    # the raster's true footprint. Using the centre (what px.imshow does) puts
+    # the image half a pixel off, and in opposite directions for ascending vs
+    # descending y, so the same ground would land differently for two cubes
+    # that only differ in row order.
+    _x0_edge = float(_xs[0] - _dx_full / 2.0)
+    _y0_edge = float(_ys[0] - _dy_full / 2.0)
+
+    # Drawn span of the whole raster; used for the initial view and for Reset.
+    _x_edges = sorted([_x0_edge, _x0_edge + _dx_full * _nx_full])
+    _y_edges = sorted([_y0_edge, _y0_edge + _dy_full * _ny_full])
+
+    def _build_plotly_figure():
+        import plotly.graph_objects as go
+
+        fig = go.FigureWidget()
+        # Placeholder image; _plot_interactive fills in the real pixels.
+        fig.add_trace(
+            go.Image(
+                z=np.zeros((1, 1, 3), dtype=np.uint8),
+                x0=_x0_edge,
+                dx=_dx_full,
+                y0=_y0_edge,
+                dy=_dy_full,
+                hoverinfo="skip",
+            )
+        )
+
+        # Grid: present for orientation but deliberately quiet, so it reads as
+        # a background reference instead of competing with the imagery.
+        #
+        # Axis titles and tick labels are OFF by default here. This view is for
+        # exploring pixels on screen, and the Easting/Northing furniture eats a
+        # large share of the panel. The static renderer keeps its full labelled
+        # axes untouched - that is the one used for figures in papers and docs.
+        grid_kw = {
+            "showgrid": bool(show_grid),
+            "gridcolor": "rgba(140,140,140,0.22)",
+            "gridwidth": 1,
+            "zeroline": False,
+            "showline": False,
+            "showticklabels": bool(show_coords),
+            "ticks": "outside" if show_coords else "",
+            "tickcolor": "rgba(140,140,140,0.45)",
+            "tickfont": {"color": "#6b7280", "size": 10},
+        }
+        # constraintoward: the square-pixel lock has to give up either range or
+        # domain somewhere, and plotly parks the slack at the axis START by
+        # default - which is what put all the empty space on the right. Centre
+        # it so whatever is left over is split evenly and reads as deliberate.
+        fig.update_xaxes(
+            range=list(_x_edges),
+            title_text="Easting (m)" if show_coords else None,
+            constraintoward="center",
+            **grid_kw,
+        )
+        # scaleanchor keeps one map unit square, so a pixel stays a square and
+        # shapes are not distorted while zooming. No 'constrain' is set: the
+        # default range-constraint is what plotly itself uses with scaleanchor
+        # and it survives fast scroll-zoom better than constrain="domain".
+        fig.update_yaxes(
+            range=list(_y_edges),
+            title_text="Northing (m)" if show_coords else None,
+            scaleanchor="x",
+            scaleratio=1,
+            constraintoward="middle",
+            **grid_kw,
+        )
+        # Reclaim the space the labels were using; without them the panel only
+        # needs room for the title.
+        margin = (
+            {"l": 70, "r": 20, "t": 50, "b": 60}
+            if show_coords
+            else {"l": 8, "r": 8, "t": 40, "b": 8}
+        )
+        # Width is left to the container (autosize) so the map uses the full
+        # width of the panel instead of a fixed box.
+        #
+        # Height is the real size control here. With square pixels locked, the
+        # drawn map can only be as wide as it is tall, so on a panel wider than
+        # it is tall HEIGHT is what caps the image and leaves side space. Hence
+        # 115 px/inch rather than matplotlib's 100: it makes the map noticeably
+        # bigger and eats into that gap. Pass a taller figsize to push further.
+        fig.update_layout(
+            autosize=True,
+            width=None,
+            height=int(height) if height else int(figsize[1] * _ZOOM_PX_PER_INCH),
+            margin=margin,
+            dragmode="pan",
+            plot_bgcolor="white",
+            title={"text": "", "x": 0.5, "xanchor": "center"},
+        )
+        # Scroll-to-zoom is off by default in plotly; on a map view it is the
+        # interaction users reach for first. "responsive" lets the figure
+        # re-fit when the browser window or panel is resized.
+        fig._config = {
+            "scrollZoom": True,
+            "responsive": True,
+            "displaylogo": False,
+            "modeBarButtonsToRemove": ["select2d", "lasso2d"],
+        }
+        return fig
+
+    def _plot_interactive():
+        idx = int(time_w.value)
+
+        try:
+            img, suffix, cmap = _render_current(idx)
+        except Exception as e:
+            with out:
+                clear_output(wait=True)
+                print(f"View not available: {e}")
+            return
+
+        title = _frame_title(idx, suffix)
+
+        with out:
+            clear_output(wait=True)
+
+        if img is None:
+            with fig_w.batch_update():
+                fig_w.data[0].visible = False
+                fig_w.layout.title.text = title + "  -  Missing Data"
+            return
+
+        z, shrunk = _zoom_frame_uint8(img, max_px=max_display_px)
+        if shrunk:
+            with out:
+                print(
+                    f"Note: this scene is larger than {max_display_px} px, so "
+                    "the display is downsampled and zooming will NOT show true "
+                    "sensor pixels. Raise max_display_px (heavier notebook) or "
+                    "crop the cube to inspect them. Data itself is untouched."
+                )
+
+        # A downsampled frame covers the same ground with fewer, bigger pixels,
+        # so the step has to grow to keep the raster georeferenced.
+        h, w = z.shape[:2]
+        dx = _dx_full * _nx_full / float(w)
+        dy = _dy_full * _ny_full / float(h)
+
+        # Only the pixels and the title change: axis ranges are left untouched
+        # on purpose so a zoomed-in area stays put when the user steps through
+        # dates or swaps bands.
+        with fig_w.batch_update():
+            tr = fig_w.data[0]
+            tr.z = z
+            tr.x0, tr.dx = _x0_edge, dx
+            tr.y0, tr.dy = _y0_edge, dy
+            tr.visible = True
+            fig_w.layout.title.text = title
+
+    def _reset_view(_btn):
+        with fig_w.batch_update():
+            fig_w.layout.xaxis.range = list(_x_edges)
+            fig_w.layout.yaxis.range = list(_y_edges)
+
+    plot_current = _plot_static if renderer == "static" else _plot_interactive
+
     def _on_section_change(_change):
         _sync_section_visibility()
         plot_current()
@@ -1196,7 +1498,55 @@ def interactive_time_view(
         [section_w, preset_box, band_box, custom_box, stretch_box, time_w],
         layout=widgets.Layout(gap="6px"),
     )
-    display(widgets.VBox([controls, out]))
+
+    if renderer == "static":
+        display(widgets.VBox([controls, out]))
+    else:
+        fig_w = _build_plotly_figure()
+        reset_btn = widgets.Button(
+            description="Reset view",
+            icon="refresh",
+            tooltip="Zoom back out to the full cube extent",
+            layout=widgets.Layout(width="130px"),
+        )
+        reset_btn.on_click(_reset_view)
+        zoom_hint = widgets.HTML(
+            "<div style='font-size:11px; color:#6b7280; margin-left:4px;'>"
+            "Scroll to zoom, drag to pan, double-click to reset. The zoom "
+            "is kept when you change date or bands, so you can follow one "
+            "spot through the time series."
+            "</div>"
+        )
+        # A FigureWidget has no settable ipywidgets width: `.layout` is
+        # plotly's figure layout, and `_widget_layout` is that same figure
+        # layout synced to the frontend - neither is CSS. So the widget's own
+        # DOM node keeps its natural width and an autosized plot has nothing
+        # to expand into, no matter how wide the wrapper is. `add_class` does
+        # sync (via _dom_classes), so a stylesheet is the way in.
+        fig_w.add_class("s2c-zoom-fig")
+        fig_css = widgets.HTML(
+            "<style>"
+            ".s2c-zoom-fig, .s2c-zoom-fig > div, .s2c-zoom-fig .js-plotly-plot,"
+            ".s2c-zoom-fig .plot-container, .s2c-zoom-fig .svg-container"
+            "{width:100% !important; max-width:100% !important;}"
+            "</style>"
+        )
+        fig_box = widgets.Box(
+            [fig_w], layout=widgets.Layout(width="100%", overflow="hidden")
+        )
+        display(
+            widgets.VBox(
+                [
+                    fig_css,
+                    controls,
+                    widgets.HBox([reset_btn, zoom_hint]),
+                    fig_box,
+                    out,
+                ],
+                layout=widgets.Layout(width="100%"),
+            )
+        )
+
     plot_current()
 
     if return_time_widget:

@@ -4,9 +4,34 @@ Builds the initial spectral-temporal data cube from a STAC archive.
 
 ---
 
-## Recommended: build the JSON with the GUI
+## Fastest: let the GUI submit for you
 
-The easiest and safest way to produce a valid config is the **Data Cube Builder**:
+If you are running the notebook **on terrabyte**, the **Data Cube Builder** can do
+steps 2 and 3 of the common guide by itself:
+
+1. Open `interactive/User_Interface_Tools.ipynb`.
+2. Run **Data Cube Builder** and set your parameters interactively.
+3. Click **Submit SLURM**.
+
+That writes the current settings into `build_data_cube.json` and runs
+`sbatch ../config_cpu.cmd` for you - no editing, no terminal. The Status panel
+reports the job id and where its logs land.
+
+> The **one-time setup** (section 1 of [`../README.md`](../README.md): your email
+> and account in `config_cpu.cmd`, and the micromamba env line) is still yours to
+> do. The button checks it and refuses to submit while the `<e-mail>`,
+> `<account>` or `/dss/.../envs` placeholders are still there, rather than
+> queuing a job that would fail.
+>
+> The button also needs `sbatch` to exist, so it does nothing on a laptop - there,
+> use Copy Settings below.
+
+---
+
+## Recommended elsewhere: build the JSON with the GUI
+
+The easiest and safest way to produce a valid config by hand is the **Data Cube
+Builder**:
 
 1. Open `interactive/User_Interface_Tools.ipynb`.
 2. Run **Data Cube Builder** and set your parameters interactively.

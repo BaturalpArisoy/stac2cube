@@ -3,6 +3,8 @@ import io
 import json
 import os
 import re
+import shutil
+import subprocess
 import tempfile
 from contextlib import redirect_stdout
 from datetime import date as _date, datetime as _datetime
@@ -66,6 +68,7 @@ from .gui_common import (
     field_group as _field_group,
     boxed_control as _boxed,
     help_button as _help_button,
+    make_viz_renderer_control as _make_viz_renderer_control,
 )
 
 
@@ -1824,6 +1827,17 @@ def datacube_builder(missions_func=missions):
         icon="paste",
         layout=widgets.Layout(width="150px"),
     )
+    # One click instead of "Copy Settings -> paste into build_data_cube.json ->
+    # run submit.sh": writes the very same settings JSON into the SLURM feature
+    # folder and calls sbatch on it. Only the one-time setup (email / account in
+    # config_cpu.cmd, the micromamba env line) stays the user's job - the button
+    # refuses to submit while those placeholders are still in place.
+    submit_slurm_btn = widgets.Button(
+        description="Submit SLURM",
+        icon="paper-plane",
+        layout=widgets.Layout(width="150px"),
+    )
+    submit_slurm_btn.style.button_color = "#0ea5e9"
     paste_json_area_w = widgets.Textarea(
         value="",
         placeholder='Paste the copied settings here (Ctrl+V) - {"parameters": {...}}',
@@ -1850,6 +1864,8 @@ def datacube_builder(missions_func=missions):
         layout=widgets.Layout(width="260px"),
         disabled=True,
     )
+
+    viz_renderer_w, viz_renderer_box = _make_viz_renderer_control()
 
     # Multi-feature picker: choose which cube (polygon feature) the viz tools act
     # on. Only shown when a build returns several features.
@@ -3970,6 +3986,166 @@ def datacube_builder(missions_func=missions):
             _show_status(_friendly_error(e, "Copying the settings"))
 
     # -------------------------------------------------------------------------
+    # Submit SLURM: Copy Settings + the manual file/terminal steps in one click.
+    #
+    # It writes the current settings into slurm/1_build_data_cube/
+    # build_data_cube.json and runs `sbatch ../config_cpu.cmd` from that folder -
+    # exactly what submit.sh does. Everything from slurm/README.md section 1
+    # (one-time setup) is deliberately NOT automated: the account/email and the
+    # micromamba env line are per-user, so the button checks them and stops with
+    # instructions rather than submitting a job that is guaranteed to fail.
+    # -------------------------------------------------------------------------
+    SLURM_FEATURE_DIR = (
+        Path(__file__).resolve().parents[1] / "slurm" / "1_build_data_cube"
+    )
+    SLURM_CONFIG_CMD = "../config_cpu.cmd"
+
+    def _slurm_setup_problems(feature_dir):
+        """Return a list of one-time-setup problems that would make sbatch fail
+        or make the job die immediately. Empty list means good to go."""
+        problems = []
+        cfg = (feature_dir / SLURM_CONFIG_CMD).resolve()
+
+        if not feature_dir.is_dir():
+            problems.append(
+                f"SLURM folder not found: {feature_dir}. This button needs the "
+                "repository's slurm/ folder next to the stac2cube package."
+            )
+            return problems
+
+        if not cfg.is_file():
+            problems.append(f"Batch script not found: {cfg}")
+            return problems
+
+        try:
+            cfg_text = cfg.read_text(encoding="utf-8", errors="replace")
+        except Exception as e:
+            problems.append(f"Cannot read {cfg}: {e}")
+            return problems
+
+        # Leftover <...> placeholders -> "Invalid directive found in batch
+        # script" (slurm/README.md 1.2).
+        if "--mail-user=<" in cfg_text:
+            problems.append(
+                f"{cfg.name}: --mail-user is still the <e-mail> placeholder."
+            )
+        if "--account=<" in cfg_text:
+            problems.append(
+                f"{cfg.name}: --account is still the <account> placeholder."
+            )
+
+        # The env line the job actually runs (slurm/README.md 1.3). Only the
+        # uncommented one matters.
+        run_lines = [
+            ln.strip() for ln in cfg_text.splitlines()
+            if ln.strip().startswith("micromamba run")
+        ]
+        if not run_lines:
+            problems.append(
+                f"{cfg.name}: no active 'micromamba run ... python slurm_run.py' "
+                "line - uncomment either the local (-n) or the shared DSS (-p) one."
+            )
+        elif any("/dss/.../" in ln for ln in run_lines):
+            problems.append(
+                f"{cfg.name}: the active micromamba line still points at the "
+                "'/dss/.../envs/stac2cube' placeholder - set your real env path, "
+                "or switch to the local '-n stac2cube' line."
+            )
+
+        return problems
+
+    def _on_submit_slurm_clicked(_):
+        """Write build_data_cube.json from the form and sbatch the CPU job."""
+        try:
+            feature_dir = SLURM_FEATURE_DIR
+
+            # 1) sbatch has to exist. On a laptop it does not - say so plainly
+            #    instead of writing the JSON and failing halfway. Resolve it to a
+            #    full path here and run that: a bare name is not reliably found
+            #    by subprocess (no shell, and no PATHEXT handling on Windows).
+            sbatch_exe = shutil.which("sbatch")
+            if sbatch_exe is None:
+                _show_status(
+                    "❌ No 'sbatch' command on this machine, so nothing was "
+                    "submitted and no file was written.\n"
+                    "   Submit SLURM only works where SLURM lives (a terrabyte "
+                    "login node / the terrabyte portal).\n"
+                    "   From here, use Copy Settings and follow slurm/README.md."
+                )
+                return
+
+            # 2) One-time setup must be done (README section 1).
+            problems = _slurm_setup_problems(feature_dir)
+            if problems:
+                _show_status(
+                    "❌ SLURM one-time setup is incomplete - nothing submitted:\n"
+                    + "\n".join(f"   - {p}" for p in problems)
+                    + "\n   See slurm/README.md section 1 (one-time setup)."
+                )
+                return
+
+            # 3) Warn - but do not block - on settings that make for a pointless
+            #    job. An HPC run with output null computes and writes nothing.
+            json_text = _build_json_syntax_text()
+            payload = json.loads(json_text)
+            params = payload.get("parameters", {})
+            notes = []
+            if not params.get("output"):
+                notes.append(
+                    "'output' is null (Export mode is Lazy or GeoTIFFs), so the "
+                    "job will build the cube and write nothing."
+                )
+            polygon_val = params.get("polygon")
+            if isinstance(polygon_val, str) and not os.path.exists(polygon_val):
+                notes.append(
+                    f"polygon path does not exist here: {polygon_val} (fine if "
+                    "the path is valid on the cluster)."
+                )
+
+            # 4) Write the config, exactly the content Copy Settings produces.
+            config_path = feature_dir / "build_data_cube.json"
+            config_path.write_text(json_text + "\n", encoding="utf-8")
+
+            # 5) sbatch it the same way submit.sh does: from the feature folder,
+            #    so slurm_run.py and the JSON next to it are picked up.
+            proc = subprocess.run(
+                [sbatch_exe, SLURM_CONFIG_CMD],
+                cwd=str(feature_dir),
+                capture_output=True,
+                text=True,
+            )
+
+            note_text = (
+                "\n" + "\n".join(f"   ⚠ {n}" for n in notes) if notes else ""
+            )
+
+            if proc.returncode != 0:
+                _show_status(
+                    f"❌ sbatch failed (exit {proc.returncode}).\n"
+                    f"   Settings were written to {config_path}\n"
+                    f"   {(proc.stderr or proc.stdout or '').strip()}"
+                    + note_text
+                )
+                return
+
+            # sbatch prints "Submitted batch job 12345"
+            out = (proc.stdout or "").strip()
+            job_id = out.split()[-1] if out else "?"
+            log_dir = (feature_dir / ".." / "log").resolve()
+            _show_status(
+                f"✅ Submitted batch job {job_id}\n"
+                f"   Settings: {config_path}\n"
+                f"   Logs: {log_dir} (stac2cube_output.{job_id}.out / "
+                f"stac2cube_error.{job_id}.err)\n"
+                "   Track it at https://portal.terrabyte.lrz.de -> Jobs -> "
+                "Active Jobs."
+                + note_text
+            )
+
+        except Exception as e:
+            _show_status(_friendly_error(e, "Submitting the SLURM job"))
+
+    # -------------------------------------------------------------------------
     # Paste Settings: the reverse of Copy Settings - read a settings JSON and
     # push every parameter it carries back into the widgets.
     #
@@ -4728,7 +4904,11 @@ def datacube_builder(missions_func=missions):
             with viz_out:
                 clear_output()
                 print("Note: Scenes are computed on demand, so changing the date or bands may take a moment depending on your machine.")
-                out = interactive_time_view(stac=da, widget_type="dropdown")
+                out = interactive_time_view(
+                    stac=da,
+                    widget_type="dropdown",
+                    renderer=str(viz_renderer_w.value),
+                )
                 if out is not None:
                     display(out)
 
@@ -5065,6 +5245,7 @@ def datacube_builder(missions_func=missions):
     export_result_btn.on_click(_on_export_result_clicked)
     copy_json_btn.on_click(_copy_json_to_clipboard)
     paste_json_btn.on_click(_paste_settings_clicked)
+    submit_slurm_btn.on_click(_on_submit_slurm_clicked)
     paste_json_area_w.observe(_on_paste_area_change, names="value")
 
     viz_dropdown_btn.on_click(_on_viz_dropdown_clicked)
@@ -5391,15 +5572,27 @@ def datacube_builder(missions_func=missions):
             import leafmap
         except Exception:
             return None
-        # Default view: Istanbul across the Bosphorus, framing both the European
-        # and Asian sides ([lat, lon]).
-        m = leafmap.Map(center=[41.1032, 29.0550], zoom=10.6)
+        # Default view: the whole world, centred slightly north of the equator
+        # so most of the land sits in frame ([lat, lon]).
+        m = leafmap.Map(center=[20.0, 0.0], zoom=2)
         m.layout.height = "60vh"
         m.layout.min_height = "320px"
         m.layout.max_height = "640px"
         m.layout.width = "100%"
+        # Hybrid-style background, stacked by hand: satellite imagery at the
+        # bottom, place names on top. The label tile is ~97% transparent, so it
+        # adds names without hiding any imagery - an OpenStreetMap tile is fully
+        # painted and would wash the imagery out even at reduced opacity.
+        # leafmap's own "HYBRID" basemap needs a GOOGLE_MAPS_API_KEY and
+        # silently falls back to label-free Esri imagery without one.
         try:
-            m.add_basemap("Esri.WorldImagery")  # default: satellite
+            # Drop leafmap's default OSM base layer; the imagery replaces it
+            # (layers render in the order they are added).
+            for layer in list(m.layers):
+                if getattr(layer, "name", "") == "OpenStreetMap":
+                    m.remove(layer)
+            m.add_basemap("Esri.WorldImagery")             # background
+            m.add_basemap("CartoDB.DarkMatterOnlyLabels")  # labels only
         except Exception:
             pass
         state["draw_map"] = m
@@ -5426,9 +5619,10 @@ def datacube_builder(missions_func=missions):
                         "• Use the tools at the <b>top-left</b> of the map to draw your area.<br>"
                         "&nbsp;&nbsp;Tip: choose <b>“Draw a rectangle”</b> to maximize "
                         "co-registration and super-resolution efficiency.<br>"
-                        "• Default background is <b>Satellite (Esri)</b>. To change it, open "
-                        "the toolbar at the <b>top-right</b> of the map and choose "
-                        "<b>Change basemap</b>.</div>"
+                        "• Default background is <b>Satellite (Esri)</b> with <b>place "
+                        "names</b> on top. To change it, open the toolbar at the "
+                        "<b>top-right</b> of the map and click <b>Layers</b> (next to "
+                        "Toolbar button).</div>"
                     ),
                     m,
                     widgets.HBox([use_drawn_btn], layout=widgets.Layout(gap="6px")),
@@ -6314,7 +6508,7 @@ def datacube_builder(missions_func=missions):
                 "1) Interactive View",
                 # The output area the viewer renders into lives INSIDE the
                 # group, so collapsing the header hides the opened map too.
-                [viz_dropdown_btn, viz_out],
+                [viz_renderer_box, viz_dropdown_btn, viz_out],
                 subtitle="Explore the cube scene by scene: presets (RGB, false "
                 "color, indices), any single band in grey levels, or a custom "
                 "R/G/B band combination. The viewer opens below.",
@@ -6449,7 +6643,7 @@ def datacube_builder(missions_func=missions):
     # Paste Settings sits next to it as its counterpart, with the paste box
     # unfolding underneath the row when it is clicked.
     export_action_row = widgets.HBox(
-        [export_result_btn, copy_json_btn, paste_json_btn],
+        [export_result_btn, copy_json_btn, paste_json_btn, submit_slurm_btn],
         layout=widgets.Layout(gap="8px", flex_flow="row wrap", margin="6px 0 0 0"),
     )
 
@@ -6569,8 +6763,10 @@ def datacube_builder(missions_func=missions):
             "export_result_btn": export_result_btn,
             "copy_json_btn": copy_json_btn,
             "paste_json_btn": paste_json_btn,
+            "submit_slurm_btn": submit_slurm_btn,
             "paste_json_area": paste_json_area_w,
             "viz_dropdown_btn": viz_dropdown_btn,
+            "viz_renderer": viz_renderer_w,
             "gif_section": gif_section_w,
             "gif_display_mode": gif_display_mode_w,
             "gif_band": gif_band_dd,
@@ -8028,6 +8224,8 @@ def datacube_editor():
         disabled=True,
     )
 
+    viz_renderer_w, viz_renderer_box = _make_viz_renderer_control()
+
     gif_display_mode_w = widgets.Dropdown(
         options=[
             ("rgb", "rgb"),
@@ -9449,7 +9647,11 @@ def datacube_editor():
                 clear_output()
                 if isinstance(state["current"], xr.Dataset) and da.name != "Spectral_Temporal_Stack":
                     print(f"ℹ️ Visualizing dataset variable: {da.name}")
-                out = interactive_time_view(stac=da, widget_type="dropdown")
+                out = interactive_time_view(
+                    stac=da,
+                    widget_type="dropdown",
+                    renderer=str(viz_renderer_w.value),
+                )
                 if out is not None:
                     display(out)
         except Exception as e:
@@ -10224,7 +10426,7 @@ def datacube_editor():
                 "1) Interactive View",
                 # The output area the viewer renders into lives INSIDE the
                 # group, so collapsing the header hides the opened map too.
-                [viz_dropdown_btn, viz_out],
+                [viz_renderer_box, viz_dropdown_btn, viz_out],
                 subtitle="Explore the cube scene by scene: presets (RGB, false "
                 "color, indices), any single band in grey levels, or a custom "
                 "R/G/B band combination. The viewer opens below.",
@@ -10392,6 +10594,7 @@ def datacube_editor():
             "export_target": export_target_w,
             "export_current_btn": export_current_btn,
             "viz_dropdown_btn": viz_dropdown_btn,
+            "viz_renderer": viz_renderer_w,
             "gif_section": gif_section_w,
             "gif_display_mode": gif_display_mode_w,
             "gif_band": gif_band_dd,

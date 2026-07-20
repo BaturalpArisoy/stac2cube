@@ -29,7 +29,7 @@ dependencies = [
 [project.optional-dependencies]
 geo = ["rioxarray", "rasterio", "fiona", "geopandas", "shapely", "pyproj"]
 io = ["netCDF4", "h5netcdf"]
-notebook = ["ipython", "ipykernel", "ipywidgets", "jupyterlab", "matplotlib", "Pillow", "branca", "leafmap"]
+notebook = ["ipython", "ipykernel", "ipywidgets", "jupyterlab", "matplotlib", "Pillow", "branca", "leafmap", "plotly", "anywidget"]
 tools = ["whitebox", "opencv-python"]
 coreg = ["arosics", "geoarray"]
 ml = [
