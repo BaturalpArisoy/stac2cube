@@ -4170,11 +4170,34 @@ def datacube_builder(missions_func=missions):
 
             # 5) sbatch it the same way submit.sh does: from the feature folder,
             #    so slurm_run.py and the JSON next to it are picked up.
+            #
+            #    The environment needs cleaning first. On the terrabyte portal the
+            #    notebook kernel itself runs INSIDE a SLURM job, so the kernel
+            #    environment is full of SLURM_* variables describing THAT job.
+            #    sbatch treats those as defaults and lets them override the
+            #    script's own #SBATCH directives - SLURM_JOB_ACCOUNT beats
+            #    --account, SLURM_CLUSTERS beats --clusters - which is how a
+            #    correct config still gets "Access/permission denied". A shell
+            #    started from a login node has none of them, which is why the
+            #    same submit.sh works there by hand.
+            #
+            #    SLURM_CONF is kept: it points at the site's slurm.conf and
+            #    dropping it can stop sbatch from finding the cluster at all.
+            submit_env = {
+                k: v for k, v in os.environ.items()
+                if not k.startswith("SLURM_") or k == "SLURM_CONF"
+            }
+            stripped = sorted(
+                k for k in os.environ
+                if k.startswith("SLURM_") and k != "SLURM_CONF"
+            )
+
             proc = subprocess.run(
                 [sbatch_exe, SLURM_CONFIG_CMD],
                 cwd=str(feature_dir),
                 capture_output=True,
                 text=True,
+                env=submit_env,
             )
 
             note_text = (
@@ -4182,10 +4205,40 @@ def datacube_builder(missions_func=missions):
             )
 
             if proc.returncode != 0:
+                err = (proc.stderr or proc.stdout or "").strip()
+
+                # "Access/permission denied" is almost always the account or the
+                # cluster/partition, not a broken config file - point at the
+                # things the user can actually check.
+                hints = []
+                if "denied" in err.lower() or "invalid account" in err.lower():
+                    cfg_file = (feature_dir / SLURM_CONFIG_CMD).resolve()
+                    hints.append(
+                        f"Check --account in {cfg_file} against a real job at "
+                        "https://portal.terrabyte.lrz.de/pun/sys/dashboard/"
+                        "activejobs -> any active job -> Account."
+                    )
+                    hints.append(
+                        "Check that your account may use --clusters / "
+                        "--partition from that same file."
+                    )
+                    hints.append(
+                        "Compare by hand in a login-node terminal: "
+                        f"cd {feature_dir} && sbatch {SLURM_CONFIG_CMD}"
+                    )
+                if stripped:
+                    hints.append(
+                        "This notebook is running inside a SLURM job; these "
+                        "inherited variables were removed before submitting: "
+                        + ", ".join(stripped)
+                    )
+
                 _show_status(
                     f"❌ sbatch failed (exit {proc.returncode}).\n"
-                    f"   Settings were written to {config_path}\n"
-                    f"   {(proc.stderr or proc.stdout or '').strip()}"
+                    f"   {err}\n"
+                    f"   Settings were written to {config_path} "
+                    "(nothing is queued).\n"
+                    + "\n".join(f"   - {h}" for h in hints)
                     + note_text
                 )
                 return
