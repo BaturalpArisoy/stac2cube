@@ -354,6 +354,26 @@ def clip_stac(stac, polygon, crs=None, bbox_crs="EPSG:4326"):
 
     # Reproject polygon/bbox to data CRS and clip
     pproj = gdf.to_crs(crs)
+
+    # rioxarray's clip runs `fillna(rio.nodata)` over the WHOLE cropped cube
+    # whenever the cube carries a non-NaN nodata value (rioxarray
+    # _clip_xarray). odc-stac stamps the raw DN fill `nodata: 0` on every
+    # loaded band and that attr survives scaling and the band concat, so on a
+    # scaled float cube the fill would turn the outside-polygon area AND every
+    # existing NaN hole (masked clouds, swath gaps) into 0.0 - a valid
+    # reflectance value, indistinguishable from data. (Whether the attr is
+    # still present at clip time depends on the exact build path - a temporal
+    # composite drops attrs and so clipped to NaN, a plain build kept nodata=0
+    # and clipped to zeros.) On a float cube NaN is the only honest no-data,
+    # so drop the stale nodata declarations before clipping. Integer cubes
+    # (e.g. a uint8 mask cube), which cannot hold NaN, keep their declared
+    # nodata. Encoding _FillValue is left alone: an encoded nodata already
+    # makes rio.clip fill with NaN, and exports still need it.
+    if np.issubdtype(stac.dtype, np.floating):
+        stac = stac.copy(deep=False)  # attrs dict is copied; caller unaffected
+        for _k in ("_FillValue", "missing_value", "fill_value", "nodata"):
+            stac.attrs.pop(_k, None)
+
     stac = stac.rio.clip(pproj.geometry.values, crs=crs, drop=True)
 
     # Store CRS + original transform back as attrs

@@ -90,28 +90,82 @@ def _apply_crop(stac_mode: xr.DataArray, crop):
 # MISSING FRAME DETECTION
 # ==========================================================
 def _missing_frame(
-    arr: np.ndarray, nan_fraction_thresh=0.9, variance_thresh=1e-12
+    arr: np.ndarray, nan_fraction_thresh=0.9, variance_thresh=1e-12,
+    min_finite=None
 ) -> bool:
     """
     Robust missing test:
-    - mostly NaN
+    - too few valid pixels
     - or near-constant frame (all zeros / no signal)
+
+    ``min_finite`` is an absolute number of finite pixels below which the frame
+    counts as missing. When given it REPLACES the whole-array NaN-fraction
+    test, which is meaningless for a sparse AOI: a polygon following a river
+    covers a few percent of its bounding box, so every clipped frame is >90%
+    NaN by construction and the fraction test would call the whole cube
+    missing. Callers pass a fraction of the cube's own valid-pixel footprint
+    here (see _FootprintTracker), which is the same footprint-relative logic
+    compute_cloud_percentage already uses.
     """
     if arr.size == 0:
         return True
 
-    nan_frac = np.mean(~np.isfinite(arr))
-    if nan_frac >= nan_fraction_thresh:
+    finite_mask = np.isfinite(arr)
+    n_finite = int(finite_mask.sum())
+    if n_finite == 0:
         return True
 
-    finite = arr[np.isfinite(arr)]
-    if finite.size == 0:
+    if min_finite is None:
+        if 1.0 - n_finite / arr.size >= nan_fraction_thresh:
+            return True
+    elif n_finite < max(int(min_finite), _MIN_ABS_FINITE):
         return True
 
-    if np.nanvar(finite) <= variance_thresh:
+    if np.nanvar(arr[finite_mask]) <= variance_thresh:
         return True
 
     return False
+
+
+# A frame carrying fewer valid pixels than this is missing whatever the
+# footprint says: it guards the first-frame bootstrap of _FootprintTracker,
+# where the running maximum is still 0 and every threshold would be 0.
+_MIN_ABS_FINITE = 64
+
+# Share of the observed footprint a frame must reach to count as imaged.
+_FOOTPRINT_MISSING_FRAC = 0.05
+
+
+class _FootprintTracker:
+    """Running valid-pixel footprint of a cube, learned from rendered frames.
+
+    The AOI footprint is not known up front without reading the whole cube, so
+    it is approximated by the largest finite-pixel count seen so far, per frame
+    shape (a 2D single-band frame and a 3D RGB frame of the same cube have
+    different counts). The maximum only grows, so the estimate converges to the
+    true footprint as soon as one well-imaged scene has been displayed.
+
+    This keeps the two cases the NaN-fraction test used to cover: a fully
+    cloud-masked or empty scene still has ~no valid pixels and reads missing,
+    while a sparse-AOI scene is judged against the AOI, not the bounding box.
+    """
+
+    def __init__(self, frac: float = _FOOTPRINT_MISSING_FRAC):
+        self._max_finite = {}
+        self._frac = float(frac)
+
+    def is_missing(self, arr: np.ndarray, variance_thresh=1e-12) -> bool:
+        if arr is None or arr.size == 0:
+            return True
+        key = arr.shape
+        n_finite = int(np.isfinite(arr).sum())
+        seen = max(self._max_finite.get(key, 0), n_finite)
+        self._max_finite[key] = seen
+        return _missing_frame(
+            arr,
+            variance_thresh=variance_thresh,
+            min_finite=self._frac * seen,
+        )
 
 
 # ==========================================================
@@ -224,7 +278,8 @@ def _nd_to_rgb_uint8(
 # FRAME RENDERING (single time index)
 # ==========================================================
 def _render_frame_as_uint8(
-    stac_mode: xr.DataArray, display_mode: str, idx: int, scaling, raw=None
+    stac_mode: xr.DataArray, display_mode: str, idx: int, scaling, raw=None,
+    is_missing=None
 ):
     """
     Returns a uint8 RGB image.
@@ -233,8 +288,13 @@ def _render_frame_as_uint8(
     ``raw`` optionally carries the already-computed pixel values of this slice
     ((y, x, band) for rgb/false_color, (y, x) for ndvi/ndwi) so a caller-side
     frame cache can restyle a scene without re-reading the data.
+
+    ``is_missing`` optionally replaces the default missing-frame test with a
+    footprint-aware one (see _FootprintTracker.is_missing).
     """
     dm = str(display_mode).lower().strip()
+    if is_missing is None:
+        is_missing = _missing_frame
 
     if dm in ["rgb", "false_color"]:
         if raw is not None:
@@ -243,7 +303,7 @@ def _render_frame_as_uint8(
             frame = stac_mode.isel(time=idx).transpose("y", "x", "band")
             rgb = frame.values  # lazy -> computes only this slice
 
-        if _missing_frame(rgb):
+        if is_missing(rgb):
             return None
 
         # For false_color, stac_mode bands are [nir, red, green] already.
@@ -281,7 +341,7 @@ def _render_frame_as_uint8(
         frame = stac_mode.isel(time=idx)
         data = frame.values  # lazy -> computes only this slice
 
-    if _missing_frame(data):
+    if is_missing(data):
         return None
 
     cmap = "RdYlGn" if dm == "ndvi" else "Blues"
@@ -767,6 +827,11 @@ def interactive_time_view(
     stac_c = _apply_crop(stac, crop)
     extent, origin = _get_extent_and_origin(stac_c)
 
+    # Missing frames are judged against the cube's own valid-pixel footprint,
+    # not against the bounding box, so a sparse AOI (a river polygon covering a
+    # few percent of its bbox) is not mistaken for a cube of empty scenes.
+    _footprint = _FootprintTracker()
+
     if has_time:
         time_values = pd.to_datetime(stac_c.time.values)
         n_time = int(stac_c.time.size)
@@ -1036,7 +1101,8 @@ def interactive_time_view(
             st = _get_mode_state(mode)
             raw = _get_preset_raw(mode, idx, st)
             img = _render_frame_as_uint8(
-                st["stac_mode"], mode, idx, st["scaling"], raw=raw
+                st["stac_mode"], mode, idx, st["scaling"], raw=raw,
+                is_missing=_footprint.is_missing,
             )
             suffix = {
                 "ndvi": " (NDVI)",
@@ -1048,7 +1114,7 @@ def interactive_time_view(
         if sec == "band":
             suffix = f" - {band_dd.value}"
             arr = _get_band_frames([str(band_dd.value)], idx)[0]
-            if _missing_frame(arr):
+            if _footprint.is_missing(arr):
                 return None, suffix, None
             return _stretch_uint8(arr, p_lo, p_hi), suffix, "gray"
 
@@ -1056,7 +1122,7 @@ def interactive_time_view(
         names = [str(r_dd.value), str(g_dd.value), str(b_dd.value)]
         suffix = f" - R:{names[0]} G:{names[1]} B:{names[2]}"
         chans = _get_band_frames(names, idx)
-        if all(_missing_frame(c) for c in chans):
+        if all(_footprint.is_missing(c) for c in chans):
             return None, suffix, None
         rgb = np.dstack([_stretch_uint8(c, p_lo, p_hi) for c in chans])
         return rgb, suffix, None
@@ -1202,6 +1268,9 @@ def interactive_cloud_overlay_view(
     scaling = _get_scaling_policy(rgb_mode, "rgb")
     time_values = pd.to_datetime(rgb_mode.time.values)
 
+    # Same footprint-relative missing test as interactive_time_view.
+    _footprint = _FootprintTracker()
+
     # Cloud band options: probability first, then masks by ascending threshold.
     band_names = [str(b) for b in cloud["band"].values]
 
@@ -1322,6 +1391,7 @@ def interactive_cloud_overlay_view(
                 idx,
                 dict(scaling, rgb_p_low=p_lo, rgb_p_high=p_hi),
                 raw=_get_rgb_raw(idx),
+                is_missing=_footprint.is_missing,
             )
 
             # "full" stacks the panels vertically so each map fills the output
