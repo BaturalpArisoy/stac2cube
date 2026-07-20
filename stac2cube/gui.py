@@ -3995,10 +3995,57 @@ def datacube_builder(missions_func=missions):
     # micromamba env line are per-user, so the button checks them and stops with
     # instructions rather than submitting a job that is guaranteed to fail.
     # -------------------------------------------------------------------------
-    SLURM_FEATURE_DIR = (
-        Path(__file__).resolve().parents[1] / "slurm" / "1_build_data_cube"
-    )
+    # Which slurm/ folder to use is not obvious: the stac2cube package is often
+    # installed in a SHARED env (e.g. on DSS), whose slurm/ folder carries the
+    # untouched defaults because it belongs to everybody. The user's own settings
+    # live in their personal clone - the one the notebook is running from. So the
+    # search starts at the working directory and walks up, and only falls back to
+    # the package location (which is the right answer when someone works directly
+    # inside the clone the env was installed from).
     SLURM_CONFIG_CMD = "../config_cpu.cmd"
+
+    def _find_slurm_feature_dir():
+        """Locate slurm/1_build_data_cube, preferring the user's own clone.
+
+        Returns (feature_dir, source_label). feature_dir may not exist if
+        nothing was found; the caller reports that as a setup problem.
+        """
+        def _is_feature_dir(p):
+            # slurm_run.py is the marker: a bare slurm/ name is not enough.
+            return (p / "slurm_run.py").is_file()
+
+        candidates = []
+
+        # 1) The notebook's working directory and its ancestors. This is the
+        #    personal clone in the shared-env case (cwd is typically the clone's
+        #    interactive/ folder, hence the walk up).
+        try:
+            here = Path.cwd().resolve()
+            candidates.extend(
+                (d / "slurm" / "1_build_data_cube", "working directory")
+                for d in (here, *here.parents)
+            )
+        except Exception:
+            pass
+
+        # 2) The installed package's own repo. Correct when the clone and the
+        #    env are the same tree; the shared-DSS defaults otherwise.
+        try:
+            candidates.append((
+                Path(__file__).resolve().parents[1] / "slurm" / "1_build_data_cube",
+                "installed package",
+            ))
+        except Exception:
+            pass
+
+        for path, label in candidates:
+            try:
+                if _is_feature_dir(path):
+                    return path, label
+            except Exception:
+                continue
+
+        return None, None
 
     def _slurm_setup_problems(feature_dir):
         """Return a list of one-time-setup problems that would make sbatch fail
@@ -4057,7 +4104,17 @@ def datacube_builder(missions_func=missions):
     def _on_submit_slurm_clicked(_):
         """Write build_data_cube.json from the form and sbatch the CPU job."""
         try:
-            feature_dir = SLURM_FEATURE_DIR
+            feature_dir, dir_source = _find_slurm_feature_dir()
+            if feature_dir is None:
+                _show_status(
+                    "❌ No 'slurm/1_build_data_cube' folder found - nothing was "
+                    "written or submitted.\n"
+                    f"   Looked upward from the working directory ({Path.cwd()}) "
+                    "and at the installed package.\n"
+                    "   Run the notebook from inside your stac2cube clone so its "
+                    "slurm/ folder (with your one-time setup) is found."
+                )
+                return
 
             # 1) sbatch has to exist. On a laptop it does not - say so plainly
             #    instead of writing the JSON and failing halfway. Resolve it to a
@@ -4077,9 +4134,14 @@ def datacube_builder(missions_func=missions):
             # 2) One-time setup must be done (README section 1).
             problems = _slurm_setup_problems(feature_dir)
             if problems:
+                # Name the folder that was actually read. When a shared env is
+                # in play, "incomplete setup" usually means the wrong slurm/ was
+                # picked up (the shared default one) rather than a real mistake.
                 _show_status(
                     "❌ SLURM one-time setup is incomplete - nothing submitted:\n"
                     + "\n".join(f"   - {p}" for p in problems)
+                    + f"\n   Checked: {(feature_dir / SLURM_CONFIG_CMD).resolve()}"
+                    + f"\n   (found via the {dir_source})"
                     + "\n   See slurm/README.md section 1 (one-time setup)."
                 )
                 return
