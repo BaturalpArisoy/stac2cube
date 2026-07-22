@@ -11,6 +11,11 @@ import planetary_computer
 import os
 import re
 import datetime
+from collections import Counter, defaultdict
+
+# Equal-area CRS used only to compare AOI coverage fairly between candidate
+# projections (see _native_crs_area_shares). Never used for pixel data.
+_EQUAL_AREA = "EPSG:6933"
 
 
 _S2_COMMON_TO_BNUM = {
@@ -317,6 +322,295 @@ _CATALOGUES = {
 }
 
 
+def crs_attr_string(crs_like):
+    """Machine-readable CRS string for a cube's ``attrs["crs"]``.
+
+    Returns ``"EPSG:<code>"`` whenever the CRS is registered, otherwise its WKT.
+    Accepts anything CRS-like: an ``"EPSG:32632"`` string, a bare code, a pyproj
+    or rasterio CRS object.
+
+    Why not the CRS *name*: cubes used to store ``spatial_ref.projected_crs_name``
+    (e.g. "WGS 84 / UTM zone 32N"), which only round-trips for CRSs that happen to
+    be in the PROJ name database. A custom PROJ string resolves to "unknown" and
+    cannot be read back, and a geographic CRS has no ``projected_crs_name``
+    attribute at all. An EPSG code (or WKT) always round-trips.
+    """
+    if crs_like is None:
+        return None
+
+    # pyproj / rasterio CRS objects expose to_epsg() directly.
+    to_epsg = getattr(crs_like, "to_epsg", None)
+    if callable(to_epsg):
+        code = to_epsg()
+        if code:
+            return f"EPSG:{code}"
+        to_wkt = getattr(crs_like, "to_wkt", None)
+        return to_wkt() if callable(to_wkt) else str(crs_like)
+
+    # Bare EPSG codes, as int or as a digit string (proj:epsg is an int).
+    if isinstance(crs_like, int):
+        return f"EPSG:{crs_like}"
+    text = str(crs_like).strip()
+    if text.isdigit():
+        return f"EPSG:{text}"
+
+    # pyproj, not rasterio: rasterio cannot parse a CRS *name*, and legacy cubes
+    # stored exactly that ("WGS 84 / UTM zone 32N"), so reading one back must work.
+    from pyproj import CRS as _PyprojCRS
+
+    crs = _PyprojCRS.from_user_input(text)
+    code = crs.to_epsg()
+    return f"EPSG:{code}" if code is not None else crs.to_wkt()
+
+
+def validate_target_crs(crs_like):
+    """Canonicalise a user-requested target CRS, or raise with the reason.
+
+    Rejects anything not measured in metres. ``resolution`` is interpreted by
+    odc-stac in the units of the OUTPUT CRS, so a geographic CRS would silently
+    turn ``resolution=10`` into 10-DEGREE pixels, and the shadow projection reads
+    the pixel size as ground metres. Both fail quietly rather than loudly, which
+    is why this is a hard error instead of a warning.
+    """
+    from pyproj import CRS as _PyprojCRS
+
+    # Both steps must be inside the guard. crs_attr_string is a FORMATTER, not a
+    # validator: a bare digit string short-circuits to "EPSG:<digits>" without
+    # ever being looked up, so an incomplete code like "3" formats fine and only
+    # fails here. Leaving this line outside let pyproj's CRSError escape raw
+    # instead of becoming the friendly ValueError callers expect.
+    try:
+        target = crs_attr_string(crs_like)
+        crs = _PyprojCRS.from_user_input(target)
+    except Exception as exc:
+        raise ValueError(
+            f"crs={crs_like!r} is not a CRS that pyproj can read. Use an EPSG "
+            f'code (e.g. crs="EPSG:3035"), a WKT string, or a PROJ string. '
+            f"({type(exc).__name__}: {exc})"
+        )
+
+    if crs.is_geographic:
+        raise ValueError(
+            f"crs={crs_like!r} is a geographic (degree-based) CRS. stac2cube "
+            "builds cubes on a metric grid: resolution is given in CRS units, so "
+            "a geographic CRS would request degree-sized pixels. Use a projected, "
+            'metre-based CRS instead (e.g. crs="EPSG:3035").'
+        )
+    units = {ax.unit_name for ax in crs.axis_info[:2]}
+    if not units <= {"metre", "meter"}:
+        raise ValueError(
+            f"crs={crs_like!r} uses {sorted(units)} as its axis unit. stac2cube "
+            "requires a metre-based CRS: resolution is expressed in CRS units and "
+            "the cloud-shadow projection treats the pixel size as ground metres."
+        )
+    return target
+
+
+def _item_crs(item):
+    """EPSG string of a STAC item's pixels, or None when it declares none.
+
+    element84/PC/terrabyte publish ``proj:code`` (or the older ``proj:epsg``) in
+    item.properties; CDSE keeps it at the ASSET level instead, so fall back to the
+    first asset that carries one.
+    """
+    p = item.properties
+    crs = p.get("proj:code") or p.get("proj:epsg")
+    if crs is None:
+        for asset in item.assets.values():
+            crs = asset.extra_fields.get("proj:code") or asset.extra_fields.get(
+                "proj:epsg"
+            )
+            if crs is not None:
+                break
+    if crs is None:
+        return None
+    # Canonicalise to "EPSG:<code>". proj:code is already that, proj:epsg is a
+    # bare code (int, or a string on some servers) - without this they would be
+    # two different Counter keys for ONE projection and fake a multi-CRS area.
+    # Kept branchy rather than routed through crs_attr_string: this runs per item
+    # and the common cases must not pay for a PROJ database lookup.
+    if isinstance(crs, int):
+        return f"EPSG:{crs}"
+    text = str(crs).strip()
+    if text.isdigit():
+        return f"EPSG:{text}"
+    if text.upper().startswith("EPSG:"):
+        return "EPSG:" + text.split(":", 1)[1].strip()
+    return crs_attr_string(text)
+
+
+def _aoi_utm_crs(bbox):
+    """Offline UTM CRS for a WGS84 AOI bbox, or None when it cannot be trusted.
+
+    Uses the PROJ database (no network) via geopandas' bbox-CENTRE lookup, so it
+    is a geometric preference, not a statement about which data exists. Returns
+    None for an antimeridian-wrapping bbox, where the centre longitude is
+    meaningless (geopandas takes a plain mean of the bounds for geographic input
+    and would land on the opposite side of the planet).
+    """
+    try:
+        minx, miny, maxx, maxy = [float(v) for v in bbox]
+    except (TypeError, ValueError):
+        return None
+    if maxx - minx > 180:
+        return None
+    try:
+        from shapely.geometry import box as _box
+
+        gdf = gpd.GeoDataFrame(
+            geometry=[_box(minx, miny, maxx, maxy)], crs="EPSG:4326"
+        )
+        return crs_attr_string(gdf.estimate_utm_crs())
+    except Exception:
+        return None
+
+
+def _native_crs_area_shares(items, bbox):
+    """Fraction of the AOI (0..1) that each native CRS's tiles actually cover.
+
+    This is what decides how much data has to be reprojected, and scene counts
+    are a poor proxy for it: one zone can contribute many revisits over a small
+    sliver while another covers the whole AOI from fewer tiles.
+
+    Uses item footprints only (metadata already in hand, no extra query and no
+    pixels). One representative footprint is kept per (CRS, tile) - the largest,
+    so a partial across-track acquisition does not understate its tile - which
+    collapses thousands of items to a handful of geometries before the union.
+
+    Returns {} when geometry is unusable, so the caller can fall back.
+    """
+    try:
+        from shapely.geometry import box as _box, shape as _shape
+        from shapely.ops import unary_union
+    except Exception:
+        return {}
+    try:
+        minx, miny, maxx, maxy = [float(v) for v in bbox]
+    except (TypeError, ValueError):
+        return {}
+
+    best = {}
+    for it in items or []:
+        c = _item_crs(it)
+        if c is None or not getattr(it, "geometry", None):
+            continue
+        try:
+            geom = _shape(it.geometry)
+        except Exception:
+            continue
+        key = (c, _item_tile(it))
+        if key not in best or geom.area > best[key].area:
+            best[key] = geom
+    if not best:
+        return {}
+
+    per_crs = defaultdict(list)
+    for (c, _tile), geom in best.items():
+        per_crs[c].append(geom)
+
+    try:
+        aoi = (
+            gpd.GeoSeries([_box(minx, miny, maxx, maxy)], crs="EPSG:4326")
+            .to_crs(_EQUAL_AREA)
+            .iloc[0]
+        )
+        total = aoi.area
+        if total <= 0:
+            return {}
+        shares = {}
+        for c, geoms in per_crs.items():
+            footprint = (
+                gpd.GeoSeries([unary_union(geoms)], crs="EPSG:4326")
+                .to_crs(_EQUAL_AREA)
+                .iloc[0]
+            )
+            shares[c] = float(aoi.intersection(footprint).area / total)
+        return shares
+    except Exception:
+        return {}
+
+
+def _choose_target_crs(crs_counts, bbox, items=None, user_crs=None, q=False):
+    """Pick the ONE CRS every tile is loaded into - deterministically.
+
+    ``crs_counts`` is a Counter of the NATIVE CRSs of the matched STAC items, so
+    this needs no extra query: the items are already fetched. That is the whole
+    point - the cube's projection is now decided from the full item set instead
+    of from ``items[0]``, whose position is not guaranteed by the STAC API and
+    which was verified to differ BETWEEN sources for the same area and dates
+    (element84 -> EPSG:32632, terrabyte/PC -> EPSG:32633).
+
+    Rules:
+      * ``user_crs`` given -> honoured exactly, with a warning when no item is
+        native to it (every scene then gets warped).
+      * one native CRS -> that one.
+      * several -> the one whose tiles NATIVELY cover the largest share of the
+        AOI, i.e. the choice that reprojects the least data. Scene counts are
+        only the fallback when footprints are unusable, because they measure
+        revisits rather than coverage. The AOI's own UTM zone breaks ties, and
+        is deliberately not the primary rule: MGRS tiles overrun their 6-degree
+        zone, so an AOI just past a boundary is often imaged entirely by the
+        neighbouring zone and its nominal zone may cover little or none of it.
+
+    Ties are broken by CRS string so the result never depends on item order.
+    "Least reprojection" is preferred over "closest central meridian": the two
+    can disagree, but the scale-error difference between adjacent zones is on
+    the order of 0.05%, far below the cost of an extra resampling pass.
+    """
+    natives = [c for c in crs_counts if c]
+
+    if user_crs is not None:
+        target = crs_attr_string(user_crs)
+        if natives and target not in natives and not q:
+            print(
+                f"Note: no scene is natively in {target} (found "
+                f"{', '.join(sorted(natives))}) - every scene will be reprojected.",
+                flush=True,
+            )
+        return target
+
+    if not natives:
+        return None
+    if len(natives) == 1:
+        return natives[0]
+
+    # Shares are rounded to 0.1% before ranking: item footprints are not
+    # byte-identical between STAC APIs, and without the rounding a near-tie could
+    # rank differently per source and undo the cross-source determinism this
+    # function exists to provide.
+    shares = _native_crs_area_shares(items, bbox)
+    preferred = _aoi_utm_crs(bbox)
+    if shares:
+        ranked = sorted(
+            natives,
+            key=lambda c: (-round(shares.get(c, 0.0), 3), c != preferred, str(c)),
+        )
+    else:
+        ranked = sorted(
+            natives, key=lambda c: (-crs_counts[c], c != preferred, str(c))
+        )
+    target = ranked[0]
+
+    if not q:
+        def _describe(c):
+            share = shares.get(c)
+            cover = f", covers {share * 100:.0f}% of the area" if share is not None else ""
+            return f"{c} ({crs_counts[c]} scenes{cover})"
+
+        breakdown = ", ".join(_describe(c) for c in ranked)
+        n_warped = sum(n for c, n in crs_counts.items() if c and c != target)
+        basis = "covers most of your area" if shares else "has the most scenes"
+        print(
+            f"Note: this area spans {len(natives)} projections [{breakdown}]. "
+            f"EVERY scene is kept and mosaicked - building in {target} (it "
+            f"{basis}) means {n_warped} of them are warped out of their native "
+            "projection (one extra resampling pass; pixel size and area are "
+            "slightly distorted far from the target zone's central meridian).",
+            flush=True,
+        )
+    return target
+
+
 def _item_tile(item):
     """MGRS tile id (e.g. "47TPK") of a Sentinel-2 STAC item.
 
@@ -353,6 +647,85 @@ def _s2_baseline(item):
         return 0.0
 
 
+def _probe_window(daterange, window_days):
+    """A short date window ending at the user's range end (or today).
+
+    Deliberately NOT the user's full range: the set of projections available for
+    an area is fixed by tile geometry and does not change over time, so probing
+    three years of items to learn it is pure waste (measured: 295 s for a large
+    AOI, versus ~2 s for a short window, same answer). Anchoring at the range END
+    also means a 1-day or 3-day cube still probes a usable window.
+    """
+    end = None
+    if isinstance(daterange, (list, tuple)) and len(daterange) == 2:
+        try:
+            end = datetime.date.fromisoformat(str(daterange[1])[:10])
+        except (ValueError, TypeError):
+            end = None
+    if end is None:
+        end = datetime.date.today()
+    start = end - datetime.timedelta(days=int(window_days))
+    return [start.isoformat(), end.isoformat()]
+
+
+def probe_native_crs(mission, polygon, source="element84", daterange=None,
+                     window_days=14):
+    """Which projections an area's scenes are delivered in. No pixels are read.
+
+    Metadata search only, so it is cheap and does not touch the lazy pipeline.
+    Sentinel-2 revisits every ~5 days at the equator and more often at higher
+    latitudes, so a 14-day window sees every tile covering the AOI; the window is
+    widened twice if the archive has a gap there. No cloud filter is applied -
+    this is about tile geometry, not usable imagery.
+
+    Returns a list of dicts ``{"crs", "scenes", "share"}`` sorted by the share of
+    the AOI each projection natively covers (the same ranking the build uses),
+    or [] when nothing is found.
+    """
+    _source_aliases = {"e84": "element84", "tb": "terrabyte", "pc": "planetary_computer"}
+    source = _source_aliases.get(source, source)
+
+    mission_cat = _CATALOGUES.get(mission)
+    if mission_cat is None:
+        raise ValueError(f"No STAC catalogue configured for mission {mission!r}.")
+    if isinstance(mission_cat, dict):
+        if source not in mission_cat:
+            raise ValueError(
+                f"Unknown source {source!r} for {mission}. "
+                f"Valid options: {list(mission_cat.keys())}."
+            )
+        url, collection = mission_cat[source]
+    else:
+        url, collection = mission_cat
+
+    bbox = polygon if isinstance(polygon, (list, tuple)) else polygon_2_bbox(polygon)
+    if not bbox:
+        raise ValueError("Could not derive a bounding box from the polygon input.")
+
+    catalog = pystacclient.open(url)
+    items = []
+    for days in (window_days, window_days * 4, window_days * 12):
+        items = catalog.search(
+            collections=[collection],
+            bbox=bbox,
+            datetime=_probe_window(daterange, days),
+        ).item_collection()
+        if len(items):
+            break
+    if not len(items):
+        return []
+
+    counts = Counter(_item_crs(i) for i in items)
+    shares = _native_crs_area_shares(items, bbox)
+    natives = [c for c in counts if c]
+    return [
+        {"crs": c, "scenes": int(counts[c]), "share": shares.get(c)}
+        for c in sorted(
+            natives, key=lambda c: (-round(shares.get(c, 0.0), 3), str(c))
+        )
+    ]
+
+
 def get_stac(
     mission: str,
     polygon,
@@ -365,6 +738,8 @@ def get_stac(
     resampling: str = "nearest",
     scene_metadata: list = None,
     tile_handling: str = "mosaic",
+    crs=None,
+    q: bool = False,
 ):
     _source_aliases = {"e84": "element84", "tb": "terrabyte", "pc": "planetary_computer"}
     source = _source_aliases.get(source, source)
@@ -438,7 +813,7 @@ def get_stac(
     season_spec = _parse_season_daterange(daterange)
 
     if season_spec is None:
-        items, crs, stac_mission, tiles = _catalogue_search(
+        items, crs_counts, stac_mission, tiles = _catalogue_search(
             catalog, collection, bbox, daterange, query, mission, source=source
         )
     else:
@@ -447,19 +822,21 @@ def get_stac(
         windows = _expand_season_windows(start_md, end_md, years)
 
         all_items = []
-        crs = None
+        crs_counts = Counter()
         stac_mission = None
         tiles_set = set()
 
         for win in windows:
-            win_items, win_crs, win_stac_mission, win_tiles = _catalogue_search(
+            win_items, win_crs_counts, win_stac_mission, win_tiles = _catalogue_search(
                 catalog, collection, bbox, win, query, mission,
                 allow_empty=True, source=source,
             )
             if win_items:
                 all_items.extend(list(win_items))
-                if crs is None:
-                    crs = win_crs
+                # Merge across season windows so the target CRS is chosen from
+                # every scene the cube will hold, not from the first window.
+                crs_counts.update(win_crs_counts)
+                if stac_mission is None:
                     stac_mission = win_stac_mission
                 if win_tiles is not None:
                     tiles_set.update(list(win_tiles))
@@ -472,6 +849,11 @@ def get_stac(
 
         items = all_items
         tiles = np.array(sorted(tiles_set)) if tiles_set else None
+
+    # --- Target projection ----------------------------------------------------
+    # ONE CRS for the whole cube (every tile is warped into it by odc-stac), now
+    # chosen from the native CRSs of ALL matched items rather than from items[0].
+    target_crs = _choose_target_crs(crs_counts, bbox, items=items, user_crs=crs, q=q)
 
     if mission == "sentinel_2_l2a":
         bands = list(dict.fromkeys(_S2_BNUM_TO_COMMON.get(b, b) for b in bands))
@@ -522,7 +904,7 @@ def get_stac(
 
     _load_kwargs = dict(
         bands=bands,
-        crs=crs,
+        crs=target_crs,
         resolution=resolution,
         # Per-band dict: the user's method (default "nearest") for spectral
         # bands, "nearest" pinned for categorical layers - odc-stac resolves
@@ -579,6 +961,28 @@ def get_stac(
         stac = stac.sortby("time")
     else:
         stac = stac_load(items, **_load_kwargs)
+
+    # Projection provenance, stashed as Dataset attrs for main.py to pick up and
+    # record on the finished cube. Same channel as scene_metadata_multiday below:
+    # these do not survive main.py's band concat, so they are read there directly.
+    if target_crs is not None:
+        stac.attrs["target_crs"] = target_crs
+    _natives = sorted(c for c in crs_counts if c)
+    # Recorded whenever the scenes are NOT all native to the cube's own CRS, i.e.
+    # whenever something had to be reprojected. That covers both a multi-projection
+    # area AND a single-projection area where the user asked for a different CRS
+    # (e.g. EPSG:3035), which is equally worth telling them about. Stays absent in
+    # the ordinary case of one native projection that the cube also uses.
+    if _natives and set(_natives) != {target_crs}:
+        stac.attrs["native_crs"] = _natives
+        # Recomputed here rather than plumbed out of _choose_target_crs: this
+        # branch is the rare one, and the union is over a handful of per-tile
+        # footprints, not per item.
+        _shares = _native_crs_area_shares(items, bbox)
+        if _shares:
+            stac.attrs["native_crs_share"] = [
+                float(round(_shares.get(c, 0.0), 4)) for c in _natives
+            ]
 
     if band_map is not None:
         reverse_band_map = {v: k for k, v in band_map.items()}
@@ -804,26 +1208,16 @@ def _catalogue_search(catalog, collection, bbox, daterange, query, mission,
 
     if len(items) < 1:
         if allow_empty:
-            return [], None, None, None
+            return [], Counter(), None, None
         raise ValueError(
             "No scenes found by the given parameters. Please check your polygon's geometry, date range or increase max cloud coverage."
         )
 
-    sample_item = items[0]
-    crs = sample_item.properties.get("proj:code") or sample_item.properties.get(
-        "proj:epsg"
-    )
-    # CDSE keeps the CRS at the asset level (proj:code = "EPSG:32632"), not in
-    # item.properties. Fall back to the first asset that carries it.
-    if crs is None:
-        for asset in sample_item.assets.values():
-            asset_crs = asset.extra_fields.get("proj:code") or asset.extra_fields.get(
-                "proj:epsg"
-            )
-            if asset_crs is not None:
-                crs = asset_crs
-                break
-    stac_mission = sample_item.to_dict().get("collection")
+    # Native CRS of EVERY item, not just items[0]: the caller picks the target
+    # projection from the full distribution (see _choose_target_crs). Free - the
+    # items are already fetched, this is dict lookups over metadata in memory.
+    crs_counts = Counter(_item_crs(item) for item in items)
+    stac_mission = items[0].to_dict().get("collection")
     # Get Sentinel tile ID
     if mission in ("sentinel_2_l2a", "sentinel_2_l1c"):
         gdf = gpd.GeoDataFrame.from_features(items, "epsg:4326")
@@ -846,7 +1240,7 @@ def _catalogue_search(catalog, collection, bbox, daterange, query, mission,
     else:
         tiles = None
 
-    return items, crs, stac_mission, tiles
+    return items, crs_counts, stac_mission, tiles
 
 
 def get_solar_geometry(mission, polygon, daterange, source="element84", max_cc=None):

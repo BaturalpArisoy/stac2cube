@@ -48,7 +48,11 @@ from stac2cube import (
     check_scene_availability,
 )
 
-from .get_data import SCENE_METADATA_AVAILABILITY
+from .get_data import (
+    SCENE_METADATA_AVAILABILITY,
+    probe_native_crs,
+    validate_target_crs,
+)
 from .clip import compute_scene_coverage
 
 from .gui_common import (
@@ -400,6 +404,27 @@ PARAM_HELP_HTML = {
     The Scene Classification Layer (<code>scl</code>) is <b>always</b> loaded
     with nearest resampling regardless of this choice - interpolating between
     class codes would produce meaningless values.
+    """,
+    "crs": """
+    <b>Output Projection (CRS)</b><br>
+    The coordinate reference system your cube's grid is drawn in. Every scene is
+    loaded onto this one grid, so scenes delivered in a different projection are
+    re-drawn (resampled) into it. No scene is ever dropped because of this.<br><br>
+    <b>Automatic</b> (default): uses the projection that natively covers most of
+    your area, so the least data has to be re-drawn.<br><br>
+    <b>Detected projections</b>: the projections your scenes actually come in.
+    Sentinel-2 is delivered in UTM zones, e.g. <code>EPSG:32632</code> is
+    <b>UTM zone 32N</b>. Note this is about which <b>tile</b> your data comes from,
+    not which zone your polygon sits in on a map: tiles are 110 km squares that
+    extend past the zone boundary, so an area straddling a zone line is very often
+    still delivered entirely in one projection.<br><br>
+    <b>Custom</b>: any projected, metre-based CRS. Typical reasons: an equal-area
+    CRS when you report areas (e.g. <code>EPSG:3035</code>, ETRS89-LAEA Europe),
+    a national grid, or matching a partner dataset.<br>
+    Enter an EPSG code such as <code>EPSG:3035</code> or <code>EPSG:32632</code>.
+    Geographic (degree-based) CRSs like <code>EPSG:4326</code> and non-metre CRSs
+    like <code>EPSG:2263</code> (US survey foot) are rejected, because Resolution
+    is expressed in CRS units and would silently mean degrees or feet.
     """,
     "stats": """
     <b>stats</b><br>
@@ -1643,6 +1668,16 @@ def datacube_builder(missions_func=missions):
         value="", layout=widgets.Layout(width="auto", max_width="100%",
                                         display="none")
     )
+    # Projection warning: shown when scenes had to be re-drawn into the cube's
+    # CRS, either because the area spans projections or because a specific CRS
+    # was requested. Same slot and behaviour as the multi-swath warning above.
+    # Note these two CAN appear together and are NOT the same thing: that one is
+    # about scenes covering only part of the AOI, this one about the grid the
+    # pixels were resampled onto.
+    result_projection_warn_w = widgets.HTML(
+        value="", layout=widgets.Layout(width="auto", max_width="100%",
+                                        display="none")
+    )
     # One-click fix for the warning above: writes an enlarged copy of the
     # polygon (short bbox edges expanded to the minimum co-registration edge,
     # original area kept centered) and re-runs the build with it - every other
@@ -2395,6 +2430,74 @@ def datacube_builder(missions_func=missions):
             return all(_cube_is_empty(c) for c in cubes)
         return _cube_is_empty(obj)
 
+    def _compute_projection_hint(obj):
+        """Were any scenes re-drawn into a different projection? Returns a
+        Result-panel hint, or "" when the cube is entirely native.
+
+        Reads NOTHING: everything comes from attrs the build already recorded
+        (`crs`, `native_crs`, `native_crs_share`), which are only present when a
+        reprojection actually happened. Never raises - a hint must not break a
+        build.
+        """
+        try:
+            da = obj
+            if isinstance(obj, xr.Dataset):
+                da = obj.get("Spectral_Temporal_Stack")
+                if da is None and len(obj.data_vars):
+                    da = obj[list(obj.data_vars)[0]]
+            if da is None:
+                return ""
+            attrs = getattr(da, "attrs", {}) or {}
+            natives = attrs.get("native_crs")
+            if natives is None:
+                return ""
+            natives = [str(c) for c in np.asarray(natives).ravel()]
+            if not natives:
+                return ""
+            target = str(attrs.get("crs", "") or "")
+
+            shares = attrs.get("native_crs_share")
+            share_by_crs = {}
+            if shares is not None:
+                vals = np.asarray(shares).ravel().tolist()
+                if len(vals) == len(natives):
+                    share_by_crs = dict(zip(natives, vals))
+
+            def _fmt(c):
+                s = share_by_crs.get(c)
+                pct = f" (covers {s * 100:.0f}% of your area)" if s is not None else ""
+                mark = " <b>&larr; used</b>" if c == target else ""
+                return f"<code>{c}</code>{pct}{mark}"
+
+            box = (
+                "<div style='font-size:12px; color:#92400e; background:#fffbeb; "
+                "border:1px solid #fde68a; border-radius:6px; padding:6px 8px; "
+                "margin:0; box-sizing:border-box;'>"
+            )
+            listing = ", ".join(_fmt(c) for c in natives)
+
+            if target and target not in natives:
+                # Deliberate non-native choice, e.g. an equal-area CRS.
+                return (
+                    f"{box}⚠️ <b>Projection Warning:</b> Your cube uses "
+                    f"<code>{target}</code>, which no scene is delivered in "
+                    f"({listing}). <b>Every</b> scene was re-drawn into it, one "
+                    "extra resampling pass. That is expected if you chose this "
+                    "projection on purpose."
+                    "</div>"
+                )
+            return (
+                f"{box}⚠️ <b>Projection Warning:</b> this area's scenes come in "
+                f"more than one projection: {listing}. <b>All scenes were kept "
+                "and mosaicked</b>; those not native to "
+                f"<code>{target}</code> were re-drawn into it (pixel size and "
+                "area are slightly distorted far from that zone's central "
+                "meridian). You can change CRS under "
+                "<b>Advanced Parameters → Output Projection (CRS)</b>.</div>"
+            )
+        except Exception:
+            return ""
+
     def _compute_multiswath_hint(obj):
         """GUI-only detection: does the built AOI sit across multiple swaths, so
         some scenes image only part of it? Returns a Result-panel hint pointing
@@ -2541,6 +2644,9 @@ def datacube_builder(missions_func=missions):
         _ms_hint = "" if empty else (state.get("multiswath_hint") or "")
         result_multiswath_warn_w.value = _ms_hint
         result_multiswath_warn_w.layout.display = "" if _ms_hint else "none"
+        _proj_hint = "" if empty else (state.get("projection_hint") or "")
+        result_projection_warn_w.value = _proj_hint
+        result_projection_warn_w.layout.display = "" if _proj_hint else "none"
         _set_coreg_warning("" if empty else _coreg_warn_html())
         with result_out:
             clear_output()
@@ -3236,6 +3342,8 @@ def datacube_builder(missions_func=missions):
             result_viz_note_w.value = ""
             result_multiswath_warn_w.value = ""
             result_multiswath_warn_w.layout.display = "none"
+            result_projection_warn_w.value = ""
+            result_projection_warn_w.layout.display = "none"
             _set_coreg_warning("")
             with result_out:
                 clear_output()
@@ -3266,6 +3374,8 @@ def datacube_builder(missions_func=missions):
             result_viz_note_w.value = ""
             result_multiswath_warn_w.value = ""
             result_multiswath_warn_w.layout.display = "none"
+            result_projection_warn_w.value = ""
+            result_projection_warn_w.layout.display = "none"
             _set_coreg_warning("")
             with result_out:
                 clear_output()
@@ -3491,6 +3601,9 @@ def datacube_builder(missions_func=missions):
             "stats": stats,
             "source": source,
             "resampling_method": resampling_w.value,
+            # None = Automatic: get_stac_layers picks the projection natively
+            # covering most of the area. A typed CRS wins over the dropdown.
+            "crs": _effective_crs(),
             # Sentinel-2 only; the widget is cleared + disabled for other
             # missions, so this is None there.
             "scene_metadata": (
@@ -3879,6 +3992,8 @@ def datacube_builder(missions_func=missions):
                 "output": output_for_json,
                 "clip_raster": clip_raster,
                 "resampling_method": resampling_w.value,
+                # null = Automatic (chosen from the scenes at build time).
+                "crs": _effective_crs(),
                 # A temporal composite collapses the time dimension the
                 # per-scene coords live on - get_stac_layers rejects the
                 # combination, so emit null when an aggregator is set.
@@ -4101,6 +4216,13 @@ def datacube_builder(missions_func=missions):
 
         # 1) Mission first: it rebuilds the band / index / stats / source lists
         #    every later step writes into.
+        # Output projection. A stored CRS goes into the free-text box rather than
+        # the dropdown: the detected list is only populated after a search, and
+        # the box overrides it anyway, so this restores exactly what was saved.
+        _crs_json = params.get("crs")
+        crs_user_w.value = "" if _crs_json in (None, "") else str(_crs_json)
+        _sync_crs_controls()
+
         m_name = _mission_name_from_json(params.get("mission"))
         if m_name is None:
             warnings.append(
@@ -4906,6 +5028,16 @@ def datacube_builder(missions_func=missions):
                     "" if isinstance(result, list)
                     else _compute_multiswath_hint(result)
                 )
+                # Projection warning: only when scenes were actually re-drawn
+                # into the cube's CRS (the attrs are absent otherwise).
+                state["projection_hint"] = (
+                    "" if isinstance(result, list)
+                    else _compute_projection_hint(result)
+                )
+                # The built cube already knows its projections, so fill the
+                # Advanced dropdown from it instead of making the user press
+                # Detect for information we now hold.
+                _populate_detected_crs_from_cube(result)
                 export_result_btn.disabled = False
                 _set_visualization_enabled(True)
                 _refresh_viz_feature_options()
@@ -5621,14 +5753,11 @@ def datacube_builder(missions_func=missions):
         [
             _field_group("Mission", [_boxed(mission_dd)],
                          subtitle="Satellite mission to use."),
-            _field_group(
-                        "Resolution",
-                        [_boxed(resolution_w)],
-                        subtitle=(
-                            "Output pixel size, in metres.\n"
-                            "Changing it to 2.5 metres DOES NOT super-resolve the data :) It just resamples it."
-                        ),
-                    ),
+            # Resolution moved to Advanced Parameters, where it sits with the
+            # other two controls that define the output grid (Resampling and
+            # Output Projection). It is the group that opens by default there,
+            # because pixel size is the biggest lever on cube size and build time
+            # and must not be something a user only discovers after a slow build.
             _field_group(
                 "Polygon",
                 [
@@ -5791,6 +5920,7 @@ def datacube_builder(missions_func=missions):
         cloud_masking_children,
         collapsible=True,
         open=False,
+        accent="turquoise",
     )
 
     # -------------------------------------------------------------------------
@@ -5844,6 +5974,25 @@ def datacube_builder(missions_func=missions):
         ],
         collapsible=True,
         open=False,
+        accent="turquoise",
+    )
+
+    # --- Output grid: resolution, resampling, projection -----------------------
+    # Open by default (the only Advanced group that is), see the note in basic_box.
+    resolution_group = _field_group(
+        "Resolution",
+        [
+            widgets.HTML(
+                "<div style='font-size:12px; color:#475569; margin:0 0 6px 0;'>"
+                "Output pixel size, in metres. Changing it to 2.5 metres DOES NOT "
+                "super-resolve the data :) It just resamples it.<br>"
+                "</div>"
+            ),
+            _boxed(resolution_w),
+        ],
+        collapsible=True,
+        open=True,
+        accent="violet",
     )
 
     resampling_group = _field_group(
@@ -5864,7 +6013,263 @@ def datacube_builder(missions_func=missions):
         ],
         collapsible=True,
         open=False,
+        accent="violet",
     )
+
+    # --- Output Projection (CRS) ---------------------------------------------
+    # "Automatic" resolves at build time from the scenes themselves, so this group
+    # can be ignored entirely. The dropdown exists to SHOW what was detected and
+    # to override it; the free-text box is for a projection nobody's tiles use
+    # (e.g. an equal-area CRS for reporting hectares).
+    _CRS_AUTO = "auto"
+    # "auto" sentinel, not None: ipywidgets treats value=None as "nothing
+    # selected" even when None is one of the option values, so the box would
+    # render blank instead of showing the Automatic entry.
+    crs_detected_w = widgets.Dropdown(
+        options=[("Automatic (best coverage of your area)", _CRS_AUTO)],
+        value=_CRS_AUTO,
+        layout=widgets.Layout(width="100%"),
+    )
+    crs_user_w = widgets.Text(
+        value="",
+        placeholder="EPSG:3035",
+        # continuous_update=False on purpose: with the default, `value` fires on
+        # every keystroke, so typing "3035" is seen as "3", "30", "303" - each an
+        # incomplete EPSG code that validation rejects. The box now commits on
+        # Enter or when it loses focus, like the rest of the builder's inputs.
+        continuous_update=False,
+        layout=widgets.Layout(width="100%"),
+    )
+    crs_search_btn = widgets.Button(
+        description="Detect projections",
+        icon="search",
+        layout=widgets.Layout(width="200px"),
+    )
+    crs_status_w = widgets.HTML("")
+
+    crs_group = _field_group(
+        "Output Projection (CRS)",
+        [
+            widgets.HTML(
+                "<div style='font-size:12px; color:#475569; margin:0 0 6px 0;'>"
+                "The grid your cube is drawn in. Leave it on <b>Automatic</b> "
+                "unless you need a specific projection - every scene is kept "
+                "either way."
+                "</div>"
+            ),
+            _param_panel(
+                "Detected projections",
+                widgets.VBox(
+                    [
+                        _boxed(crs_detected_w),
+                        widgets.HBox(
+                            [crs_search_btn],
+                            layout=widgets.Layout(margin="4px 0 0 0"),
+                        ),
+                        crs_status_w,
+                    ],
+                    layout=widgets.Layout(width="100%", overflow="hidden"),
+                ),
+                help_html=PARAM_HELP_HTML.get("crs", ""),
+            ),
+            _param_panel(
+                "User-Defined CRS",
+                _boxed(crs_user_w),
+                help_html=PARAM_HELP_HTML.get("crs", ""),
+            ),
+        ],
+        collapsible=True,
+        open=False,
+        accent="violet",
+    )
+
+    # --- Output Projection behaviour ------------------------------------------
+    _CRS_AUTO_LABEL = "Automatic (best coverage of your area)"
+
+    def _set_crs_status(html):
+        crs_status_w.value = html or ""
+
+    def _reset_detected_crs(*_):
+        """The detected list belongs to ONE area/source/mission. Anything that
+        changes which scenes would be found invalidates it, so clear it and fall
+        back to Automatic instead of leaving a stale projection selected - which
+        would silently reproject every scene of the new area."""
+        crs_detected_w.options = [(_CRS_AUTO_LABEL, _CRS_AUTO)]
+        crs_detected_w.value = _CRS_AUTO
+        # Re-render the status rather than blanking it: a typed CRS is still in
+        # effect after an AOI change, so wiping its confirmation would read as
+        # though the setting had been cleared too.
+        _sync_crs_controls()
+
+    def _sync_crs_controls(*_):
+        """A user-defined CRS overrides the dropdown, so grey the dropdown while
+        the box has content, and check what was typed once the box is committed
+        (Enter / focus loss - see continuous_update above) rather than letting a
+        bad CRS fail only after a long build.
+
+        Catches Exception, not just ValueError: this runs inside an ipywidgets
+        message handler, where anything escaping is dumped as a raw traceback
+        under the GUI."""
+        text = (crs_user_w.value or "").strip()
+        crs_detected_w.disabled = bool(text)
+        crs_search_btn.disabled = bool(text)
+        if not text:
+            _set_crs_status("")
+            return
+        try:
+            canonical = validate_target_crs(text)
+        except Exception as exc:
+            _set_crs_status(
+                "<div style='font-size:12px; color:#991b1b; background:#fef2f2; "
+                "border:1px solid #fecaca; border-radius:6px; padding:6px 8px;'>"
+                f"✗ {exc}</div>"
+            )
+            return
+        _set_crs_status(
+            "<div style='font-size:12px; color:#166534;'>✓ building in "
+            f"<b>{canonical}</b>.</div>"
+        )
+
+    def _effective_crs():
+        """crs= for get_stac_layers: the typed CRS wins, then the dropdown, then
+        None, which means Automatic (resolved from the scenes at build time)."""
+        text = (crs_user_w.value or "").strip()
+        if text:
+            return validate_target_crs(text)
+        chosen = crs_detected_w.value
+        return None if chosen in (None, _CRS_AUTO) else chosen
+
+    def _populate_detected_crs(entries):
+        """Fill the dropdown, putting the reason in each label so the automatic
+        default explains itself instead of having to be trusted."""
+        opts = [(_CRS_AUTO_LABEL, _CRS_AUTO)]
+        for e in entries:
+            share = e.get("share")
+            cover = (
+                f" - covers {share * 100:.0f}% of your area"
+                if share is not None else ""
+            )
+            opts.append((f"{e['crs']}{cover}", e["crs"]))
+        previous = crs_detected_w.value
+        crs_detected_w.options = opts
+        if previous in [o[1] for o in opts]:
+            crs_detected_w.value = previous
+
+    def _populate_detected_crs_from_cube(obj):
+        """Fill the dropdown from a cube that was just built - free, no query.
+
+        A finished cube already states its projections: ``native_crs`` whenever
+        anything had to be reprojected, and otherwise its own ``crs``, which is
+        then by definition the single native one. So after a build the Detect
+        button has nothing left to find.
+
+        Skipped for a multi-feature batch: each feature can land in a different
+        projection, so one list could not honestly describe them all.
+        """
+        try:
+            if isinstance(obj, list):
+                return
+            da = obj
+            if isinstance(obj, xr.Dataset):
+                da = obj.get("Spectral_Temporal_Stack")
+                if da is None and len(obj.data_vars):
+                    da = obj[list(obj.data_vars)[0]]
+            attrs = getattr(da, "attrs", {}) or {}
+            target = str(attrs.get("crs", "") or "")
+            natives = attrs.get("native_crs")
+
+            if natives is None:
+                if not target:
+                    return
+                entries = [{"crs": target, "share": 1.0}]
+            else:
+                natives = [str(c) for c in np.asarray(natives).ravel()]
+                shares = attrs.get("native_crs_share")
+                share_by = {}
+                if shares is not None:
+                    vals = np.asarray(shares).ravel().tolist()
+                    if len(vals) == len(natives):
+                        share_by = dict(zip(natives, vals))
+                entries = [{"crs": c, "share": share_by.get(c)} for c in natives]
+
+            if not entries:
+                return
+            _populate_detected_crs(entries)
+            # Don't clobber the typed-CRS validation message, which is still the
+            # setting actually in force.
+            if not (crs_user_w.value or "").strip():
+                _set_crs_status(
+                    "<div style='font-size:12px; color:#166534;'>✓ filled in from "
+                    f"the cube you just built (built in <b>{target}</b>).</div>"
+                )
+        except Exception:
+            pass
+
+    def _on_detect_crs(_btn):
+        """Manual, never automatic: this is a network round trip and ipywidgets
+        would freeze the GUI if it fired on every polygon edit. Automatic already
+        works without it, so nothing is blocked if the user never clicks."""
+        try:
+            polygon = _parse_polygon_input(polygon_w.value)
+        except Exception as exc:
+            _set_crs_status(
+                f"<div style='font-size:12px; color:#991b1b;'>✗ {exc}</div>"
+            )
+            return
+        if polygon is None:
+            _set_crs_status(
+                "<div style='font-size:12px; color:#92400e;'>Set a polygon or "
+                "bounding box first.</div>"
+            )
+            return
+
+        crs_search_btn.disabled = True
+        _set_crs_status(
+            "<div style='font-size:12px; color:#475569;'>Searching the "
+            "catalogue for available projections...</div>"
+        )
+        try:
+            entries = probe_native_crs(
+                mission_dd.value,
+                polygon,
+                source=source_w.value,
+                daterange=_resolve_daterange(),
+            )
+            if not entries:
+                _set_crs_status(
+                    "<div style='font-size:12px; color:#92400e;'>No scenes found "
+                    "for this area, so no projections could be detected.</div>"
+                )
+                return
+            _populate_detected_crs(entries)
+            if len(entries) == 1:
+                _set_crs_status(
+                    "<div style='font-size:12px; color:#166534;'>✓ one projection "
+                    f"covers this area: <b>{entries[0]['crs']}</b>. Nothing to "
+                    "choose - Automatic uses it.</div>"
+                )
+            else:
+                best = entries[0]
+                _set_crs_status(
+                    "<div style='font-size:12px; color:#1e3a8a;'>Found "
+                    f"<b>{len(entries)}</b> projections. Automatic will use "
+                    f"<b>{best['crs']}</b> (the one covering most of your area). "
+                    "Scenes from the others are re-drawn onto it; none are "
+                    "dropped.</div>"
+                )
+        except Exception as exc:
+            _set_crs_status(
+                "<div style='font-size:12px; color:#991b1b;'>✗ "
+                f"{_friendly_error(exc, 'Detecting projections')}</div>"
+            )
+        finally:
+            crs_search_btn.disabled = bool((crs_user_w.value or "").strip())
+
+    crs_search_btn.on_click(_on_detect_crs)
+    crs_user_w.observe(lambda change: _sync_crs_controls(), names="value")
+    for _w in (polygon_w, source_w, mission_dd):
+        _w.observe(lambda change: _reset_detected_crs(), names="value")
+    _sync_crs_controls()
 
     tile_handling_group = _field_group(
         "Overlapping Tile Handling",
@@ -5917,6 +6322,7 @@ def datacube_builder(missions_func=missions):
         ],
         collapsible=True,
         open=False,
+        accent="violet",
     )
 
     # ------------------------------------------------------------------------
@@ -5976,10 +6382,17 @@ def datacube_builder(missions_func=missions):
 
     advanced_box = widgets.VBox(
         [
+            # Turquoise = what gets masked out of the pixel values.
             cloud_masking_group,
             shadow_masking_group,
+            # Violet = how the cube itself is constructed. Resolution first and
+            # open by default (biggest lever on size); then the rest of the
+            # output grid, then which scenes go in.
+            resolution_group,
             resampling_group,
+            crs_group,
             tile_handling_group,
+            # Uncoloured = optional additions that do not change the base cube.
             scene_metadata_group,
             stats_box,
             _collapse_row(advanced_collapse_btn),
@@ -6124,7 +6537,10 @@ def datacube_builder(missions_func=missions):
                 display(HTML(
                     "<div style='font-size:12px; color:#374151; margin-bottom:6px;'>"
                     "<b>NaN</b> = catalogue query failed (e.g. credentials or "
-                    "API issue)."
+                    "API issue).<br>"
+                    "These are <b>raw archive dates</b>: the count ignores the "
+                    "<b>Max cloud %</b> filter, so a cube built with a filter "
+                    "below 100 will have fewer time steps than shown here."
                     "</div>"
                 ))
 
@@ -6139,7 +6555,9 @@ def datacube_builder(missions_func=missions):
                     for col in df.columns
                 }
                 summary_df = pd.DataFrame(
-                    {"Available Scenes": list(summary_rows.values())},
+                    # Dates, not scenes: the cube loads with groupby="solar_day",
+                    # so one date is one time step however many MGRS tiles it spans.
+                    {"Available Dates": list(summary_rows.values())},
                     index=list(summary_rows.keys()),
                 )
                 summary_df.index.name = "Mission"
@@ -6447,7 +6865,7 @@ def datacube_builder(missions_func=missions):
     # overlapping-tile / multi-swath warning first, then the area-size
     # co-registration warning, then the cube summary and its controls.
     result_box = widgets.VBox(
-        [result_multiswath_warn_w, result_coreg_warn_row,
+        [result_multiswath_warn_w, result_projection_warn_w, result_coreg_warn_row,
          result_out, result_cloud_filter_row, result_date_row,
          result_viz_note_w],
         layout=widgets.Layout(width="99%", gap="6px"),
@@ -6558,10 +6976,19 @@ def datacube_builder(missions_func=missions):
             "mission": mission_dd,
             "source": source_w,
             "resolution": resolution_w,
+            "crs_detected": crs_detected_w,
+            "crs_user": crs_user_w,
+            "crs_search_btn": crs_search_btn,
+            "crs_status": crs_status_w,
             "polygon": polygon_w,
             "browse_polygon_btn": browse_polygon_btn,
             "daterange_mode": daterange_mode_w,
             "daterange": daterange_w,
+            # The simple From/To pickers and the advanced-mode toggle, mirroring
+            # what the editor already exposes for its update dates.
+            "advanced_dates": advanced_dates_w,
+            "date_from": date_from_w,
+            "date_to": date_to_w,
             "bands": bands_w,
             "indices": indices_w,
             "index_checkboxes": _index_rows,

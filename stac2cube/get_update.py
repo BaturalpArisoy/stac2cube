@@ -81,6 +81,10 @@ def get_stac_parameters(stac_existing):
         "daterange": daterange,
         "stac_api": stac_existing.attrs.get("stac_api", "element84"),
         "resampling": stac_existing.attrs.get("resampling", "bilinear"),
+        # The cube's own projection, so update mode can pin it and put the new
+        # scenes on the SAME grid instead of re-deriving a target CRS. Fresh
+        # cubes store "EPSG:<code>"; legacy ones a CRS name, which normalises.
+        "crs": stac_existing.attrs.get("crs"),
         # Scene-metadata coordinate selection (None on cubes built without
         # it). Restored by update mode so new scenes carry the same coords.
         "scene_metadata": stac_existing.attrs.get("scene_metadata"),

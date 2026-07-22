@@ -363,6 +363,18 @@ GUI_CSS = """
 .stac2cube-subpanel-blue  { border-left-color: #3b82f6; }
 .stac2cube-subpanel-green { border-left-color: #16a34a; }
 .stac2cube-subpanel-amber { border-left-color: #d97706; }
+.stac2cube-subpanel-turquoise { border-left-color: #14b8a6; }
+.stac2cube-subpanel-violet    { border-left-color: #8b5cf6; }
+
+/* Left accent stripe on a whole field group, same visual language as the step
+   cards at the top of the builder. It marks WHAT KIND of parameter a group is:
+   turquoise = what gets masked out of the pixel values (clouds, shadows),
+   violet = how the cube itself is constructed (grid, projection, which scenes).
+   Deliberately NOT red or amber - those already mean error and warning here. */
+.stac2cube-group-accent    { border-left-width: 4px; }
+.stac2cube-group-turquoise { border-left-color: #14b8a6; }
+.stac2cube-group-violet    { border-left-color: #8b5cf6; }
+.stac2cube-group-blue      { border-left-color: #3b82f6; }
 
 /* Keep accordion panels and nested widget boxes from overflowing the card
    (.p-* names are ipywidgets 7, .jupyter-widget-Collapse* are ipywidgets 8). */
@@ -555,14 +567,34 @@ def help_button(tooltip="Show help"):
     return btn
 
 
-def field_group(title, children, subtitle=None, help_html=None, collapsible=False, open=True):
+_GROUP_ACCENTS = ("turquoise", "violet", "blue")
+
+
+def _apply_group_accent(box, accent):
+    """Add the left-stripe classes for a field_group accent (no-op when None)."""
+    if not accent:
+        return
+    if accent not in _GROUP_ACCENTS:
+        raise ValueError(
+            f"Unknown field_group accent {accent!r}. Valid: {list(_GROUP_ACCENTS)}."
+        )
+    box.add_class("stac2cube-group-accent")
+    box.add_class(f"stac2cube-group-{accent}")
+
+
+def field_group(title, children, subtitle=None, help_html=None, collapsible=False,
+                open=True, accent=None):
     """Wrap related fields in a subtly bordered sub-panel with a small heading,
     an optional subtitle and an optional '?' help toggle, to set them apart from
     neighbouring fields inside a card.
 
     When ``collapsible`` is True the panel is rendered as an Accordion titled
     ``title`` (open by default unless ``open`` is False), so the section can be
-    folded individually while its parent panel stays expanded."""
+    folded individually while its parent panel stays expanded.
+
+    ``accent`` ("turquoise", "violet", "blue") draws a coloured stripe down the
+    left edge to signal the KIND of parameter the group holds, without changing
+    the group's own background."""
     title_html = widgets.HTML(
         f"<div style='font-weight:600; font-size:13px; color:#374151; margin:0;'>{title}</div>"
     )
@@ -637,6 +669,7 @@ def field_group(title, children, subtitle=None, help_html=None, collapsible=Fals
             [toggle, body], layout=widgets.Layout(width="100%", gap="6px")
         )
         box.add_class("stac2cube-group")
+        _apply_group_accent(box, accent)
         return box
 
     if help_box is not None:
@@ -654,6 +687,7 @@ def field_group(title, children, subtitle=None, help_html=None, collapsible=Fals
         layout=widgets.Layout(width="100%", gap="6px"),
     )
     box.add_class("stac2cube-group")
+    _apply_group_accent(box, accent)
     return box
 
 

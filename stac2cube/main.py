@@ -2,6 +2,8 @@ import os
 
 from .get_data import (
     get_stac,
+    crs_attr_string,
+    validate_target_crs,
     _S2_BNUM_TO_COMMON,
     _SCENE_METADATA_FIELDS,
     export_granule_metadata,
@@ -101,6 +103,7 @@ def get_stac_layers(
     resampling_method=None,
     scene_metadata=None,
     metadata_output=None,
+    crs=None,
     tile_handling="mosaic",
     partial_scene_handling="keep",
     min_scene_coverage=0.9,
@@ -239,6 +242,20 @@ def get_stac_layers(
                 "for Sentinel-2 cubes only."
             )
 
+    # --- Target projection preconditions --------------------------------------
+    # crs= overrides the automatic choice (the projection natively covering most
+    # of the area - see _choose_target_crs). Validated up front so a bad CRS
+    # fails before any query, and normalised to "EPSG:<code>" so the cube's attrs
+    # and the update-mode pin agree on one spelling.
+    if crs is not None:
+        if update:
+            raise ValueError(
+                "crs cannot be changed in update mode: the cube's own projection "
+                "is restored so the new dates land on the existing grid. Rebuild "
+                "in one pass to change the projection."
+            )
+        crs = validate_target_crs(crs)
+
     # --- Tile handling preconditions -----------------------------------------
     # tile_handling="separate" keeps AOI-straddling N-S Sentinel-2 tiles as
     # distinct timesteps instead of mosaicing them into one (see get_stac). It
@@ -354,6 +371,7 @@ def get_stac_layers(
                     update=update,
                     source=source,
                     resampling_method=resampling_method,
+                    crs=crs,
                     scene_metadata=(
                         list(scene_metadata) if scene_metadata else scene_metadata
                     ),
@@ -405,6 +423,11 @@ def get_stac_layers(
     _s2c_nir_dark = nir_dark_threshold
     _s2c_proj = shadow_proj_distance
 
+    # Target projection handed to get_stac: the user's crs= on a fresh build, the
+    # cube's stored projection in update mode (see the restore below), or None to
+    # let get_stac choose it from the matched items.
+    _pinned_crs = crs
+
     if update:
         stac_parameters = get_stac_parameters(update)
         existing_times = stac_parameters["times"]
@@ -422,6 +445,13 @@ def get_stac_layers(
         mission = stac_parameters["mission"]
         resolution = stac_parameters["resolution"]
         polygon = stac_parameters["polygon"]
+        # Pin the cube's OWN projection so the new scenes land on the existing
+        # grid. Without this the fresh query re-derives a target CRS, and any
+        # change to that choice - a different selection rule, or a multi-CRS area
+        # whose ranking shifted - would put the new dates on a different grid and
+        # misalign the concat in update_stac. Legacy cubes store a CRS *name*
+        # here; crs_attr_string normalises it (see _choose_target_crs).
+        _pinned_crs = stac_parameters.get("crs")
         # geometry = stac_parameters["geometry"] # update-clip raster
         user_bands = bands  # bands passed alongside update = bands to ADD
         bands = stac_parameters["spectral_bands"]
@@ -619,6 +649,8 @@ def get_stac_layers(
         resampling=resampling_method,
         scene_metadata=scene_metadata,
         tile_handling=tile_handling,
+        crs=_pinned_crs,
+        q=bool(q),
     )
     # Separate-tile cubes keep full-precision, per-tile timestamps so two tiles
     # of one solar day stay unique; the day-floor below is skipped for them.
@@ -629,7 +661,18 @@ def get_stac_layers(
     # STAC item (tile overlap). Grabbed now because the Dataset attrs are lost
     # in the band concat below; re-attached in the metadata block.
     _meta_multiday = stac.attrs.get("scene_metadata_multiday")
-    crs = stac.spatial_ref.projected_crs_name
+    # Target projection chosen in get_stac from the native CRSs of every matched
+    # item. Stored as "EPSG:<code>" (see crs_attr_string): the cube's attrs used
+    # to hold spatial_ref.projected_crs_name, a display NAME that only round-trips
+    # for CRSs in the PROJ name database and does not exist at all for geographic
+    # CRSs. Falling back to the loaded grid keeps cubes buildable if a source ever
+    # publishes no proj:code.
+    crs = stac.attrs.get("target_crs") or crs_attr_string(stac.rio.crs)
+    # Native CRSs when something had to be reprojected, with the share of the AOI
+    # each one natively covers (provenance for the finished cube; both absent on
+    # the normal case of one native projection that the cube also uses).
+    _native_crs = stac.attrs.get("native_crs")
+    _native_crs_share = stac.attrs.get("native_crs_share")
     transform = stac.rio.transform()
 
     # In update mode, restrict the fresh query to the dates the existing cube
@@ -765,6 +808,18 @@ def get_stac_layers(
         if mission in ("sentinel_2_l2a", "sentinel_2_l1c"):
             tile_list = np.array(tiles, dtype="U10").tolist()
             stac.attrs["tile_id"] = tile_list
+        # Multi-projection provenance: only present when the area's tiles are NOT
+        # all in the cube's own CRS, i.e. when some scenes had to be reprojected.
+        # Absent on an ordinary single-zone cube.
+        if _native_crs:
+            stac.attrs["native_crs"] = [str(c) for c in _native_crs]
+            # Fraction (0..1) of the AOI each native projection's TILES span.
+            # Not to be confused with the scene_coverage coordinate, which is
+            # per-timestep and says how much of the AOI one scene imaged.
+            if _native_crs_share is not None:
+                stac.attrs["native_crs_share"] = [
+                    float(s) for s in np.asarray(_native_crs_share).ravel()
+                ]
         if isinstance(polygon, list):
             bbox = polygon
         else:
