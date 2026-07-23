@@ -51,7 +51,7 @@ import cv2
 
 from .get_data import get_stac, get_solar_geometry
 from .get_update import get_stac_parameters
-from .export_cfg import export_stac, open_cube
+from .export_cfg import export_stac, open_cube, normalize_stack_name
 from .cloud_masking import get_cloud_layers, mask_stac_clouds, mask_from_probability
 
 # SCL classes treated as cloud by the package's SCL masking (see
@@ -75,7 +75,9 @@ def _resolve_cube(input_cube):
         opened.append(ds)
         input_cube = ds
     if isinstance(input_cube, xr.Dataset):
-        input_cube = input_cube["Spectral_Temporal_Stack"]
+        # A Dataset handed in directly bypassed open_cube's migration, so a
+        # legacy time-series name is normalised here.
+        input_cube = normalize_stack_name(input_cube)["Time_Series"]
     if not isinstance(input_cube, xr.DataArray):
         raise TypeError(
             f"input_cube must be a cube path, Dataset or DataArray, got {type(input_cube)}"

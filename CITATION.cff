@@ -20,8 +20,8 @@ authors:
 repository-code: "https://github.com/BaturalpArisoy/stac2cube"
 url: "https://github.com/BaturalpArisoy/stac2cube"
 
-version: "1.4.0"
-date-released: 2025-02-05
+version: "1.5.0"
+date-released: 2026-07-23
 doi: "10.5281/zenodo.18495808"
 
 preferred-citation:
@@ -40,8 +40,8 @@ preferred-citation:
       given-names: Stefan
     - family-names: Ullmann
       given-names: Tobias
-  year: 2025
-  version: "1.4.0"
+  year: 2026
+  version: "1.5.0"
   journal: "Zenodo"
   doi: "10.5281/zenodo.18495808"
   url: "https://doi.org/10.5281/zenodo.18495808"

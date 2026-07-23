@@ -349,20 +349,35 @@ HELP_MD = r"""
 - Keep `False` if you want to generate cloud mask cube and choose your own threshold (`2_Cloudmask_Data_Cube.ipynb`).  
 - Set `True` for quick/rough masking (example: large areas).
 
-**stats**  
-- If `None` → no stats cubes.  
-- Creates additional data variables in the output dataset with the specified statistics.  
+**stats** (temporal composites)
+- If `None` → no composites, just the time series.
+- Creates additional data variables in the output dataset with the specified statistics.
 - See `missions()` → `stats`.
 - `mean_timeseries` calculates mean over the full time series; `mean_monthly` calculates mean for each month present in the time series; `mean_annual` calculates mean for each year present in the time series.
 - ONE FOR ALL: `mean_all` generates `mean_timeseries` + `mean_monthly` + `mean_annual` (same for other stats).
-- Disabled if `aggregator` is `NOT` `None`.
+- Computed AFTER the scene filters (`scene_cloud_coverage`, `dates`, `partial_scene_handling`), so a composite always describes the scenes that survived them.
 
-**aggregator**  
-- Generates a single scene of either mean or median along the time dimension for each selected band and index.
-- If `None` → no aggregation.  
-- `mean` or `median`, not together.  
+**keep_timeseries**
+- `True` (default) → the time series is kept alongside the composites.
+- `False` → the time series is dropped and only the `stats` composites are written (the "I just want the median" case). Requires at least one `stats` entry; not allowed with `update` or `aggregator`.
+- Such a cube has no time axis, so it cannot be updated, co-registered or cloud-masked afterwards (super-resolution and the Data Cube Editor do accept it).
+
+**dates**
+- Keep only these acquisition dates, applied after the cube is built.
+- Accepts `"YYYY-MM-DD"` or a full timestamp (`"2024-04-01T00:00:00.000000000"`).
+- Single cube only: rejected for multi-feature (batch) polygon files and in `update` mode.
+
+**export_format**
+- `None` (default) → format inferred from the `output` extension (`.zarr` → Zarr, otherwise NetCDF).
+- `"netcdf"` / `"zarr"` → explicit, and validated against the path.
+- `"cogs"` → `output` is a FOLDER of Cloud-Optimized GeoTIFFs (one per date). In batch mode each feature gets its own subfolder.
+
+**aggregator** (legacy)
+- Generates a single scene of either mean or median along the time dimension for each selected band and index, replacing the time series.
+- If `None` → no aggregation.
+- `mean` or `median`, not together.
 - See `missions()` → `aggregators`.
-- Disables `stats`.
+- Superseded by `stats` + `keep_timeseries=False`, which does the same thing for any statistic and names the layer after it (`aggregator="median"` == `stats=["median_timeseries"], keep_timeseries=False`). Kept so existing configs keep working; the interface no longer emits it.
 
 **source**
 - Which STAC API / data provider to pull from. If `None` → `element84`.

@@ -6,7 +6,7 @@ import numpy as np
 import xarray as xr
 import sys
 from tqdm.auto import tqdm
-from .export_cfg import export_stac, open_cube
+from .export_cfg import export_stac, open_cube, normalize_stack_name
 from .clip import compute_cloud_percentage
 from rasterio.transform import Affine
 import rioxarray as rio
@@ -231,16 +231,17 @@ def get_cloud_layers(
         # without a round-trip to disk); open_cube only handles paths.
         if isinstance(source_cube, (str, os.PathLike)):
             with open_cube(source_cube) as ds:
-                if "Spectral_Temporal_Stack" in ds:
-                    reference_times = ds["Spectral_Temporal_Stack"].time.values
+                if "Time_Series" in ds:
+                    reference_times = ds["Time_Series"].time.values
                 else:
                     reference_times = ds["time"].values
         else:
             _sc = source_cube
             if isinstance(_sc, xr.Dataset):
+                _sc = normalize_stack_name(_sc)
                 _sc = (
-                    _sc["Spectral_Temporal_Stack"]
-                    if "Spectral_Temporal_Stack" in _sc
+                    _sc["Time_Series"]
+                    if "Time_Series" in _sc
                     else _sc[list(_sc.data_vars)[0]]
                 )
             reference_times = _sc.time.values
@@ -513,7 +514,7 @@ def mask_stac_clouds(stac, cloud, mask_layer, output=None, compress=False,
         if isinstance(stac, (str, os.PathLike)):
             _ds = open_cube(stac)
             _opened.append(_ds)
-            stac = _ds.Spectral_Temporal_Stack
+            stac = _ds.Time_Series
 
         if isinstance(cloud, (str, os.PathLike)):
             _ds = open_cube(cloud)
@@ -521,7 +522,8 @@ def mask_stac_clouds(stac, cloud, mask_layer, output=None, compress=False,
             cloud = _ds.Cloud_Stack
 
         if isinstance(stac, xr.Dataset):
-            stac = stac.Spectral_Temporal_Stack
+            # In-memory Dataset: bypasses open_cube's legacy-name migration.
+            stac = normalize_stack_name(stac).Time_Series
 
         if isinstance(cloud, xr.Dataset):
             cloud = cloud.Cloud_Stack
@@ -629,14 +631,15 @@ def cloud_filter(inp, max_cloud):
     """
     Keep only time steps where cloud_percentage <= max_cloud.
 
-    - if inp is a netcdf path (str): open it, take ds["Spectral_Temporal_Stack"], filter
-    - if inp is an xr.Dataset: take ds["Spectral_Temporal_Stack"], filter
+    - if inp is a netcdf path (str): open it, take ds["Time_Series"], filter
+    - if inp is an xr.Dataset: take ds["Time_Series"], filter
     - if inp is an xr.DataArray: filter directly
     """
     if isinstance(inp, str):
-        da = open_cube(inp)["Spectral_Temporal_Stack"]
+        da = open_cube(inp)["Time_Series"]
     elif isinstance(inp, xr.Dataset):
-        da = inp["Spectral_Temporal_Stack"]
+        # In-memory Dataset: bypasses open_cube, so migrate a legacy name here.
+        da = normalize_stack_name(inp)["Time_Series"]
     else:  # assume xr.DataArray
         da = inp
 
@@ -728,7 +731,7 @@ def build_cloud_mask_cube(cube, output=None, q=False):
     Parameters
     ----------
     cube : str | Path
-        Path to a cube with a 'Spectral_Temporal_Stack' built with an SCL
+        Path to a cube with a 'Time_Series' built with an SCL
         cloud strategy (cloud_status clouds_detected / scl_masked /
         scl_shadow_masked).
     output : str, optional
@@ -741,10 +744,10 @@ def build_cloud_mask_cube(cube, output=None, q=False):
     xr.DataArray named 'Cloud_Stack' (time, band, y, x).
     """
     with open_cube(cube) as _ds:
-        if "Spectral_Temporal_Stack" not in _ds.data_vars:
+        if "Time_Series" not in _ds.data_vars:
             raise ValueError(
                 "build_cloud_mask_cube needs a cube with a "
-                "'Spectral_Temporal_Stack' layer (a spectral data cube, not a "
+                "'Time_Series' layer (a spectral data cube, not a "
                 f"mask/cloud cube). Found: {list(_ds.data_vars)}"
             )
 

@@ -202,7 +202,7 @@ A documentation file on how to use stac2cube features on terrabyte's HPC for com
 ### Software
 **Please include the exact version**
 
-    Arisoy, B., Betz, F., Stauch, G., Klein, D., Dech, S., & Ullmann, T. (2025). stac2cube (Version 1.4.0). Zenodo. https://zenodo.org/records/18495808
+    Arisoy, B., Betz, F., Stauch, G., Klein, D., Dech, S., & Ullmann, T. (2026). stac2cube (Version 1.5.0). Zenodo. https://zenodo.org/records/18495808
 
 
 ## Contact 

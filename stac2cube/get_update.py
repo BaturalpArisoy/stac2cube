@@ -8,14 +8,41 @@ from .export_cfg import open_cube
 # from .vector_refiner import proj_2_geo
 
 
+def _require_timeseries_layer(ds):
+    """Refuse a cube that carries no time-series layer to update.
+
+    Updating means fetching the dates a cube is missing and concatenating them
+    onto its time axis, so it needs the time series itself. A composite-only
+    cube (built with keep_timeseries=False) has no per-date data and no time
+    axis - without this guard the missing layer slipped through and failed much
+    later, deep inside the concat, with an unrelated message.
+    """
+    # Only real raster layers - not the scalar CRS grid-mapping variable
+    # (spatial_ref), which would otherwise read as one of the composites.
+    layers = [
+        str(v)
+        for v in ds.data_vars
+        if "y" in ds[v].dims and "x" in ds[v].dims
+    ] or [str(v) for v in ds.data_vars]
+    raise ValueError(
+        "This cube has no time series to update: it holds only temporal "
+        f"composites ({', '.join(layers)}). Updating adds the missing dates "
+        "to a time series, so it needs a cube built with the time series "
+        "kept. Rebuild over the wider date range instead, or update the "
+        "original time-series cube and recompute the composites from it."
+    )
+
+
 def get_stac_parameters(stac_existing):
 
     if isinstance(stac_existing, (str, os.PathLike)):
         stac_existing = open_cube(stac_existing)
-        if "Spectral_Temporal_Stack" in list(stac_existing.data_vars):
-            stac_existing = stac_existing.Spectral_Temporal_Stack
+        if "Time_Series" in list(stac_existing.data_vars):
+            stac_existing = stac_existing.Time_Series
         elif "Cloud_Stack" in list(stac_existing.data_vars):
             stac_existing = stac_existing.Cloud_Stack
+        else:
+            _require_timeseries_layer(stac_existing)
 
     # Polygon. np.asarray: NetCDF stores the attr as an ndarray, Zarr (JSON
     # attrs) returns a plain list - normalize before .tolist().
@@ -106,11 +133,13 @@ def get_stac_parameters(stac_existing):
 def update_stac(stac_existing, stac_updated, new_bands=None):
 
     stac_existing = open_cube(stac_existing)
-    if "Spectral_Temporal_Stack" in list(stac_existing.data_vars):
-        stac_existing = stac_existing.Spectral_Temporal_Stack
+    if "Time_Series" in list(stac_existing.data_vars):
+        stac_existing = stac_existing.Time_Series
     elif "Cloud_Stack" in list(stac_existing.data_vars):
         stac_existing = stac_existing.Cloud_Stack
-    # stac_existing = stac_existing.Spectral_Temporal_Stack
+    else:
+        _require_timeseries_layer(stac_existing)
+    # stac_existing = stac_existing.Time_Series
 
     # Floor existing times to day up front so both the band merge and the time
     # concat align cleanly with the new data (main.py floors stac_updated).

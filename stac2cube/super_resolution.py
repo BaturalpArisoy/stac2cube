@@ -13,7 +13,7 @@ from affine import Affine
 from tqdm.auto import tqdm
 
 from .get_spectral_indices import calculate_spectral_index
-from .export_cfg import open_cube, is_zarr_path, _write_zarr
+from .export_cfg import open_cube, is_zarr_path, _write_zarr, resolve_stack_var
 
 
 @contextlib.contextmanager
@@ -420,7 +420,7 @@ def superresolve_single_time(
     # 8) BUILD FINAL XARRAY OUTPUT (already cropped)
     # ============================================================
     arr = superX.numpy()
-    var_name = da.name or "Spectral_Temporal_Stack"
+    var_name = da.name or "Time_Series"
 
     da_hr = xr.DataArray(
         arr,
@@ -469,7 +469,7 @@ def superresolve_single_time(
 def super_resolve_cube(
     input_path,
     output_path: str | None = None,
-    var_name="Spectral_Temporal_Stack",
+    var_name="Time_Series",
     nan_pixel_buffer: int | None = None,  # NaN-mask dilation in OUTPUT pixels; None = per-mode default
     model_type: str | None = None,  # None | "rgbn" | "full_spectral" | "20to10"
     model_dir: str | None = None,   # folder containing the 'model' dir (e.g. interactive/)
@@ -631,6 +631,9 @@ def super_resolve_cube(
         )
 
     ds_in = open_cube(input_path)
+    # open_cube already migrated a legacy time-series name; map a legacy
+    # var_name typed by an older script forward too, so both keep working.
+    var_name = resolve_stack_var(ds_in, var_name)
     dataarray = ds_in[var_name]
 
     crs_wkt, tf = _extract_cf_crs_and_geotransform(ds_in, var_name)

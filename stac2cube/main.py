@@ -105,6 +105,49 @@ def _export_result(
     return export_stac(stac, output, crs, transform, compress=compress)
 
 
+def _drop_timeseries(stac, keep_timeseries):
+    """Drop the full time series, leaving the computed composites alone.
+
+    Called right AFTER calculate_statistics, so every composite has already
+    been reduced from the (filtered) time series - dropping is the last step,
+    never an input to it. No-op when the time series is kept, when the object
+    is not a Dataset, or when the variable is not there.
+    """
+    if keep_timeseries:
+        return stac
+    if not isinstance(stac, xr.Dataset):
+        return stac
+    if "Time_Series" not in stac.data_vars:
+        return stac
+    remaining = [v for v in stac.data_vars if v != "Time_Series"]
+    if not remaining:
+        # Guarded by the keep_timeseries preconditions, but never hand back an
+        # empty cube if some mission/stat combination produced no composite.
+        raise ValueError(
+            "keep_timeseries=False would leave an empty cube: the requested "
+            "stats produced no composite variable."
+        )
+    out = stac.drop_vars("Time_Series")
+
+    # Every composite reduces over time, so once the time series is gone no
+    # variable uses the time axis - but xarray keeps the `time` dimension (and
+    # the per-scene coords hanging off it) alive on the Dataset. Left in place
+    # the cube would advertise `time: N` with a cloud_percentage per date while
+    # holding no per-date data at all, and any `"time" in ds.dims` check - the
+    # natural "is this a time series?" test - would answer yes. Drop the
+    # orphans. Guarded: if some composite ever does keep a time axis, keep them.
+    if any("time" in out[v].dims for v in out.data_vars):
+        return out
+    orphans = [
+        name
+        for name, coord in out.coords.items()
+        if "time" in coord.dims
+    ]
+    if orphans:
+        out = out.drop_vars(orphans)
+    return out
+
+
 def _normalize_dates(dates):
     """The ``dates`` keep-list as a set of ISO timestamp strings.
 
@@ -149,7 +192,7 @@ def _mask_new_scenes_s2cloudless(
 
     ``stac`` holds only the newly added dates, so the L1C download + detector
     (and optional shadow projection) run on those scenes alone. Returns the
-    masked Spectral_Temporal_Stack. Imported lazily: cloud_masking imports this
+    masked Time_Series. Imported lazily: cloud_masking imports this
     module, so a top-level import would be circular at package load.
     """
     if shadow:
@@ -192,6 +235,7 @@ def get_stac_layers(
     export_format=None,
     aggregator=None,
     stats=None,
+    keep_timeseries=True,
     topographic_features=None,
     animation=None,
     update=None,
@@ -293,6 +337,40 @@ def get_stac_layers(
 
     # --- Export format --------------------------------------------------------
     _export_format = _validate_export_format(output, export_format)
+
+    # --- Temporal composites: keep or drop the time series ---------------------
+    # stats adds one variable per requested composite NEXT TO the time series.
+    # keep_timeseries=False drops the time series afterwards, so the cube holds
+    # the composites alone (the "I only want the median" case). The composites
+    # are always computed FIRST, over the filtered dates - dropping is the last
+    # step, never an input to it.
+    _keep_ts = bool(keep_timeseries)
+    if not _keep_ts:
+        if not stats:
+            raise ValueError(
+                "keep_timeseries=False needs at least one composite in stats: "
+                "dropping the time series without one would leave an empty "
+                "cube. Pass e.g. stats=['median_timeseries']."
+            )
+        if aggregator:
+            raise ValueError(
+                "keep_timeseries=False cannot be combined with an aggregator - "
+                "they are two ways to ask for the same thing. Use stats "
+                f"(e.g. stats=['{aggregator}_timeseries']) with "
+                "keep_timeseries=False, and leave aggregator=None."
+            )
+        if update:
+            raise ValueError(
+                "keep_timeseries=False is not supported in update mode: it "
+                "would replace the stored cube with composites alone, leaving "
+                "nothing to update later. Update the cube first, then build "
+                "the composites from it."
+            )
+        if mission == "cop_dem_glo_30":
+            raise ValueError(
+                "keep_timeseries=False needs a time series to reduce, and "
+                "cop_dem_glo_30 cubes have no time dimension."
+            )
 
     # With a temporal aggregator, the composite must describe the SURVIVING
     # scenes (GUI order: build -> filter -> composite), so the collapse is
@@ -493,6 +571,7 @@ def get_stac_layers(
                     export_format=None,  # nothing is written here; see below
                     aggregator=aggregator,
                     stats=stats,
+                    keep_timeseries=keep_timeseries,
                     topographic_features=topographic_features,
                     animation=animation,
                     update=update,
@@ -891,7 +970,7 @@ def get_stac_layers(
         stac = stac.rename("Topographic_Features")
     else:
         stac = stac.transpose("time", "band", "y", "x")
-        stac = stac.rename("Spectral_Temporal_Stack")
+        stac = stac.rename("Time_Series")
 
     # Add metadata as attributes
     if not update:
@@ -1383,6 +1462,7 @@ def get_stac_layers(
         if stats and (mission != "cop_dem_glo_30") and (not aggregator):
             base_attrs = dict(stac.attrs)
             stac = calculate_statistics(stac, stats)
+            stac = _drop_timeseries(stac, _keep_ts)
             stac.attrs.update(base_attrs)
             try:
                 stac.rio.write_crs(crs, inplace=True)
@@ -1400,6 +1480,7 @@ def get_stac_layers(
         # Optional stats/composites (only when time dimension exists)
         if stats and (mission != "cop_dem_glo_30") and (not aggregator):
             stac = calculate_statistics(stac, stats)
+            stac = _drop_timeseries(stac, _keep_ts)
 
         # One consistent debug print for ALL cases (agg on/off, stats on/off)
         if not q:

@@ -109,7 +109,7 @@ def calculate_statistics(stac: xr.DataArray, stats):
       - "{op}" is treated as "{op}_timeseries"
 
     Returns:
-      xr.Dataset with variable "Spectral_Temporal_Stack" plus composite variables.
+      xr.Dataset with variable "Time_Series" plus composite variables.
     """
     if "time" not in stac.dims:
         raise ValueError(
@@ -153,4 +153,4 @@ def calculate_statistics(stac: xr.DataArray, stats):
                 # drop scalar coord 'year' to avoid Dataset merge conflicts
                 computed[varname] = annual.sel(year=yy).reset_coords(drop=True)
 
-    return xr.Dataset({"Spectral_Temporal_Stack": stac, **computed})
+    return xr.Dataset({"Time_Series": stac, **computed})

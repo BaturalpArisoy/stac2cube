@@ -12,6 +12,68 @@ import itertools
 
 
 
+# Name of the time-series variable every cube is built around. Cubes written
+# before the rename carry the old name; they are migrated on read (see
+# normalize_stack_name / open_cube), so nothing else in the codebase - and no
+# legacy file on disk - needs to know the old spelling.
+STACK_VAR = "Time_Series"
+LEGACY_STACK_VARS = ("Spectral_Temporal_Stack",)
+
+
+def normalize_stack_name(obj):
+    """Rename a legacy time-series variable to :data:`STACK_VAR`.
+
+    Applied to everything read through :func:`open_cube`, so a cube written
+    before the rename is indistinguishable from a fresh one everywhere
+    downstream. Also usable on an in-memory Dataset/DataArray handed straight
+    to a public function (those bypass ``open_cube``). Returns the object
+    unchanged when there is nothing to rename, and never renames onto an
+    existing ``STACK_VAR`` variable.
+    """
+    if isinstance(obj, xr.DataArray):
+        if str(obj.name) in LEGACY_STACK_VARS:
+            return obj.rename(STACK_VAR)
+        return obj
+    if not isinstance(obj, xr.Dataset):
+        return obj
+    if STACK_VAR in obj.data_vars:
+        return obj
+    for legacy in LEGACY_STACK_VARS:
+        if legacy in obj.data_vars:
+            out = obj.rename({legacy: STACK_VAR})
+            # rename() drops the dataset's closer (verified: _close becomes
+            # None), which would turn every `with open_cube(...) as ds:` on a
+            # legacy cube into a leaked file handle - and on Windows a locked
+            # file the pipeline cannot overwrite. Re-attach it, exactly as the
+            # zarr coord-materialization above has to.
+            try:
+                out.set_close(obj._close)
+            except AttributeError:
+                out._close = obj._close
+            return out
+    return obj
+
+
+def resolve_stack_var(obj, var_name=None):
+    """The time-series variable name to use on ``obj``.
+
+    Accepts a legacy name passed by an older script and maps it forward, so
+    ``var_name="Spectral_Temporal_Stack"`` keeps working after the rename.
+    ``None`` resolves to whichever of the new/legacy names the object carries.
+    """
+    names = list(getattr(obj, "data_vars", []) or [])
+    if var_name is not None:
+        if str(var_name) in LEGACY_STACK_VARS and STACK_VAR in names:
+            return STACK_VAR
+        return var_name
+    if STACK_VAR in names:
+        return STACK_VAR
+    for legacy in LEGACY_STACK_VARS:
+        if legacy in names:
+            return legacy
+    return STACK_VAR
+
+
 def is_zarr_path(path) -> bool:
     """True when ``path`` names a Zarr store (by the ``.zarr`` extension)."""
     return str(path).lower().rstrip("/\\").endswith(".zarr")
@@ -92,8 +154,8 @@ def open_cube(path, chunks=None):
         _restore_array_attrs(out.attrs)
         for var in out.variables.values():
             _restore_array_attrs(var.attrs)
-        return out
-    return xr.open_dataset(path, chunks=chunks)
+        return normalize_stack_name(out)
+    return normalize_stack_name(xr.open_dataset(path, chunks=chunks))
 
 
 def _is_dask_backed(obj) -> bool:
@@ -235,7 +297,7 @@ def export_stac(
             stac = stac.compute()
 
     if isinstance(stac, xr.DataArray):
-        name = var_name or stac.name or "Spectral_Temporal_Stack"
+        name = var_name or stac.name or "Time_Series"
         ds = stac.to_dataset(name=name)
     else:
         ds = stac
@@ -392,7 +454,7 @@ def export_to_cogs(
             single = da.isel(**isel_dict)
 
             # Build filename
-            # Special case: Spectral_Temporal_Stack with only time dim -> use date only (old behavior)
+            # Special case: Time_Series with only time dim -> use date only (old behavior)
             if date_only_for_time_series and iter_dims == ["time"]:
                 t = single["time"].values if "time" in single.coords else da["time"].values[idx_tuple[0]]
                 date_str = _format_coord_value(t, "time")
@@ -432,23 +494,23 @@ def export_to_cogs(
         if len(stac.data_vars) == 0:
             raise ValueError("Dataset contains no data variables to export.")
 
-        # 1) Export Spectral_Temporal_Stack first (if present) using date filenames
-        if "Spectral_Temporal_Stack" in stac.data_vars:
-            da_main = stac["Spectral_Temporal_Stack"]
+        # 1) Export Time_Series first (if present) using date filenames
+        if "Time_Series" in stac.data_vars:
+            da_main = stac["Time_Series"]
             if "band" not in da_main.dims:
                 raise ValueError(
-                    "Spectral_Temporal_Stack is missing required 'band' dimension "
+                    "Time_Series is missing required 'band' dimension "
                     f"(dims: {da_main.dims})."
                 )
             _export_dataarray(
                 da_main,
-                base_name="Spectral_Temporal_Stack",
+                base_name="Time_Series",
                 date_only_for_time_series=("time" in da_main.dims),
             )
 
         # 2) Export remaining variables with variable-based filenames
         for var_name, da in stac.data_vars.items():
-            if var_name == "Spectral_Temporal_Stack":
+            if var_name == "Time_Series":
                 continue
 
             if not isinstance(da, xr.DataArray):

@@ -3,7 +3,13 @@ import io
 import numpy as np
 import xarray as xr
 import rioxarray
-from .export_cfg import open_cube, is_zarr_path, _write_zarr
+from .export_cfg import (
+    open_cube,
+    is_zarr_path,
+    _write_zarr,
+    normalize_stack_name,
+    resolve_stack_var,
+)
 from arosics import COREG
 from geoarray import GeoArray
 from rasterio.transform import Affine
@@ -44,7 +50,7 @@ def _get_bounds_from_gt(gt, height, width):
     return left, bottom, right, top
 
 
-def _load_coreg_input(input_obj, stack_name="Spectral_Temporal_Stack"):
+def _load_coreg_input(input_obj, stack_name="Time_Series"):
     """
     Accept input as:
       - str path to NetCDF
@@ -59,6 +65,9 @@ def _load_coreg_input(input_obj, stack_name="Spectral_Temporal_Stack"):
     """
     if isinstance(input_obj, str):
         ds = open_cube(input_obj)
+        # open_cube migrated a legacy time-series name; map a legacy stack_name
+        # passed by an older script forward too.
+        stack_name = resolve_stack_var(ds, stack_name)
         if stack_name not in ds:
             raise KeyError(
                 f"Dataset has no variable '{stack_name}'. Found: {list(ds.data_vars)}"
@@ -67,7 +76,10 @@ def _load_coreg_input(input_obj, stack_name="Spectral_Temporal_Stack"):
         input_path_str = input_obj
 
     elif isinstance(input_obj, xr.Dataset):
-        ds = input_obj
+        # An in-memory Dataset bypasses open_cube, so migrate it here.
+        ds = normalize_stack_name(input_obj)
+        input_obj = ds
+        stack_name = resolve_stack_var(ds, stack_name)
         if stack_name not in ds:
             raise KeyError(
                 f"Dataset has no variable '{stack_name}'. Found: {list(ds.data_vars)}"
@@ -77,7 +89,7 @@ def _load_coreg_input(input_obj, stack_name="Spectral_Temporal_Stack"):
 
     elif isinstance(input_obj, xr.DataArray):
         ds = None
-        stack = input_obj
+        stack = normalize_stack_name(input_obj)
         input_path_str = None
 
     else:
@@ -872,7 +884,7 @@ def _edge_roughness(data_tyxb, band_idx):
 def coregister_cube(
     input_path,  # str | xr.Dataset | xr.DataArray
     output_path=None,
-    stack_name="Spectral_Temporal_Stack",
+    stack_name="Time_Series",
     first_scene_mode="composite",
     composite_window_days=30,
     grid_size=7,
@@ -1218,9 +1230,9 @@ def coregister_cube(
     corrected_stack = corrected_stack.rio.write_crs(crs_wkt, inplace=True)
     if input_crs_attr is not None:
         corrected_stack.attrs["crs"] = input_crs_attr
-    corrected_stack.name = "Spectral_Temporal_Stack"
+    corrected_stack.name = "Time_Series"
 
-    out_ds = xr.Dataset({"Spectral_Temporal_Stack": corrected_stack})
+    out_ds = xr.Dataset({"Time_Series": corrected_stack})
     if stac is not None and "spatial_ref" in stac.variables:
         out_ds["spatial_ref"] = stac["spatial_ref"]
     if cloud_pct_da is not None and "time" in getattr(cloud_pct_da, "dims", ()):
@@ -1306,7 +1318,7 @@ from IPython.display import display
 import plotly.graph_objects as go
 
 
-def _load_stac(path, stack_name="Spectral_Temporal_Stack"):
+def _load_stac(path, stack_name="Time_Series"):
     with open_cube(path) as ds:
         return ds[stack_name].load()
 
@@ -1364,7 +1376,7 @@ def _to_dmy(time_values):
 
 def spectral_profiler(
     before_path, after_path, band="ndvi",
-    stack_name="Spectral_Temporal_Stack", rgb_time="first"
+    stack_name="Time_Series", rgb_time="first"
 ):
     stac_b = _load_stac(before_path, stack_name)
     stac_a = _load_stac(after_path, stack_name)

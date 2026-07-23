@@ -294,10 +294,10 @@ def _raster_layer_names(ds):
 
 
 def _layer_display_name(name):
-    """User-facing label for a layer variable. 'Spectral_Temporal_Stack' is the
+    """User-facing label for a layer variable. 'Time_Series' is the
     internal name of the full time series, so show it as 'Time Series'; other
     layers (temporal composites like median_timeseries) keep their own name."""
-    return "Time Series" if str(name) == "Spectral_Temporal_Stack" else str(name)
+    return "Time Series" if str(name) == "Time_Series" else str(name)
 
 
 def _layer_dropdown_options(ds, names):
@@ -435,14 +435,15 @@ PARAM_HELP_HTML = {
         <li><code>mean_annual</code> -> one image per year: mean of 2020, and mean of 2021</li>
     </ul>
     """,
+    # Kept for the legacy `aggregator` parameter of get_stac_layers; the GUI's
+    # own control is now the Temporal Composites section.
     "aggregator": """
-    <b>Temporal Composite</b><br>
-    Collapses the currently displayed dates into a single scene (<code>mean</code>
-    or <code>median</code>) per band/index.<br><br>
-    It is applied to the <b>filtered</b> Result, so filter by date / max cloud %
-    first, then compose - the composite uses only the dates you kept.<br><br>
-    If <b>None</b>: no temporal composite (the full time series is kept).<br>
-    Setting a temporal composite disables <code>stats</code>.<br><br>
+    <b>Temporal Composite</b> (legacy parameter)<br>
+    Collapses the time axis into a single scene (<code>mean</code> or
+    <code>median</code>) per band/index, replacing the time series.<br><br>
+    The interface no longer uses it: tick <b>Mean/Median of the time series</b>
+    in <b>Temporal Composites</b> and untick <b>Keep the full time series</b>
+    for the same result, with the composite named after the statistic.<br><br>
     """,
     "export_mode": """
     <b>Which format should I pick?</b><br>
@@ -1631,22 +1632,43 @@ def datacube_builder(missions_func=missions):
         description="Clear dates", layout=widgets.Layout(width="110px"), disabled=True
     )
 
-    # The "now you can visualize / export" note lives BELOW the Max cloud box
-    # (placed into result_box later), so it reads as the last step after the user
-    # has optionally filtered. Filled in only when a ready cube is shown; cleared
-    # to empty (renders nothing) otherwise.
+    # The "these are filters" note lives BELOW the Max cloud box (placed into
+    # result_box later), so it reads as the last step after the user has
+    # optionally filtered. Filled in only when a ready cube is shown; cleared to
+    # empty (renders nothing) otherwise.
     _RESULT_VIZ_NOTE_HTML = (
         "<div style='font-size:12px; color:#1e3a8a; background:#eff6ff; "
         "border:1px solid #bfdbfe; border-radius:6px; padding:6px 8px; "
-        "margin:10px 0 0 0;'>"
-        "ℹ️ Now you can <b>visualize</b> the data cube in the <b>Visualization</b> "
-        "section below or save it via <b>Export Options</b>. You can also pick "
-        "specific <b>dates</b> and/or, if available, filter by <b>max cloud %</b>. "
-        "If stats were selected, they will be recalculated over the filtered "
-        "time series."
+        "margin:0;'>"
+        "<ul style='margin:0; padding:0 0 0 18px;'>"
+        "<li><b>Max cloud %</b> (estimated per scene, even if not masked) and "
+        "<b>Date Selection</b> are filters: they decide which dates stay. "
+        "<b>Temporal Composites</b> (changes Result), <b>Visualization</b> and "
+        "<b>Export</b> below all use only those filtered dates.</li>"
+        "<li><b>Export Current Result</b> exports exactly what is seen in the "
+        "Result section.</li>"
+        "<li><b>Strategy for s2cloudless:</b> filter out highly cloudy scenes, "
+        "so the computationally heavy s2cloudless algorithm is not wasted on "
+        "them - it saves you time and RAM by not exporting these useless "
+        "scenes, and saves storage space too.</li>"
+        "</ul>"
         "</div>"
     )
+    # Collapsed by default, same one-line toggle as the notes strip above: it is
+    # guidance to open when wanted, not something to re-read after every filter
+    # change. Open/closed survives re-renders (_show_result_summary runs on each
+    # filter change), so a strip that snapped shut each time would be unusable.
     result_viz_note_w = widgets.HTML(value="")
+    result_viz_note_toggle = widgets.Button(
+        description="",
+        layout=widgets.Layout(width="100%", height="auto", display="none"),
+    )
+    result_viz_note_toggle.add_class("stac2cube-notes-toggle")
+    result_viz_note_row = widgets.VBox(
+        [result_viz_note_toggle, result_viz_note_w],
+        layout=widgets.Layout(width="100%", gap="4px", margin="10px 0 0 0"),
+    )
+    result_viz_note_row.add_class("stac2cube-notes-row")
 
     # Co-registration size warning: when the AOI is small for good co-registration
     # this is shown BELOW the visualize/export note in the Result section (not in
@@ -1698,27 +1720,69 @@ def datacube_builder(missions_func=missions):
         layout=widgets.Layout(width="auto", display="none", flex="0 0 auto"),
     )
 
+    # -------------------------------------------------------------------------
+    # Temporal Composites: statistics reduced over the dates kept in the Result
+    # panel. The two most used ones (mean / median of the whole series) get
+    # their own highlighted checkboxes; everything else - min/max/std and the
+    # monthly / annual variants - lives in the "More composites" list below.
+    #
+    # Composites are computed AFTER the date and cloud filters, from the
+    # surviving scenes, and they need no rebuild: the build only fetches the
+    # time series, every composite is derived from it (see _apply_composites).
+    # -------------------------------------------------------------------------
+    _COMMON_COMPOSITES = ("mean_timeseries", "median_timeseries")
+
+    comp_mean_w = widgets.Checkbox(
+        value=False,
+        description="Mean of the time series",
+        indent=False,
+        layout=widgets.Layout(width="99%"),
+    )
+    comp_median_w = widgets.Checkbox(
+        value=False,
+        description="Median of the time series",
+        indent=False,
+        layout=widgets.Layout(width="99%"),
+    )
+
+    # "More composites": the same SelectMultiple as before, minus the two
+    # promoted above so no composite can be picked twice.
     stats_w = widgets.SelectMultiple(
         options=[],
         value=(),
-        description="Stats:",
+        description="",
         rows=8,
         layout=widgets.Layout(width="100%", height="220px"),
-        style={"description_width": "120px"},
+        style={"description_width": "0px"},
     )
 
     stats_all_btn = widgets.Button(
-        description="All stats", layout=widgets.Layout(width="110px")
+        description="All", layout=widgets.Layout(width="70px")
     )
     stats_none_btn = widgets.Button(
-        description="Clear stats", layout=widgets.Layout(width="110px")
+        description="Clear", layout=widgets.Layout(width="70px")
     )
 
+    # Off -> the time series is dropped from the export and only the composites
+    # are written ("I just want the median"). Force-ticked and greyed while no
+    # composite is selected, since dropping it then would leave nothing.
+    keep_ts_w = widgets.Checkbox(
+        value=True,
+        description="Keep the full time series",
+        indent=False,
+        disabled=True,
+        layout=widgets.Layout(width="99%"),
+    )
+    keep_ts_note = widgets.HTML("")
+
+    # Legacy: the mean/median Temporal Composite dropdown this section replaces.
+    # Kept as a hidden widget (never shown, never emitted) so the mission-meta
+    # wiring and the paste-settings path that still reference it keep working.
     aggregator_w = widgets.Dropdown(
         options=[("None", None)],
         value=None,
         description="Temporal Composite:",
-        layout=widgets.Layout(width="100%"),
+        layout=widgets.Layout(width="100%", display="none"),
         style={"description_width": "150px"},
     )
     # ipywidgets shows a BLANK label for value=None even when a ("None", None)
@@ -1907,6 +1971,21 @@ def datacube_builder(missions_func=missions):
         layout=widgets.Layout(width="auto"),
         disabled=True,
     )
+
+    # Which layer of the result to view: the time series, or any composite the
+    # Temporal Composites section produced. Repopulated whenever the result or
+    # the composite selection changes (_refresh_viz_layers). A composite has no
+    # time axis, so picking one hides the viewer's date control and greys the
+    # GIF maker, which needs per-date frames.
+    viz_layer_w = widgets.Dropdown(
+        options=[("Time Series", "Time_Series")],
+        value="Time_Series",
+        description="Layer:",
+        style={"description_width": "initial"},
+        layout=widgets.Layout(width="auto"),
+        disabled=True,
+    )
+    viz_layer_note = widgets.HTML("")
 
     gif_display_mode_w = widgets.Dropdown(
         options=[
@@ -2196,7 +2275,7 @@ def datacube_builder(missions_func=missions):
         invented: missing fields show '-'."""
         da = obj
         if isinstance(obj, xr.Dataset):
-            da = obj.get("Spectral_Temporal_Stack")
+            da = obj.get("Time_Series")
             if da is None and len(obj.data_vars):
                 da = obj[list(obj.data_vars)[0]]
 
@@ -2220,7 +2299,7 @@ def datacube_builder(missions_func=missions):
         # Extra layers when stats were added (Dataset with more variables).
         extra_layers = []
         if isinstance(obj, xr.Dataset):
-            extra_layers = [v for v in obj.data_vars if v != "Spectral_Temporal_Stack"]
+            extra_layers = [v for v in obj.data_vars if v != "Time_Series"]
 
         rcell = "padding:4px 12px; text-align:right; color:#374151;"
         lcell = "padding:4px 12px; text-align:left;"
@@ -2417,7 +2496,7 @@ def datacube_builder(missions_func=missions):
             return True
         da = c
         if isinstance(c, xr.Dataset):
-            da = c.get("Spectral_Temporal_Stack")
+            da = c.get("Time_Series")
             if da is None and len(c.data_vars):
                 da = c[list(c.data_vars)[0]]
         if da is None:
@@ -2472,7 +2551,7 @@ def datacube_builder(missions_func=missions):
         try:
             da = obj
             if isinstance(obj, xr.Dataset):
-                da = obj.get("Spectral_Temporal_Stack")
+                da = obj.get("Time_Series")
                 if da is None and len(obj.data_vars):
                     da = obj[list(obj.data_vars)[0]]
             if da is None:
@@ -2548,7 +2627,7 @@ def datacube_builder(missions_func=missions):
         try:
             da = obj
             if isinstance(obj, xr.Dataset):
-                da = obj.get("Spectral_Temporal_Stack")
+                da = obj.get("Time_Series")
                 if da is None and len(obj.data_vars):
                     da = obj[list(obj.data_vars)[0]]
             if da is None or "time" not in getattr(da, "dims", ()):
@@ -2653,6 +2732,31 @@ def datacube_builder(missions_func=missions):
 
     result_notes_toggle.on_click(_on_notes_toggle)
 
+    # Same collapse mechanics for the "What is next?" guidance strip.
+    _next_open = {"open": False}
+
+    def _render_next_toggle():
+        arrow = "▾" if _next_open["open"] else "▸"
+        result_viz_note_toggle.description = f"{arrow}  ℹ️  What is next?"
+        result_viz_note_w.layout.display = "" if _next_open["open"] else "none"
+
+    def _on_next_toggle(_btn):
+        _next_open["open"] = not _next_open["open"]
+        _render_next_toggle()
+
+    result_viz_note_toggle.on_click(_on_next_toggle)
+
+    def _set_result_viz_note(show):
+        """Show or hide the collapsed "What is next?" strip."""
+        if not show:
+            result_viz_note_w.value = ""
+            result_viz_note_toggle.layout.display = "none"
+            result_viz_note_w.layout.display = "none"
+            return
+        result_viz_note_w.value = _RESULT_VIZ_NOTE_HTML
+        result_viz_note_toggle.layout.display = ""
+        _render_next_toggle()
+
     def _set_result_notes(notes):
         """Fill the notes strip from a list of ``(title, html)`` pairs (None
         entries dropped). An empty list hides the strip entirely, so a cube with
@@ -2700,7 +2804,7 @@ def datacube_builder(missions_func=missions):
         # The visualize/export note (a sibling widget below the Max cloud box) only
         # makes sense next to a ready cube - hide it for empty/failed results.
         empty = _result_is_empty(obj)
-        result_viz_note_w.value = "" if empty else _RESULT_VIZ_NOTE_HTML
+        _set_result_viz_note(not empty)
         # Notices live at the TOP of the Result section: the yellow Area Size
         # warning first (the only one with something to decide), then the blue
         # notes strip. Both collapse away entirely when they have nothing to say.
@@ -2784,8 +2888,8 @@ def datacube_builder(missions_func=missions):
 
         def _main_da(c):
             if isinstance(c, xr.Dataset):
-                if "Spectral_Temporal_Stack" in c.data_vars:
-                    return c["Spectral_Temporal_Stack"]
+                if "Time_Series" in c.data_vars:
+                    return c["Time_Series"]
                 return next(iter(c.data_vars.values()), None)
             return c
 
@@ -3047,37 +3151,42 @@ def datacube_builder(missions_func=missions):
     # Visualization helpers
     # -------------------------------------------------------------------------
     def _pick_dataarray_for_visualization(result_obj):
-        """
-        Visualization tools should use the main time-series stack.
-        Prefer Spectral_Temporal_Stack when a Dataset is returned (e.g., stats outputs).
+        """The layer to display: whichever the Layer dropdown selects.
+
+        Falls back to the time series (or the single variable of a one-layer
+        cube) when the dropdown's choice is not in this result - e.g. right
+        after the composite selection changed but before the dropdown was
+        repopulated.
         """
         if isinstance(result_obj, xr.DataArray):
             return result_obj
 
         if isinstance(result_obj, xr.Dataset):
-            if "Spectral_Temporal_Stack" in result_obj.data_vars:
-                return result_obj["Spectral_Temporal_Stack"]
-            if len(result_obj.data_vars) == 1:
-                only_name = list(result_obj.data_vars)[0]
-                return result_obj[only_name]
+            wanted = viz_layer_w.value
+            if wanted and wanted in result_obj.data_vars:
+                return result_obj[wanted]
+            if "Time_Series" in result_obj.data_vars:
+                return result_obj["Time_Series"]
+            layers = _raster_layer_names(result_obj)
+            if layers:
+                return result_obj[layers[0]]
             raise ValueError(
-                "Visualization needs the main time-series stack. "
-                "This result is a Dataset with multiple variables and no "
-                "'Spectral_Temporal_Stack' variable was found."
+                "This result has no raster layer to visualize "
+                f"(variables: {list(result_obj.data_vars)})."
             )
 
         raise TypeError(
             f"Unsupported result type for visualization: {type(result_obj)}"
         )
 
-    def _active_result_cube():
-        """The cube the viz tools act on: for a multi-feature list, the one chosen
-        in the feature dropdown; for a single cube, that cube; otherwise None.
+    def _active_result_cube(composite=True):
+        """The cube the viz tools act on: for a multi-feature list, the one
+        chosen in the feature dropdown; for a single cube, that cube; otherwise
+        None.
 
-        Visualization keeps the filtered TIME SERIES (composite=False): the
-        interactive viewer scrubs dates and the GIF animates them, neither of
-        which works once a Temporal Composite has collapsed the time axis. The
-        composite is the export product, shown in the Result panel instead."""
+        composite=True (default) includes the Temporal Composites, so the Layer
+        dropdown can show them. The GIF maker asks for composite=False: it
+        animates per-date frames, which only the time series has."""
         obj = state["result"]
         if obj is None:
             return None
@@ -3091,9 +3200,59 @@ def datacube_builder(missions_func=missions):
                 and 0 <= idx < len(obj)
                 and isinstance(obj[idx], (xr.DataArray, xr.Dataset))
             ):
-                return _effective_result(obj[idx], composite=False)
-            return _effective_result(cubes[0], composite=False)
-        return _effective_result(obj, composite=False)
+                return _effective_result(obj[idx], composite=composite)
+            return _effective_result(cubes[0], composite=composite)
+        return _effective_result(obj, composite=composite)
+
+    def _refresh_viz_layers():
+        """Repopulate the Layer dropdown from the current effective result, and
+        grey the GIF maker when the chosen layer has no time axis."""
+        try:
+            cube = _active_result_cube()
+        except Exception:
+            cube = None
+
+        if cube is None:
+            viz_layer_w.options = [("Time Series", "Time_Series")]
+            viz_layer_w.value = "Time_Series"
+            viz_layer_w.disabled = True
+            viz_layer_note.value = ""
+            return
+
+        if isinstance(cube, xr.DataArray):
+            names = [cube.name or "Time_Series"]
+            opts = [(_layer_display_name(names[0]), names[0])]
+        else:
+            names = _raster_layer_names(cube)
+            opts = [(_layer_display_name(n), n) for n in names]
+        if not opts:
+            opts = [("Time Series", "Time_Series")]
+            names = ["Time_Series"]
+
+        previous = viz_layer_w.value
+        viz_layer_w.options = opts
+        viz_layer_w.value = previous if previous in names else names[0]
+        # Only worth choosing when there is more than one layer.
+        viz_layer_w.disabled = len(opts) < 2
+
+        # A composite has no per-date frames to animate.
+        has_time = False
+        try:
+            sel = viz_layer_w.value
+            da = cube[sel] if isinstance(cube, xr.Dataset) else cube
+            has_time = "time" in getattr(da, "dims", ())
+        except Exception:
+            has_time = False
+        viz_make_gif_btn.disabled = not has_time
+        viz_layer_note.value = (
+            ""
+            if has_time
+            else (
+                "<div style='font-size:12px; color:#9a3412;'>"
+                "This layer is a single composite image - it has no dates to "
+                "scrub through or animate, so the GIF maker is off.</div>"
+            )
+        )
 
     # -------------------------------------------------------------------------
     # Result-panel cloud filter (drives table + visualization + export at once)
@@ -3103,7 +3262,7 @@ def datacube_builder(missions_func=missions):
         none. Structural lookup only - nothing is computed."""
         da = obj
         if isinstance(obj, xr.Dataset):
-            da = obj.get("Spectral_Temporal_Stack")
+            da = obj.get("Time_Series")
             if da is None and len(obj.data_vars):
                 da = obj[list(obj.data_vars)[0]]
         if da is None:
@@ -3154,6 +3313,64 @@ def datacube_builder(missions_func=missions):
             return obj
         return obj.isel(time=np.flatnonzero(keep))
 
+    def _dates_passing_cloud():
+        """The ISO timestamps that pass the current Max cloud % box, or None
+        when the filter is inactive or the cube carries no cloud %. NaN counts
+        as failing, matching _apply_cloud_threshold's `cp <= thr`."""
+        thr = int(result_cloud_max_w.value)
+        if thr >= 100:
+            return None
+        obj = state["result"]
+        if obj is None or isinstance(obj, list):
+            return None
+        cp = _result_cloud_pct(obj)
+        if cp is None or "time" not in getattr(obj, "dims", {}):
+            return None
+        try:
+            pct = np.asarray(cp.values, dtype=float)
+            tvals = np.asarray(obj["time"].values)
+        except Exception:
+            return None
+        if pct.shape[0] != tvals.shape[0]:
+            return None
+        return {
+            str(t)
+            for t, p in zip(tvals, pct)
+            if not np.isnan(p) and p <= thr
+        }
+
+    def _sync_date_picker_to_cloud():
+        """Untick the dates the Max cloud % filter removed, so the picker shows
+        what actually survives instead of leaving dropped dates highlighted.
+
+        The user's own ticks are remembered separately in
+        state["date_user_selection"], so raising the threshold brings their
+        dates straight back - the filter stays as reversible as before, it just
+        no longer lies about which dates are in the cube.
+        """
+        if result_date_w.disabled or not result_date_w.options:
+            return
+        all_vals = _result_date_all_values()
+        chosen = state.get("date_user_selection")
+        if chosen is None:
+            chosen = set(all_vals)
+        passing = _dates_passing_cloud()
+        new_val = tuple(
+            v
+            for v in all_vals
+            if v in chosen and (passing is None or v in passing)
+        )
+        if new_val == tuple(result_date_w.value):
+            return
+        # Guarded: this is a display sync, not a user choice - it must neither
+        # re-render (the caller does that once) nor overwrite what the user
+        # picked.
+        _date_filter_guard["busy"] = True
+        try:
+            result_date_w.value = new_val
+        finally:
+            _date_filter_guard["busy"] = False
+
     def _sync_cloud_filter_enabled(change=None):
         """The Result filter only makes sense when cloud masking is on AND the
         current build actually carries a cloud_percentage coord. Grey it out
@@ -3202,99 +3419,103 @@ def datacube_builder(missions_func=missions):
             return obj
         return obj.isel(time=np.flatnonzero(keep))
 
-    def _stats_tokens_used():
-        """The exact stats tokens passed to the most recent build (e.g.
-        ['mean_timeseries', 'max_timeseries']), or None if that build requested
-        no temporal statistics. Read from the stored build params, not the live
-        stats widget, so editing the widget after a build cannot desync it."""
-        p = state.get("last_call_params")
-        if not p:
-            return None
-        return p.get("stats") or None
+    def _selected_composites():
+        """The composite tokens ticked in the Temporal Composites section, in a
+        stable order: the two promoted ones first, then the "More composites"
+        list. Empty list = time series only."""
+        tokens = []
+        if comp_mean_w.value and not comp_mean_w.disabled:
+            tokens.append("mean_timeseries")
+        if comp_median_w.value and not comp_median_w.disabled:
+            tokens.append("median_timeseries")
+        if not stats_w.disabled:
+            tokens.extend(str(s) for s in stats_w.value)
+        return tokens
 
-    def _refresh_stats_single(filtered_cube, tokens):
-        """Rebuild the temporal-statistics variables of ONE filtered cube from its
-        already-sliced Spectral_Temporal_Stack, so the composites describe the
-        dates that survived the date/cloud filter instead of the full build. Lazy:
-        calculate_statistics assembles dask reductions and nothing computes until
-        export writes. Left untouched when the cube carries no stats, has no
-        time-series stack, or had its time axis collapsed by a composite."""
-        if not isinstance(filtered_cube, xr.Dataset):
+    def _stats_tokens_used():
+        """The composite tokens the Result/export should carry. Read from the
+        WIDGET, not from the stored build params: composites are derived from
+        the built time series, so changing them never needs a rebuild."""
+        return _selected_composites() or None
+
+    def _stack_of(obj):
+        """The time-series DataArray of a cube, or None when it has none."""
+        if isinstance(obj, xr.DataArray):
+            return obj
+        if isinstance(obj, xr.Dataset):
+            return obj.get("Time_Series")
+        return None
+
+    def _apply_composites_single(filtered_cube, tokens, keep_ts):
+        """Add the requested composites to ONE filtered cube, then optionally
+        drop the time series.
+
+        Reduced from the ALREADY-FILTERED stack, so every composite describes
+        exactly the dates kept in the Result panel. Uses the same
+        calculate_statistics() the headless path uses, so a SLURM run of the
+        copied settings produces identical layers. Lazy: the reductions are dask
+        graphs and nothing computes until preview or export.
+        """
+        stack = _stack_of(filtered_cube)
+        if stack is None:
             return filtered_cube
-        if "Spectral_Temporal_Stack" not in filtered_cube.data_vars:
-            return filtered_cube
-        stack = filtered_cube["Spectral_Temporal_Stack"]
         if "time" not in stack.dims or stack.sizes.get("time", 0) == 0:
             return filtered_cube
-        try:
-            base_attrs = dict(filtered_cube.attrs)
-            recomputed = calculate_statistics(stack, tokens)
-            recomputed.attrs.update(base_attrs)
-            return recomputed
-        except Exception:
-            # A stats recompute must never break the preview/export; fall back to
-            # the (stale-stats) filtered cube rather than raising.
-            return filtered_cube
 
-    def _refresh_stats(original, filtered):
-        """After the date/cloud views slice the time axis, the build-time stat
-        variables still describe the FULL series (Dataset.isel(time=...) leaves
-        time-less variables untouched). Recompute them from the filtered stack so
-        preview, visualization and export stay internally consistent. No-op when
-        the build requested no stats, or when nothing was actually filtered
-        (pass-through views return the original object unchanged)."""
-        tokens = _stats_tokens_used()
-        if not tokens:
-            return filtered
-        if isinstance(filtered, list):
-            orig = original if isinstance(original, list) else [original] * len(filtered)
-            return [
-                fc if fc is oc else _refresh_stats_single(fc, tokens)
-                for oc, fc in zip(orig, filtered)
+        base_attrs = dict(getattr(filtered_cube, "attrs", {}) or {})
+        out = calculate_statistics(stack, tokens)
+        out.attrs.update(base_attrs)
+
+        if not keep_ts and "Time_Series" in out.data_vars:
+            remaining = [
+                v for v in out.data_vars if v != "Time_Series"
             ]
-        if filtered is original:
-            return filtered
-        return _refresh_stats_single(filtered, tokens)
+            if remaining:
+                out = out.drop_vars("Time_Series")
+                # No variable uses the time axis once the series is gone; drop
+                # the orphaned time coords so the cube does not advertise dates
+                # it no longer holds (mirrors main._drop_timeseries).
+                if not any("time" in out[v].dims for v in out.data_vars):
+                    orphans = [
+                        n for n, c in out.coords.items() if "time" in c.dims
+                    ]
+                    if orphans:
+                        out = out.drop_vars(orphans)
+        return out
 
-    def _apply_temporal_composite(obj):
-        """Collapse the time axis into a single mean/median scene, per the
-        Temporal Composite selector. Applied AFTER the date/cloud filters, so the
-        composite describes exactly the dates the user kept in the Result panel
-        (build -> filter -> composite), unlike get_stac_layers(aggregator=...)
-        which collapses at build time and leaves nothing to filter.
+    def _apply_composites(obj):
+        """Apply the Temporal Composites selection to the filtered result.
 
-        No-op when no composite is selected, when there is no time axis, or for
-        non-cube entries (failed features in a batch list). Lazy: the reduction is
-        a dask graph, nothing computes until export/preview. state["result"] is
-        never mutated - a reduced copy is returned."""
-        agg = aggregator_w.value
-        if not agg or obj is None:
+        No-op when no composite is ticked - the cube stays the plain time
+        series. Never mutates state["result"]; a derived copy is returned.
+        """
+        tokens = _selected_composites()
+        if not tokens or obj is None:
             return obj
+        keep_ts = bool(keep_ts_w.value) or keep_ts_w.disabled
         if isinstance(obj, list):
-            return [_apply_temporal_composite(o) for o in obj]
-        if "time" not in getattr(obj, "dims", ()):
-            return obj
-        if agg == "mean":
-            return obj.mean(dim="time", skipna=True, keep_attrs=True)
-        if agg == "median":
-            return obj.median(dim="time", skipna=True, keep_attrs=True)
-        return obj
+            return [
+                _apply_composites_single(o, tokens, keep_ts)
+                if isinstance(o, (xr.DataArray, xr.Dataset))
+                else o
+                for o in obj
+            ]
+        return _apply_composites_single(obj, tokens, keep_ts)
 
     def _effective_result(obj, composite=True):
-        """The cube as the Result panel / export should see it: the built cube with
-        BOTH reversible views applied - the Max cloud % threshold and the date
-        picker - its temporal statistics recomputed on the surviving dates, and
-        (when composite=True) the Temporal Composite collapsed over those dates.
-        state["result"] itself is never mutated.
+        """The cube as the Result panel / export should see it: the built cube
+        with both reversible views applied - the Max cloud % threshold and the
+        date picker - and (when composite=True) the Temporal Composites computed
+        over the surviving dates. state["result"] itself is never mutated.
 
-        composite=False returns the filtered time series without collapsing it;
-        visualization (interactive viewer + GIF) uses that, since a single
-        composite scene has no time axis to scrub or animate."""
+        composite=False returns the filtered time series without composites;
+        visualization uses it for the time slider and the GIF, which need the
+        per-date axis. The viewer picks a composite layer through its own Layer
+        dropdown instead."""
         filtered = _apply_date_selection(_apply_cloud_threshold(obj))
-        refreshed = _refresh_stats(obj, filtered)
         if composite:
-            return _apply_temporal_composite(refreshed)
-        return refreshed
+            return _apply_composites(filtered)
+        return filtered
 
     def _populate_result_dates(obj):
         """Fill the Result date picker from a single cube's time axis (one entry
@@ -3308,6 +3529,7 @@ def datacube_builder(missions_func=missions):
                 result_date_w.value = ()
             finally:
                 _date_filter_guard["busy"] = False
+            state["date_user_selection"] = None
             result_date_w.disabled = True
             result_date_all_btn.disabled = True
             result_date_clear_btn.disabled = True
@@ -3380,6 +3602,9 @@ def datacube_builder(missions_func=missions):
             result_date_w.value = tuple(v for _, v in options)  # all selected
         finally:
             _date_filter_guard["busy"] = False
+        # A fresh build resets the remembered user choice to "all dates"; the
+        # cloud filter is then applied on top by the caller's re-render.
+        state["date_user_selection"] = {v for _, v in options}
         result_date_w.disabled = False
         result_date_all_btn.disabled = False
         result_date_clear_btn.disabled = False
@@ -3393,6 +3618,9 @@ def datacube_builder(missions_func=missions):
             return
         if state["result"] is None:
             return
+        # Reflect the new threshold in the date picker first (guarded, so it
+        # re-renders only once, below).
+        _sync_date_picker_to_cloud()
         # Emptiness is checked on the filtered TIME SERIES (composite=False): a
         # composite of zero dates would drop the time axis and read as a valid
         # (all-NaN) scene, hiding the "raise the threshold" hint.
@@ -3400,7 +3628,7 @@ def datacube_builder(missions_func=missions):
         # Threshold excludes every scene: the build succeeded, so don't show the
         # generic 'no data' failure - tell the user to raise the value instead.
         if _result_is_empty(filtered) and not _result_is_empty(state["result"]):
-            result_viz_note_w.value = ""
+            _set_result_viz_note(False)
             _set_result_notes([])
             _set_coreg_warning("")
             with result_out:
@@ -3413,7 +3641,8 @@ def datacube_builder(missions_func=missions):
                     "</div>"
                 ))
             return
-        _show_result_summary(_apply_temporal_composite(filtered))
+        _show_result_summary(_apply_composites(filtered))
+        _refresh_viz_layers()
         _update_gif_output_suggestion()
 
     def _on_result_date_change(change=None):
@@ -3425,11 +3654,23 @@ def datacube_builder(missions_func=missions):
             return
         if state["result"] is None:
             return
+        # Record the user's own choice. Dates the cloud filter is currently
+        # hiding are kept in the remembered set: the user cannot see them to
+        # untick, so unticking a visible one must not silently discard them -
+        # raising the threshold still brings them back.
+        _passing = _dates_passing_cloud()
+        _prev = state.get("date_user_selection")
+        _hidden = (
+            set()
+            if (_passing is None or _prev is None)
+            else {v for v in _prev if v not in _passing}
+        )
+        state["date_user_selection"] = set(result_date_w.value) | _hidden
         # See _on_result_cloud_max_change: check emptiness on the time series, not
         # the composite (which would drop the time axis and mask an empty view).
         filtered = _effective_result(state["result"], composite=False)
         if _result_is_empty(filtered) and not _result_is_empty(state["result"]):
-            result_viz_note_w.value = ""
+            _set_result_viz_note(False)
             _set_result_notes([])
             _set_coreg_warning("")
             with result_out:
@@ -3443,13 +3684,20 @@ def datacube_builder(missions_func=missions):
                     "</div>"
                 ))
             return
-        _show_result_summary(_apply_temporal_composite(filtered))
+        _show_result_summary(_apply_composites(filtered))
+        _refresh_viz_layers()
         _update_gif_output_suggestion()
 
     def _on_result_dates_all(_):
-        result_date_w.value = tuple(_result_date_all_values())
+        # "All dates" restores the user's full choice; the cloud filter is then
+        # re-applied on top, so cloudy dates stay unticked (and come back by
+        # raising Max cloud %).
+        state["date_user_selection"] = set(_result_date_all_values())
+        _sync_date_picker_to_cloud()
+        _on_result_date_change()
 
     def _on_result_dates_clear(_):
+        state["date_user_selection"] = set()
         result_date_w.value = ()
 
     result_cloud_max_w.observe(_on_result_cloud_max_change, names="value")
@@ -3505,7 +3753,7 @@ def datacube_builder(missions_func=missions):
     def _refresh_gif_band_options():
         """Populate the animation band selectors from the active cube's bands."""
         try:
-            cube = _active_result_cube()
+            cube = _active_result_cube(composite=False)
             if cube is None:
                 return
             da = _pick_dataarray_for_visualization(cube)
@@ -3599,7 +3847,6 @@ def datacube_builder(missions_func=missions):
                 "strongly asking you to select at least one band to continue."
             )
         indices = _selected_index_values() or None
-        stats = list(stats_w.value) if len(stats_w.value) > 0 else None
 
         clip_raster = bool(clip_raster_w.value)
         cloud_masking = cloud_masking_w.value
@@ -3646,14 +3893,15 @@ def datacube_builder(missions_func=missions):
             "return_cloud_mask": return_cloud_mask,
             "indices": indices,
             "output": output_for_get_stac,
-            # Temporal Composite is intentionally NOT sent to the build. The GUI
-            # builds the full time series so the user can filter by date/cloud
-            # first, then applies the composite client-side over the filtered
-            # result (see _apply_temporal_composite / _effective_result). Copy Settings
-            # still writes aggregator for headless/SLURM runs where interactive
-            # filtering isn't available.
+            # Temporal Composites are intentionally NOT sent to the build. The
+            # GUI builds the plain time series so the user can filter by
+            # date/cloud first, then derives every composite from the filtered
+            # result client-side (see _apply_composites / _effective_result) -
+            # which also means changing a composite needs no rebuild. Copy
+            # Settings still writes stats + keep_timeseries for headless/SLURM
+            # runs, where interactive filtering isn't available.
             "aggregator": None,
-            "stats": stats,
+            "stats": None,
             "source": source,
             "resampling_method": resampling_w.value,
             # None = Automatic: get_stac_layers picks the projection natively
@@ -3688,8 +3936,8 @@ def datacube_builder(missions_func=missions):
         if isinstance(result_obj, xr.DataArray):
             da = result_obj
         elif isinstance(result_obj, xr.Dataset):
-            if "Spectral_Temporal_Stack" in result_obj.data_vars:
-                da = result_obj["Spectral_Temporal_Stack"]
+            if "Time_Series" in result_obj.data_vars:
+                da = result_obj["Time_Series"]
             elif len(result_obj.data_vars) == 1:
                 only_name = list(result_obj.data_vars)[0]
                 da = result_obj[only_name]
@@ -3723,7 +3971,7 @@ def datacube_builder(missions_func=missions):
         def _ref(c):
             da = c
             if isinstance(c, xr.Dataset):
-                da = c.get("Spectral_Temporal_Stack")
+                da = c.get("Time_Series")
                 if da is None and len(c.data_vars):
                     da = c[list(c.data_vars)[0]]
             crs_ref = da.attrs.get("crs") if da is not None else None
@@ -3742,7 +3990,7 @@ def datacube_builder(missions_func=missions):
                 out_i = f"{stem}_{i}{ext}"
                 Path(out_i).parent.mkdir(parents=True, exist_ok=True)
                 if isinstance(c, xr.DataArray):
-                    export_stac(c, out_i, var_name=(c.name or "Spectral_Temporal_Stack"),
+                    export_stac(c, out_i, var_name=(c.name or "Time_Series"),
                                 compress=compress)
                 else:
                     crs_ref, transform_ref = _ref(c)
@@ -3832,7 +4080,7 @@ def datacube_builder(missions_func=missions):
 
         def _main_da(c):
             if isinstance(c, xr.Dataset):
-                da = c.get("Spectral_Temporal_Stack")
+                da = c.get("Time_Series")
                 if da is None and len(c.data_vars):
                     da = c[list(c.data_vars)[0]]
                 return da
@@ -3906,15 +4154,15 @@ def datacube_builder(missions_func=missions):
                 export_stac(
                     stac=obj,
                     output=target,
-                    var_name=(obj.name or "Spectral_Temporal_Stack"),
+                    var_name=(obj.name or "Time_Series"),
                     compress=compress,
                 )
 
             elif isinstance(obj, xr.Dataset):
                 # Fix for stats datasets: Dataset may not expose .crs / .transform directly
                 ref_da = None
-                if "Spectral_Temporal_Stack" in obj.data_vars:
-                    ref_da = obj["Spectral_Temporal_Stack"]
+                if "Time_Series" in obj.data_vars:
+                    ref_da = obj["Time_Series"]
                 elif len(obj.data_vars) > 0:
                     ref_da = obj[list(obj.data_vars)[0]]
 
@@ -3983,7 +4231,11 @@ def datacube_builder(missions_func=missions):
 
         bands = list(bands_w.value) if len(bands_w.value) > 0 else None
         indices = _selected_index_values() or None
-        stats = list(stats_w.value) if len(stats_w.value) > 0 else None
+        # Temporal Composites section -> stats + keep_timeseries. Headless
+        # applies them after the same date/cloud filters this JSON carries, so
+        # a SLURM run reduces over exactly the scenes the Result panel shows.
+        stats = _selected_composites() or None
+        keep_timeseries = bool(keep_ts_w.value) or keep_ts_w.disabled
 
         clip_raster = bool(clip_raster_w.value)
         cloud_masking = cloud_masking_w.value
@@ -3996,7 +4248,9 @@ def datacube_builder(missions_func=missions):
         cloud_mask_output = None
         if (cloud_masking is True) and (export_mask_w.value is True):
             cloud_mask_output = (cloud_mask_output_w.value or "").strip() or None
-        aggregator = aggregator_w.value
+        # The mean/median dropdown retired into the Temporal Composites section;
+        # its job is now stats + keep_timeseries, so no aggregator is emitted.
+        aggregator = None
 
         export_mode = export_mode_w.value
         export_target = (
@@ -4097,6 +4351,7 @@ def datacube_builder(missions_func=missions):
                 "min_scene_coverage": float(min_coverage_w.value) / 100.0,
                 "aggregator": aggregator,
                 "stats": stats,
+                "keep_timeseries": keep_timeseries,
                 # zlib compression is a NetCDF-only option (Zarr and COGs bring
                 # their own codecs), and the checkbox is hidden - not reset -
                 # for the other modes, so pin it to the mode it applies to.
@@ -4397,17 +4652,46 @@ def datacube_builder(missions_func=missions):
                 "Scene metadata not published by this source: " + ", ".join(missing_meta)
             )
 
-        # 10) Temporal composite + statistics.
-        _set_dropdown_if_valid(
-            aggregator_w, params.get("aggregator"), "Temporal composite", warnings
-        )
-        stats_values = _option_values(stats_w)
+        # 10) Temporal Composites. stats carries the tokens; the two promoted
+        #     ones map to their checkboxes and the rest to the "More composites"
+        #     list. A legacy config written with the retired aggregator dropdown
+        #     is translated into the equivalent composite (aggregator="median"
+        #     == median_timeseries without the time series).
         wanted_stats = [str(s) for s in (params.get("stats") or [])]
+        _legacy_agg = params.get("aggregator")
+        _legacy_used = False
+        if _legacy_agg and f"{_legacy_agg}_timeseries" not in wanted_stats:
+            wanted_stats.append(f"{_legacy_agg}_timeseries")
+            _legacy_used = True
+
+        comp_mean_w.value = "mean_timeseries" in wanted_stats
+        comp_median_w.value = "median_timeseries" in wanted_stats
+
+        stats_values = _option_values(stats_w)
         stats_w.value = tuple(s for s in wanted_stats if s in stats_values)
-        missing_stats = [s for s in wanted_stats if s not in stats_values]
+        missing_stats = [
+            s
+            for s in wanted_stats
+            if s not in stats_values and s not in _COMMON_COMPOSITES
+        ]
         if missing_stats:
             warnings.append(
-                "Statistics not available for this mission: " + ", ".join(missing_stats)
+                "Composites not available for this mission: " + ", ".join(missing_stats)
+            )
+
+        # keep_timeseries: explicit in current settings; a legacy aggregator
+        # config implies it (the dropdown always replaced the time series).
+        _keep_ts_val = params.get("keep_timeseries")
+        if _keep_ts_val is None:
+            _keep_ts_val = not _legacy_used
+        _sync_keep_timeseries()  # un-grey it first if a composite is selected
+        keep_ts_w.value = bool(_keep_ts_val) or keep_ts_w.disabled
+        _sync_keep_timeseries()
+        if _legacy_used:
+            warnings.append(
+                f"These settings use the retired Temporal Composite "
+                f"'{_legacy_agg}' - applied as '{_legacy_agg}_timeseries' with "
+                "the time series dropped."
             )
 
         # 11) Export. export_format names the mode outright (netcdf / zarr /
@@ -4765,24 +5049,55 @@ def datacube_builder(missions_func=missions):
             _sync_output_filechooser_from_mode_and_text()
 
     def _apply_aggregator_stats_logic(*_):
+        """Enable the Temporal Composites controls for missions that support
+        them (i.e. that have a time axis to reduce).
+
+        The old mutual-exclusion rule is gone: the mean/median Temporal
+        Composite dropdown has been replaced by the two promoted checkboxes in
+        this same section, so there is no second control to contradict.
         """
-        aggregator != None disables stats (per docs).
-        """
-        agg_selected = aggregator_w.value is not None
         meta = mission_meta[mission_dd.value]
-        stats_supported = len(_to_list_or_empty(meta.get("stats"))) > 0
+        supported = len(_to_list_or_empty(meta.get("stats"))) > 0
 
-        stats_disabled = agg_selected or (not stats_supported)
+        if not supported:
+            if comp_mean_w.value:
+                comp_mean_w.value = False
+            if comp_median_w.value:
+                comp_median_w.value = False
+            if len(stats_w.value) > 0:
+                stats_w.value = ()
 
-        # Composite replaces stats: clear any leftover selection so the next build
-        # doesn't compute stats behind a disabled widget (the build now always
-        # keeps the time series, so it no longer silently ignores stats itself).
-        if agg_selected and len(stats_w.value) > 0:
-            stats_w.value = ()
+        comp_mean_w.disabled = not supported
+        comp_median_w.disabled = not supported
+        stats_w.disabled = not supported
+        stats_all_btn.disabled = not supported
+        stats_none_btn.disabled = not supported
+        _sync_keep_timeseries()
 
-        stats_w.disabled = stats_disabled
-        stats_all_btn.disabled = stats_disabled
-        stats_none_btn.disabled = stats_disabled
+    def _sync_keep_timeseries(*_):
+        """"Keep the full time series" only becomes a real choice once at least
+        one composite is selected - otherwise unticking it would leave an empty
+        cube, so it is force-ticked and greyed with the reason."""
+        has_composite = bool(_selected_composites())
+        if not has_composite and not keep_ts_w.value:
+            keep_ts_w.value = True
+        keep_ts_w.disabled = not has_composite
+        if not has_composite:
+            keep_ts_note.value = (
+                "<div style='font-size:12px; color:#6b7280;'>"
+                "Select a composite above to be able to export it without the "
+                "time series.</div>"
+            )
+        elif not keep_ts_w.value:
+            keep_ts_note.value = (
+                "<div style='font-size:12px; color:#1e40af; background:#eff6ff; "
+                "border:1px solid #bfdbfe; border-radius:6px; padding:6px 8px;'>"
+                "The export will contain the selected composites only - no "
+                "per-date time series. Such a cube <b>cannot</b> be updated, "
+                "co-registered or cloud-masked afterwards, but <b>can</b> be super-resolved.</div>"
+            )
+        else:
+            keep_ts_note.value = ""
 
     def _update_from_mission(*_):
         m_name = mission_dd.value
@@ -4898,14 +5213,21 @@ def datacube_builder(missions_func=missions):
         # Stats
         stats_list = _to_list_or_empty(meta.get("stats"))
 
-        # Hide *_all shortcuts in GUI (users can multi-select directly)
+        # Hide *_all shortcuts in GUI (users can multi-select directly), and
+        # the two promoted to their own checkboxes above the list, so no
+        # composite can be selected from two places at once.
         stats_list = [
-            s for s in stats_list if not (isinstance(s, str) and s.endswith("_all"))
+            s
+            for s in stats_list
+            if not (isinstance(s, str) and s.endswith("_all"))
+            and str(s) not in _COMMON_COMPOSITES
         ]
 
         stats_w.options = stats_list
 
         stats_w.value = ()
+        comp_mean_w.value = False
+        comp_median_w.value = False
         stats_w.disabled = len(stats_list) == 0
         stats_all_btn.disabled = len(stats_list) == 0
         stats_none_btn.disabled = len(stats_list) == 0
@@ -4981,7 +5303,10 @@ def datacube_builder(missions_func=missions):
 
     def _on_viz_make_gif_clicked(_):
         try:
-            cube = _active_result_cube()
+            # composite=False: the animation needs the per-date frames, which
+            # only the time series has (the button is greyed for a composite
+            # layer anyway - see _refresh_viz_layers).
+            cube = _active_result_cube(composite=False)
             if cube is None:
                 with anim_out:
                     clear_output()
@@ -5062,7 +5387,7 @@ def datacube_builder(missions_func=missions):
         # NEW cube deserves.
         _set_coreg_warning("")
         _set_result_notes([])
-        result_viz_note_w.value = ""
+        _set_result_viz_note(False)
 
         try:
             params, export_mode, export_target = _prepare_get_stac_layers_params()
@@ -5305,14 +5630,18 @@ def datacube_builder(missions_func=missions):
 
     mission_dd.observe(_update_from_mission, names="value")
 
-    def _on_aggregator_change(*_):
-        # Composite disables stats, then re-render the Result panel so the user
-        # immediately sees the collapsed (or restored time-series) view. The
-        # re-render no-ops when no cube has been built yet.
-        _apply_aggregator_stats_logic()
+    def _on_composites_change(*_):
+        """A composite selection changed: re-sync the keep-time-series choice
+        and re-render the Result panel so the layer list updates immediately.
+        No rebuild - composites are derived from the built time series. The
+        re-render no-ops when no cube has been built yet."""
+        _sync_keep_timeseries()
         _on_result_cloud_max_change()
 
-    aggregator_w.observe(_on_aggregator_change, names="value")
+    comp_mean_w.observe(_on_composites_change, names="value")
+    comp_median_w.observe(_on_composites_change, names="value")
+    stats_w.observe(_on_composites_change, names="value")
+    keep_ts_w.observe(_on_composites_change, names="value")
     export_mode_w.observe(lambda change: _apply_export_mode_defaults(), names="value")
     daterange_mode_w.observe(
         lambda change: _update_daterange_placeholder(), names="value"
@@ -5458,34 +5787,11 @@ def datacube_builder(missions_func=missions):
         [
             widgets.HTML(
                 "<div style='font-weight:500; font-size:12px; color:#374151;'>"
-                "Stats Explanation</div>"
+                "Composite Explanation</div>"
             ),
             _stats_help_btn,
         ],
         layout=widgets.Layout(align_items="center", gap="6px"),
-    )
-
-    stats_box = _field_group(
-        "Stats",
-        [
-            widgets.HTML(
-                "<div style='font-size:12px; color:#1e3a8a; background:#eff6ff; "
-                "border:1px solid #bfdbfe; border-radius:6px; padding:8px 10px; "
-                "margin:0 0 6px 0;'>"
-                "Stats are additionally generated along the original time series. "
-                "If you want to export a single Temporal Composite instead of the "
-                "time series, you can set it in <b>Export Options</b>."
-                "</div>"
-            ),
-            _stats_explain_row,
-            _stats_help_box,
-            _boxed(stats_w),
-            widgets.HBox(
-                [stats_all_btn, stats_none_btn], layout=widgets.Layout(gap="6px")
-            ),
-        ],
-        collapsible=True,
-        open=False,
     )
 
     # Wrap a set of widgets in a lighter, boxed sub-panel (see the
@@ -5552,6 +5858,43 @@ def datacube_builder(missions_func=missions):
             "<div style='height:2px; background:#cbd5e1; border-radius:1px; "
             "margin:18px 0 16px 0;'></div>"
         )
+
+    # --- Temporal Composites section -----------------------------------------
+    # Two promoted checkboxes (what most people want) in an accented sub-panel,
+    # then the long list of the remaining ops and the monthly / annual variants
+    # in a collapsed group, then the keep-or-drop choice.
+    composites_box = widgets.VBox(
+        [
+            widgets.HTML(
+                "<div style='font-size:12px; color:#475569; margin:0 0 2px 0;'>"
+                "Statistics calculated over the dates kept in the Result "
+                "section above."
+                "</div>"
+            ),
+            _subpanel([comp_mean_w, comp_median_w], accent="blue"),
+            widgets.HTML("<div style='height:10px;'></div>"),
+            _field_group(
+                "More Composites",
+                [
+                    _stats_explain_row,
+                    _stats_help_box,
+                    _boxed(stats_w),
+                    widgets.HBox(
+                        [stats_all_btn, stats_none_btn],
+                        layout=widgets.Layout(gap="6px"),
+                    ),
+                ],
+                subtitle="Minimum, maximum and standard deviation, plus "
+                "monthly and annual composites.",
+                collapsible=True,
+                open=False,
+            ),
+            _line_divider(),
+            keep_ts_w,
+            keep_ts_note,
+        ],
+        layout=widgets.Layout(width="100%", gap="6px"),
+    )
 
     # --- Time period: simple From/To pickers, with advanced modes tucked away ---
     # The OR divider lives inside date_simple_box so it hides together with the
@@ -6265,7 +6608,7 @@ def datacube_builder(missions_func=missions):
                 return
             da = obj
             if isinstance(obj, xr.Dataset):
-                da = obj.get("Spectral_Temporal_Stack")
+                da = obj.get("Time_Series")
                 if da is None and len(obj.data_vars):
                     da = obj[list(obj.data_vars)[0]]
             attrs = getattr(da, "attrs", {}) or {}
@@ -6487,20 +6830,18 @@ def datacube_builder(missions_func=missions):
             tile_handling_group,
             # Uncoloured = optional additions that do not change the base cube.
             scene_metadata_group,
-            stats_box,
+            # Stats moved out to the Temporal Composites card below the Result
+            # section: they reduce over the dates kept there, not over the
+            # build, and they need no rebuild to change.
             _collapse_row(advanced_collapse_btn),
         ],
         layout=widgets.Layout(width="100%", gap="6px"),
     )
 
-    # Temporal Composite now lives just above Export mode (not in Advanced
-    # Parameters), because it acts on the filtered Result, not on the build.
-    temporal_composite_group = _field_group(
-        "Temporal Composite",
-        [_boxed(aggregator_w)],
-        subtitle="Collapse the currently displayed dates into a single mean or median scene. Keep None to maintain the full time series.",
-        help_html=PARAM_HELP_HTML.get("aggregator", ""),
-    )
+    # The mean/median Temporal Composite dropdown that used to sit here has
+    # been replaced by the Temporal Composites card (below the Result section),
+    # where it is the "Mean/Median of the time series" checkbox plus "Keep the
+    # full time series". Export Options is about format and path again.
 
     # Slim guidance line shown under the selector: the right source is study-area
     # and cloud-masking dependent, so nudge unsure users to the helper tools
@@ -6703,7 +7044,7 @@ def datacube_builder(missions_func=missions):
     source_preset2_cb, _sp2_row = _make_preset_row(
         "<b>Good time-series that can be used for probabilistic cloud masking</b>",
         "I need to use s2cloudless later with my own custom thresholds but I am "
-        "aware that some dates are missing, let's 'Check data availability' below.",
+        "aware that some dates prior to 2021 might be missing, let's 'Check data availability' below.",
     )
     _source_preset_cbs = [source_preset1_cb, source_preset2_cb]
     _source_preset_label = widgets.HTML(
@@ -6818,7 +7159,6 @@ def datacube_builder(missions_func=missions):
     export_box = widgets.VBox(
         [
             #widgets.HTML("<b>Export Options</b>"),
-            temporal_composite_group,
             export_mode_group,
         ],
         layout=widgets.Layout(width="100%", gap="6px"),
@@ -6844,10 +7184,17 @@ def datacube_builder(missions_func=missions):
                 "1) Interactive View",
                 # The output area the viewer renders into lives INSIDE the
                 # group, so collapsing the header hides the opened map too.
-                [viz_renderer_box, viz_dropdown_btn, viz_out],
+                [
+                    viz_layer_w,
+                    viz_layer_note,
+                    viz_renderer_box,
+                    viz_dropdown_btn,
+                    viz_out,
+                ],
                 subtitle="Explore the cube scene by scene: presets (RGB, false "
                 "color, indices), any single band in grey levels, or a custom "
-                "R/G/B band combination. The viewer opens below.",
+                "R/G/B band combination. Pick the time series or any temporal "
+                "composite in Layer. The viewer opens below.",
                 collapsible=True,
                 open=True,
             ),
@@ -6960,12 +7307,20 @@ def datacube_builder(missions_func=missions):
     result_box = widgets.VBox(
         [result_coreg_warn_row, result_notes_row,
          result_out, result_cloud_filter_row, result_date_row,
-         result_viz_note_w],
+         result_viz_note_row],
         layout=widgets.Layout(width="99%", gap="6px"),
     )
     result_acc = widgets.Accordion(children=[result_box], selected_index=None)
     result_acc.set_title(0, "Result")
     result_acc.layout = widgets.Layout(width="99%")
+
+    # Temporal Composites: its own accordion between Result and Visualization.
+    # AFTER Result because the composites reduce over the dates kept there, and
+    # BEFORE Visualization because the viewer's Layer dropdown lists whatever
+    # this section produced.
+    composites_acc = widgets.Accordion(children=[composites_box], selected_index=None)
+    composites_acc.set_title(0, "Temporal Composites")
+    composites_acc.layout = widgets.Layout(width="99%")
 
     # Top action row: build the preview. Exporting is a separate, deliberate
     # step that lives with the Export Options section further down.
@@ -6998,6 +7353,11 @@ def datacube_builder(missions_func=missions):
     result_card = widgets.VBox([result_acc], layout=widgets.Layout(width="100%"))
     result_card.add_class("stac2cube-card")
 
+    composites_card = widgets.VBox(
+        [composites_acc], layout=widgets.Layout(width="100%")
+    )
+    composites_card.add_class("stac2cube-card")
+
     viz_card = widgets.VBox([viz_acc], layout=widgets.Layout(width="100%"))
     viz_card.add_class("stac2cube-card")
 
@@ -7025,6 +7385,9 @@ def datacube_builder(missions_func=missions):
 
             spacer_between_cards,
             result_card,
+
+            spacer_between_cards,
+            composites_card,   # composites reduce over the dates kept above
 
             spacer_between_cards,
             viz_card,          # ✅ Visualization moved above Status
@@ -7094,7 +7457,16 @@ def datacube_builder(missions_func=missions):
             "cloud_preset1": cloud_preset1_cb,
             "cloud_preset2": cloud_preset2_cb,
             "cloud_preset3": cloud_preset3_cb,
+            # Temporal Composites: the two promoted checkboxes, the "More
+            # composites" list ("stats") and the keep-or-drop choice.
             "stats": stats_w,
+            "composite_mean": comp_mean_w,
+            "composite_median": comp_median_w,
+            "keep_timeseries": keep_ts_w,
+            "viz_layer": viz_layer_w,
+            # Result-panel scene filters the composites reduce over.
+            "result_cloud_max": result_cloud_max_w,
+            "result_dates": result_date_w,
             "scene_metadata": scene_metadata_w,
             "export_granule_metadata": export_granule_meta_w,
             "tile_handling": tile_handling_w,
@@ -7142,7 +7514,7 @@ def datacube_editor():
     Data Cube Editor GUI
     --------------------
     - Load NetCDF (.nc) or Zarr (.zarr) data cube
-    - Work on a current in-memory result (starts with Spectral_Temporal_Stack)
+    - Work on a current in-memory result (starts with Time_Series)
     - Slice by time and band (chained)
     - Filter by cloud coverage using existing cloud_percentage coord (chained)
     - Clip raster (vector file or bbox list; applied via Edit button)
@@ -7193,27 +7565,17 @@ def datacube_editor():
         Indices that are already present in the cube are skipped (not recomputed).
         """,
         "stats": """
-        <b>stats</b><br>
-        If empty/None: no stats cubes.<br>
-        Creates additional data variables with requested statistics, generated
-        along the original time series.<br><br>
+        <b>Temporal Composites</b><br>
+        Each composite reduces the time axis into one image per band / index,
+        added as its own layer next to the time series.<br><br>
         Examples:
         <ul style="margin:4px 0 0 18px; padding:0;">
             <li><code>mean_timeseries</code> -> mean of all time steps</li>
             <li><code>mean_monthly</code> -> mean of each month</li>
             <li><code>mean_annual</code> -> mean of each year</li>
         </ul>
-        To export a single Temporal Composite instead of the time series, use the
-        <b>Temporal Composite</b> selector in <b>Export Options</b>.
-        """,
-        "aggregator": """
-        <b>Temporal Composite</b><br>
-        Collapses the loaded cube's time axis into a single scene
-        (<code>mean</code> or <code>median</code>) per band / index, applied at
-        export time.<br><br>
-        It affects only the exported file - the interactive viewer and the
-        animation still show the full time series.<br><br>
-        If <b>None</b>: no temporal composite (the full time series is exported).
+        Untick <b>Keep the full time series</b> to keep only the composites -
+        the "just give me the median" case.
         """,
         "export_mode": """
         <b>Which format should I pick?</b><br>
@@ -7248,7 +7610,7 @@ def datacube_editor():
         "update_cube": """
         <b>update data cube</b><br>
         Uses <code>get_stac_layers(update=...)</code> with the loaded cube path to fetch only the
-        missing dates and/or missing bands and return an updated <code>Spectral_Temporal_Stack</code>.
+        missing dates and/or missing bands and return an updated <code>Time_Series</code>.
         The cube's cloud/shadow masking strategy is restored from its attributes, so new scenes and
         new bands are masked (or kept) exactly like the stored data.<br><br>
         <b>Important:</b> This replaces the current working result with the updated cube.<br>
@@ -7308,14 +7670,14 @@ def datacube_editor():
         """
         Pick a DataArray from current result for visualization.
         - If DataArray: use it
-        - If Dataset: prefer 'Spectral_Temporal_Stack', otherwise first data var
+        - If Dataset: prefer 'Time_Series', otherwise first data var
         """
         if isinstance(obj, xr.DataArray):
             return obj
 
         if isinstance(obj, xr.Dataset):
-            if "Spectral_Temporal_Stack" in obj.data_vars:
-                return obj["Spectral_Temporal_Stack"]
+            if "Time_Series" in obj.data_vars:
+                return obj["Time_Series"]
             if len(obj.data_vars) > 0:
                 first_name = list(obj.data_vars)[0]
                 return obj[first_name]
@@ -7328,16 +7690,16 @@ def datacube_editor():
         Return the DataArray used for temporal composites.
         Accepts:
         - DataArray (time-series cube)
-        - Dataset containing 'Spectral_Temporal_Stack'
+        - Dataset containing 'Time_Series'
         """
         if isinstance(obj, xr.DataArray):
             return obj
 
         if isinstance(obj, xr.Dataset):
-            if "Spectral_Temporal_Stack" in obj.data_vars:
-                return obj["Spectral_Temporal_Stack"]
+            if "Time_Series" in obj.data_vars:
+                return obj["Time_Series"]
             raise ValueError(
-                "Current result is a Dataset but does not contain 'Spectral_Temporal_Stack'."
+                "Current result is a Dataset but does not contain 'Time_Series'."
             )
 
         raise TypeError(f"Unsupported object type for stats: {type(obj)}")
@@ -7556,10 +7918,14 @@ def datacube_editor():
         indices_all_btn.disabled = not enabled
         indices_clear_btn.disabled = not enabled
 
-        # Stats widgets
+        # Temporal Composites widgets
         stats_select_w.disabled = not enabled
         stats_all_btn.disabled = not enabled
         stats_clear_btn.disabled = not enabled
+        comp_mean_w.disabled = not enabled
+        comp_median_w.disabled = not enabled
+        # "Keep the full time series" additionally needs a selected composite.
+        _sync_keep_timeseries()
 
         # Update widgets
         update_run_btn.disabled = not enabled
@@ -7773,7 +8139,7 @@ def datacube_editor():
         if state.get("loaded_var") == "Cloud_Stack":
             update_bands_note_html.value = (
                 "<div style='font-size:12px; color:#6b7280;'>Band update is "
-                "available for Spectral_Temporal_Stack cubes only.</div>"
+                "available for Time_Series cubes only.</div>"
             )
             return
 
@@ -7826,40 +8192,16 @@ def datacube_editor():
 
         state["last_auto_gif_suggestion"] = new_suggestion
 
-    def _apply_export_temporal_composite(obj):
-        """Collapse the time axis into a single mean/median scene per band/index,
-        per the Export Options 'Temporal Composite' selector. Applied only at
-        export (state['current'] is never mutated), so the interactive viewer and
-        the animation still see the full time series. No-op when None is selected
-        or the object has no time axis. Lazy: the reduction is a dask graph."""
-        agg = aggregator_w.value
-        if not agg or obj is None:
-            return obj
-        if "time" not in getattr(obj, "dims", ()):
-            return obj
-        if agg == "mean":
-            return obj.mean(dim="time", skipna=True, keep_attrs=True)
-        if agg == "median":
-            return obj.median(dim="time", skipna=True, keep_attrs=True)
-        return obj
-
     def _show_result_current():
-        """Render the Result panel from the current cube with the Export Options
-        'Temporal Composite' applied as a VIEW. state['current'] is never mutated,
-        so the interactive viewer, the animation and the export step still read the
-        full time series (and re-collapse it themselves). No-op until a cube is
-        loaded."""
+        """Render the Result panel from the current working cube.
+
+        Temporal Composites are a chained Edit here (like every other editor
+        feature), not an export-time view, so what the Result shows IS what
+        export writes - no second collapse anywhere."""
         obj = state.get("current")
         if obj is None:
             return
-        _show_preview(result_out, _apply_export_temporal_composite(obj))
-
-    def _on_aggregator_change(_change=None):
-        """The Temporal Composite is applied at export, not via the Edit button,
-        so re-render the Result immediately when it changes - the user sees the
-        collapsed (or restored time-series) preview right away, matching the Data
-        Cube Builder. No-op when nothing is loaded."""
-        _show_result_current()
+        _show_preview(result_out, obj)
 
     def _export_current_result():
         if state["current"] is None:
@@ -7871,7 +8213,9 @@ def datacube_editor():
         if not target:
             raise ValueError("Please provide an export file/folder path.")
 
-        obj = _apply_export_temporal_composite(state["current"])
+        # Composites are already baked into the working cube by the Edit button,
+        # so export writes exactly what the Result panel shows.
+        obj = state["current"]
         if not isinstance(obj, (xr.DataArray, xr.Dataset)):
             raise TypeError(f"Unsupported result type for export: {type(obj)}")
 
@@ -7891,7 +8235,7 @@ def datacube_editor():
                 export_stac(
                     stac=obj,
                     output=target,
-                    var_name=(obj.name or "Spectral_Temporal_Stack"),
+                    var_name=(obj.name or "Time_Series"),
                     compress=compress,
                 )
                 return {"mode": mode, "target": target}
@@ -8408,15 +8752,91 @@ def datacube_editor():
     )
 
     # Temporal composites (stats) -- applied via Edit button
+    # Temporal Composites, same model as the Data Cube Builder: the two most
+    # used composites get their own highlighted checkboxes, everything else
+    # lives in the "More Composites" list, and one checkbox decides whether the
+    # time series is kept alongside them or dropped.
+    _COMMON_COMPOSITES = ("mean_timeseries", "median_timeseries")
+
+    comp_mean_w = widgets.Checkbox(
+        value=False,
+        description="Mean of the time series",
+        indent=False,
+        disabled=True,
+        layout=widgets.Layout(width="99%"),
+    )
+    comp_median_w = widgets.Checkbox(
+        value=False,
+        description="Median of the time series",
+        indent=False,
+        disabled=True,
+        layout=widgets.Layout(width="99%"),
+    )
+
     stats_select_w = widgets.SelectMultiple(
-        options=STATS_OPTIONS,
+        options=[s for s in STATS_OPTIONS if s not in _COMMON_COMPOSITES],
         value=(),
         rows=8,
         layout=widgets.Layout(width="50%", height="210px"),
         disabled=True,
     )
-    stats_all_btn = widgets.Button(description="All stats", layout=widgets.Layout(width="95px"), disabled=True)
+    stats_all_btn = widgets.Button(description="All", layout=widgets.Layout(width="70px"), disabled=True)
     stats_clear_btn = widgets.Button(description="Clear", layout=widgets.Layout(width="70px"), disabled=True)
+
+    # Off -> the Edit drops the time series and keeps only the composites.
+    # Force-ticked and greyed while no composite is selected, since dropping it
+    # then would leave an empty cube.
+    keep_ts_w = widgets.Checkbox(
+        value=True,
+        description="Keep the full time series",
+        indent=False,
+        disabled=True,
+        layout=widgets.Layout(width="99%"),
+    )
+    keep_ts_note = widgets.HTML("")
+
+    def _selected_composites():
+        """The composite tokens ticked in the Temporal Composites section, in a
+        stable order: the two promoted ones first, then "More Composites"."""
+        tokens = []
+        if comp_mean_w.value and not comp_mean_w.disabled:
+            tokens.append("mean_timeseries")
+        if comp_median_w.value and not comp_median_w.disabled:
+            tokens.append("median_timeseries")
+        if not stats_select_w.disabled:
+            tokens.extend(str(s) for s in stats_select_w.value)
+        return tokens
+
+    def _sync_keep_timeseries(*_):
+        """"Keep the full time series" is only a real choice once a composite is
+        selected; otherwise force it on and say why."""
+        has_composite = bool(_selected_composites())
+        if not has_composite and not keep_ts_w.value:
+            keep_ts_w.value = True
+        # Never un-grey it while the whole section is disabled (no cube loaded).
+        keep_ts_w.disabled = stats_select_w.disabled or not has_composite
+        if not has_composite:
+            keep_ts_note.value = (
+                "<div style='font-size:12px; color:#6b7280;'>"
+                "Select a composite above to be able to keep only it, without "
+                "the time series.</div>"
+            )
+        elif not keep_ts_w.value:
+            keep_ts_note.value = (
+                "<div style='font-size:12px; color:#1e40af; background:#eff6ff; "
+                "border:1px solid #bfdbfe; border-radius:6px; padding:6px 8px;'>"
+                "The Edit will keep the selected composites only - no per-date "
+                "time series. Such a cube cannot be updated, co-registered or "
+                "cloud-masked afterwards (use <b>Reset to loaded cube</b> to "
+                "get the time series back).</div>"
+            )
+        else:
+            keep_ts_note.value = ""
+
+    comp_mean_w.observe(_sync_keep_timeseries, names="value")
+    comp_median_w.observe(_sync_keep_timeseries, names="value")
+    stats_select_w.observe(_sync_keep_timeseries, names="value")
+    keep_ts_w.observe(_sync_keep_timeseries, names="value")
 
     # Update Data Cube (fetch missing dates and/or missing bands for the
     # loaded cube path). Standalone action: its own button + output group,
@@ -8544,15 +8964,16 @@ def datacube_editor():
 
     export_compress_w.observe(_apply_editor_compress_visibility, names="value")
 
-    # Temporal Composite: collapse the loaded cube's time axis into a single
-    # mean/median scene at export time. Mirrors the Data Cube Builder's Export
-    # Options. Applied only when exporting, so the viewer/animation still see the
-    # full time series.
+    # Legacy: the mean/median Temporal Composite dropdown that used to sit in
+    # Export Options. Replaced by the Temporal Composites section, where it is
+    # the "Mean/Median of the time series" checkbox plus "Keep the full time
+    # series". Kept as a hidden widget so the enable/disable wiring and the
+    # returned widget registry stay intact.
     aggregator_w = widgets.Dropdown(
         options=[("None", None), ("mean", "mean"), ("median", "median")],
         value=None,
         description="Temporal Composite:",
-        layout=widgets.Layout(width="99%"),
+        layout=widgets.Layout(width="99%", display="none"),
         style={"description_width": "150px"},
         disabled=True,
     )
@@ -9016,7 +9437,7 @@ def datacube_editor():
     def _apply_cloud_filter_feature(obj):
         """
         Apply cloud coverage filtering using stac2cube.cloud_filter() and existing cloud_percentage coord.
-        If current result is Dataset (e.g. after stats), filter Spectral_Temporal_Stack and drop stale stats.
+        If current result is Dataset (e.g. after stats), filter Time_Series and drop stale stats.
         """
         if not enable_cloud_filter_w.value:
             return obj, False, []
@@ -9027,11 +9448,11 @@ def datacube_editor():
 
         # Dataset case -> filter time series and drop stats
         if isinstance(obj, xr.Dataset):
-            if "Spectral_Temporal_Stack" not in obj.data_vars:
+            if "Time_Series" not in obj.data_vars:
                 raise ValueError(
-                    "Current Dataset does not contain 'Spectral_Temporal_Stack' for cloud filtering."
+                    "Current Dataset does not contain 'Time_Series' for cloud filtering."
                 )
-            da = obj["Spectral_Temporal_Stack"]
+            da = obj["Time_Series"]
             if "time" not in da.dims:
                 raise ValueError("Cloud filtering requires a 'time' dimension.")
             if "cloud_percentage" not in da.coords:
@@ -9101,7 +9522,7 @@ def datacube_editor():
         Reuses the across-track coverage code: the stored scene_coverage coord
         when present (cheap, no read), otherwise compute_scene_coverage() measured
         from the cube's own no-data pattern. Mirrors _apply_cloud_filter_feature -
-        a Dataset input is filtered on Spectral_Temporal_Stack and stale stats are
+        a Dataset input is filtered on Time_Series and stale stats are
         dropped; an empty result is a warning, not an error.
         """
         if not enable_coverage_filter_w.value:
@@ -9114,12 +9535,12 @@ def datacube_editor():
 
         stats_dropped = isinstance(obj, xr.Dataset)
         if isinstance(obj, xr.Dataset):
-            if "Spectral_Temporal_Stack" not in obj.data_vars:
+            if "Time_Series" not in obj.data_vars:
                 raise ValueError(
-                    "Current Dataset does not contain 'Spectral_Temporal_Stack' "
+                    "Current Dataset does not contain 'Time_Series' "
                     "for scene-coverage filtering."
                 )
-            da = obj["Spectral_Temporal_Stack"]
+            da = obj["Time_Series"]
         elif isinstance(obj, xr.DataArray):
             da = obj
         else:
@@ -9199,7 +9620,7 @@ def datacube_editor():
     def _apply_update_feature(obj):
         """
         Update the loaded cube by requesting missing dates and/or bands via:
-        - get_stac_layers(update=...) for Spectral_Temporal_Stack cubes
+        - get_stac_layers(update=...) for Time_Series cubes
           (dates + bands; the cloud/shadow strategy is restored from the attrs)
         - update_cloud_mask_cube(...) for SCL binary masks (cloud_mask_scl band)
         - get_cloud_layers(update=..., threshold=None) for cloud-probability
@@ -9273,7 +9694,7 @@ def datacube_editor():
         if loaded_var == "Cloud_Stack":
             if add_bands:
                 raise ValueError(
-                    "Band update is available for Spectral_Temporal_Stack cubes "
+                    "Band update is available for Time_Series cubes "
                     "only. Clear the Band Update selection to update a "
                     "Cloud_Stack cube."
                 )
@@ -9335,9 +9756,9 @@ def datacube_editor():
         )
 
         if isinstance(updated, xr.Dataset):
-            if "Spectral_Temporal_Stack" not in updated.data_vars:
-                raise ValueError("Update returned a Dataset without 'Spectral_Temporal_Stack'.")
-            updated = updated["Spectral_Temporal_Stack"]
+            if "Time_Series" not in updated.data_vars:
+                raise ValueError("Update returned a Dataset without 'Time_Series'.")
+            updated = updated["Time_Series"]
 
         if not isinstance(updated, xr.DataArray):
             raise TypeError(f"Update returned unsupported object type: {type(updated)}")
@@ -9347,7 +9768,7 @@ def datacube_editor():
             f"daterange={daterange if daterange else 'cube time span (default)'}",
             f"bands added: {', '.join(add_bands) if add_bands else 'none'}",
             "cloud/shadow masking strategy restored from the cube's attributes",
-            "Current working result was replaced with the updated Spectral_Temporal_Stack.",
+            "Current working result was replaced with the updated Time_Series.",
         ]
         return updated, True, msgs
     
@@ -9362,7 +9783,7 @@ def datacube_editor():
         - If clip checkbox is disabled -> no change
         - If enabled but no clip input -> raises clear error
         - If current is DataArray -> clip directly
-        - If current is Dataset with Spectral_Temporal_Stack -> clip time series and
+        - If current is Dataset with Time_Series -> clip time series and
           drop old stats (they become invalid after spatial clip)
         """
         if not enable_clip_w.value:
@@ -9373,11 +9794,11 @@ def datacube_editor():
             raise ValueError("Clip is enabled, but no polygon/bbox was provided.")
 
         if isinstance(obj, xr.Dataset):
-            if "Spectral_Temporal_Stack" not in obj.data_vars:
+            if "Time_Series" not in obj.data_vars:
                 raise ValueError(
-                    "Current Dataset does not contain 'Spectral_Temporal_Stack' for clipping."
+                    "Current Dataset does not contain 'Time_Series' for clipping."
                 )
-            da = obj["Spectral_Temporal_Stack"]
+            da = obj["Time_Series"]
             clipped = clip_stac(da, polygon=geom)
 
             msgs = ["clip_raster applied"]
@@ -9457,7 +9878,7 @@ def datacube_editor():
         # dates are a superset of whatever remains - we simply pick out the dates
         # the cube still has. Only a mask that is actually MISSING one of those
         # dates is a real error.
-        da_ref = obj["Spectral_Temporal_Stack"] if isinstance(obj, xr.Dataset) else obj
+        da_ref = obj["Time_Series"] if isinstance(obj, xr.Dataset) else obj
         if "time" in getattr(da_ref, "dims", ()) and "time" in getattr(cloud, "dims", ()):
             cube_times = da_ref["time"].values
             mask_times = set(cloud["time"].values.tolist())
@@ -9472,7 +9893,7 @@ def datacube_editor():
             cloud = cloud.sel(time=cube_times)
 
         # obj may be a DataArray or a Dataset (with stats); mask_stac_clouds pulls
-        # out the Spectral_Temporal_Stack and returns a masked DataArray.
+        # out the Time_Series and returns a masked DataArray.
         masked = mask_stac_clouds(obj, cloud, mask_layer)
 
         msgs = [
@@ -9504,12 +9925,12 @@ def datacube_editor():
 
         # Pick the spectral DataArray to compute from.
         if isinstance(obj, xr.Dataset):
-            if "Spectral_Temporal_Stack" not in obj.data_vars:
+            if "Time_Series" not in obj.data_vars:
                 raise ValueError(
-                    "Spectral indices require the 'Spectral_Temporal_Stack' cube. "
+                    "Spectral indices require the 'Time_Series' cube. "
                     "Calculate indices before generating temporal composites (stats)."
                 )
-            da = obj["Spectral_Temporal_Stack"]
+            da = obj["Time_Series"]
         elif isinstance(obj, xr.DataArray):
             da = obj
         else:
@@ -9575,7 +9996,7 @@ def datacube_editor():
 
         if isinstance(obj, xr.Dataset):
             new_ds = obj.copy()
-            new_ds["Spectral_Temporal_Stack"] = combined
+            new_ds["Time_Series"] = combined
             return new_ds, True, msgs
 
         return combined, True, msgs
@@ -9587,10 +10008,11 @@ def datacube_editor():
 
     def _apply_stats_feature(obj):
         """
-        Apply temporal composites using stac2cube.calculate_statistics().
+        Apply the Temporal Composites selection using calculate_statistics(),
+        then optionally drop the time series ("Keep the full time series" off).
         Returns (new_obj, changed, messages).
         """
-        selected = list(stats_select_w.value)
+        selected = _selected_composites()
         if not selected:
             return obj, False, []
 
@@ -9602,11 +10024,27 @@ def datacube_editor():
             )
 
         ds_stats = calculate_statistics(da, selected)
-        msgs = [
-            f"stats={len(selected)} selection(s)",
-            "Temporal composites generated (time series + stats).",
-            "This should usually be the LAST step before exporting.",
-        ]
+        keep_ts = bool(keep_ts_w.value) or keep_ts_w.disabled
+        msgs = [f"composites={len(selected)} selection(s)"]
+
+        if not keep_ts and "Time_Series" in ds_stats.data_vars:
+            remaining = [v for v in ds_stats.data_vars if v != "Time_Series"]
+            if remaining:
+                ds_stats = ds_stats.drop_vars("Time_Series")
+                # No variable uses the time axis once the series is gone; drop
+                # the orphaned time coords so the cube does not advertise dates
+                # it no longer holds (mirrors main._drop_timeseries).
+                if not any("time" in ds_stats[v].dims for v in ds_stats.data_vars):
+                    orphans = [
+                        n for n, c in ds_stats.coords.items() if "time" in c.dims
+                    ]
+                    if orphans:
+                        ds_stats = ds_stats.drop_vars(orphans)
+                msgs.append("Composites only - the time series was dropped.")
+        else:
+            msgs.append("Temporal composites generated (time series + composites).")
+
+        msgs.append("This should usually be the LAST step before exporting.")
         return ds_stats, True, msgs
 
     # ---------------------------------------------------------------------
@@ -9754,8 +10192,8 @@ def datacube_editor():
 
                     layer_select_w.options = _layer_dropdown_options(ds_loaded, layers)
                     layer_select_w.value = (
-                        "Spectral_Temporal_Stack"
-                        if "Spectral_Temporal_Stack" in layers
+                        "Time_Series"
+                        if "Time_Series" in layers
                         else layers[0]
                     )
                     layer_select_box.layout.display = ""
@@ -9990,7 +10428,7 @@ def datacube_editor():
             da = _pick_dataarray_for_visualization(state["current"])
             with viz_out:
                 clear_output()
-                if isinstance(state["current"], xr.Dataset) and da.name != "Spectral_Temporal_Stack":
+                if isinstance(state["current"], xr.Dataset) and da.name != "Time_Series":
                     print(f"ℹ️ Visualizing dataset variable: {da.name}")
                 out = interactive_time_view(
                     stac=da,
@@ -10045,7 +10483,7 @@ def datacube_editor():
                 raise ValueError(
                     f"Animation generation requires a 'time' dimension. Found dims: {da.dims}. "
                     "If you are viewing a stats-only variable, use 'Reset to loaded cube' "
-                    "or visualize 'Spectral_Temporal_Stack'."
+                    "or visualize 'Time_Series'."
                 )
 
             out_path = (gif_out_path_w.value or "").strip()
@@ -10137,9 +10575,6 @@ def datacube_editor():
     viz_make_gif_btn.on_click(_on_make_gif_clicked)
 
     export_mode_w.observe(lambda change: _set_export_mode_defaults(), names="value")
-    # Temporal Composite is a view applied at export, not an edit, so re-render the
-    # Result panel live when it changes (no Edit-button click needed).
-    aggregator_w.observe(_on_aggregator_change, names="value")
     gif_display_mode_w.observe(lambda change: _update_gif_output_suggestion(), names="value")
     gif_section_w.observe(
         lambda change: (
@@ -10232,6 +10667,25 @@ def datacube_editor():
     # Small badge at the top of each editing feature: whether it can be combined
     # with other features in one Edit run (chainable) or must run on its own
     # (standalone). Green = chainable, amber = standalone.
+    # Same two layout helpers the builder uses, so the Temporal Composites
+    # section looks identical in both GUIs (both are pure CSS-class wrappers -
+    # see .stac2cube-subpanel in gui_common's stylesheet).
+    def _subpanel(children, accent=None):
+        box = widgets.VBox(
+            list(children),
+            layout=widgets.Layout(width="100%", gap="6px"),
+        )
+        box.add_class("stac2cube-subpanel")
+        if accent:
+            box.add_class(f"stac2cube-subpanel-{accent}")
+        return box
+
+    def _line_divider():
+        return widgets.HTML(
+            "<div style='height:2px; background:#cbd5e1; border-radius:1px; "
+            "margin:18px 0 16px 0;'></div>"
+        )
+
     def _chainable_badge(chainable, note=None):
         if chainable:
             bg, border, color, label = "#f0fdf4", "#bbf7d0", "#166534", "Chainable feature"
@@ -10346,10 +10800,10 @@ def datacube_editor():
             with build_mask_out:
                 print("❌ Load a cube first.")
             return
-        if state.get("loaded_var") != "Spectral_Temporal_Stack":
+        if state.get("loaded_var") != "Time_Series":
             with build_mask_out:
                 print(
-                    "❌ Building a binary cloud mask needs the 'Spectral_Temporal_Stack' "
+                    "❌ Building a binary cloud mask needs the 'Time_Series' "
                     f"cube (the loaded layer is '{state.get('loaded_var')}')."
                 )
             return
@@ -10537,9 +10991,10 @@ def datacube_editor():
     indices_acc.set_title(0, "Calculate Spectral Indices")
     indices_acc.layout = widgets.Layout(width="99%")
 
-    # Stats feature (formerly titled "Temporal Composites" - renamed to "Stats"
-    # so it no longer clashes with the "Temporal Composite" selector now in
-    # Export Options).
+    # Temporal Composites: the mean/median Temporal Composite dropdown that used
+    # to live in Export Options is now the two promoted checkboxes here, plus
+    # "Keep the full time series" - one section for one concept, matching the
+    # Data Cube Builder.
     stats_inner_widget = widgets.VBox(
         [
             stats_select_w,
@@ -10574,7 +11029,7 @@ def datacube_editor():
         [
             widgets.HTML(
                 "<div style='font-weight:500; font-size:12px; color:#374151;'>"
-                "Stats Explanation</div>"
+                "Composite Explanation</div>"
             ),
             _stats_help_btn,
         ],
@@ -10585,23 +11040,33 @@ def datacube_editor():
         [
             _chainable_badge(True, "best applied last"),
             widgets.HTML(
-                "<div style='font-size:12px; color:#1e3a8a; background:#eff6ff; "
-                "border:1px solid #bfdbfe; border-radius:6px; padding:8px 10px; "
-                "margin:0 0 6px 0;'>"
-                "Stats are additionally generated along the original time series. "
-                "If you want to export a single Temporal Composite instead of the "
-                "time series, you can set it in <b>Export Options</b>."
+                "<div style='font-size:12px; color:#475569; margin:0 0 2px 0;'>"
+                "Statistics calculated over the dates of the current result."
                 "</div>"
             ),
-            _stats_explain_row,
-            _stats_help_box,
-            stats_inner_widget,
+            _subpanel([comp_mean_w, comp_median_w], accent="blue"),
+            widgets.HTML("<div style='height:10px;'></div>"),
+            _field_group(
+                "More Composites",
+                [
+                    _stats_explain_row,
+                    _stats_help_box,
+                    stats_inner_widget,
+                ],
+                subtitle="Minimum, maximum and standard deviation, plus "
+                "monthly and annual composites.",
+                collapsible=True,
+                open=False,
+            ),
+            _line_divider(),
+            keep_ts_w,
+            keep_ts_note,
         ],
         layout=widgets.Layout(width="100%", gap="8px"),
     )
 
     stats_acc = widgets.Accordion(children=[stats_feature_box], selected_index=None)
-    stats_acc.set_title(0, "Stats")
+    stats_acc.set_title(0, "Temporal Composites")
     stats_acc.layout = widgets.Layout(width="99%")
 
 
@@ -10708,7 +11173,9 @@ def datacube_editor():
         [
             #widgets.HTML("<b>Export Options</b>"),
             widgets.HTML("<div style='font-size:12px; color:#666;'>Exports the current result in the desired format.</div>"),
-            _stacked_field_with_help(aggregator_w, "Temporal Composite", "aggregator"),
+            # The Temporal Composite dropdown moved into the Temporal
+            # Composites feature above, so this section is about format and
+            # path again.
             _stacked_field_with_help(export_mode_w, "Export mode", "export_mode"),
             _stacked_field(export_input_box, "Output"),
             export_compress_w,
@@ -10925,7 +11392,12 @@ def datacube_editor():
             "enable_clip": enable_clip_w,
             "clip_geom": clip_geom_w,
             "indices_select": indices_select_w,
+            # Temporal Composites: the two promoted checkboxes, the "More
+            # Composites" list ("stats_select") and the keep-or-drop choice.
             "stats_select": stats_select_w,
+            "composite_mean": comp_mean_w,
+            "composite_median": comp_median_w,
+            "keep_timeseries": keep_ts_w,
             "edit_btn": edit_btn,
             "update_run_btn": update_run_btn,
             "update_date_from": update_date_from_w,
@@ -11040,8 +11512,8 @@ def ard_cube_tools():
 
             print(f"Exported file: {p.as_posix()}")
             with open_cube(p) as ds:
-                if "Spectral_Temporal_Stack" in ds.data_vars:
-                    display(ds["Spectral_Temporal_Stack"])
+                if "Time_Series" in ds.data_vars:
+                    display(ds["Time_Series"])
                 elif "Cloud_Stack" in ds.data_vars:
                     display(ds["Cloud_Stack"])
                 else:
@@ -11489,13 +11961,13 @@ def ard_cube_tools():
         if state["loaded_obj"] is None or not state["loaded_path"]:
             _status("❌ Load a cube first.")
             return
-        if state.get("loaded_var") != "Spectral_Temporal_Stack":
+        if state.get("loaded_var") != "Time_Series":
             _status(
-                "❌ Cloud masking applies to the 'Spectral_Temporal_Stack' time series, "
+                "❌ Cloud masking applies to the 'Time_Series' time series, "
                 f"but the loaded layer is '{state.get('loaded_var')}'.",
                 "Composite layers (e.g. median) have no time dimension, so per-date "
                 "cloud masks cannot be applied to them.",
-                "Reload the cube and select the 'Spectral_Temporal_Stack' layer to mask.",
+                "Reload the cube and select the 'Time_Series' layer to mask.",
             )
             return
         if get_cloud_layers is None:
@@ -12156,11 +12628,11 @@ def ard_cube_tools():
         if state.get("loaded_path") is None:
             _status("❌ Load the main data cube first (loader above).")
             return
-        if state.get("loaded_var") != "Spectral_Temporal_Stack":
+        if state.get("loaded_var") != "Time_Series":
             _status(
-                "❌ Shadow masking applies to the 'Spectral_Temporal_Stack' time series, "
+                "❌ Shadow masking applies to the 'Time_Series' time series, "
                 f"but the loaded layer is '{state.get('loaded_var')}'.",
-                "Reload the cube and select the 'Spectral_Temporal_Stack' layer.",
+                "Reload the cube and select the 'Time_Series' layer.",
             )
             return
         if not s3_mask_band_w.value:
@@ -12387,13 +12859,13 @@ def ard_cube_tools():
         if state.get("loaded_path") is None:
             _status("❌ Load the main data cube first.")
             return
-        if state.get("loaded_var") != "Spectral_Temporal_Stack":
+        if state.get("loaded_var") != "Time_Series":
             _status(
-                "❌ Cloud masking applies to the 'Spectral_Temporal_Stack' time series, "
+                "❌ Cloud masking applies to the 'Time_Series' time series, "
                 f"but the loaded layer is '{state.get('loaded_var')}'.",
                 "Composite layers (e.g. median) have no time dimension, so per-date "
                 "cloud masks cannot be applied to them.",
-                "Reload the cube and select the 'Spectral_Temporal_Stack' layer to mask.",
+                "Reload the cube and select the 'Time_Series' layer to mask.",
             )
             return
 
@@ -12473,8 +12945,8 @@ def ard_cube_tools():
         lv = state.get("loaded_var")
         if lv and lv in ds.data_vars:
             state["loaded_obj"] = ds[lv]
-        elif "Spectral_Temporal_Stack" in ds.data_vars:
-            state["loaded_obj"] = ds["Spectral_Temporal_Stack"]
+        elif "Time_Series" in ds.data_vars:
+            state["loaded_obj"] = ds["Time_Series"]
         else:
             state["loaded_obj"] = ds
 
@@ -12482,11 +12954,11 @@ def ard_cube_tools():
         if state.get("loaded_path") is None:
             _status("❌ Load the main data cube first.")
             return
-        if state.get("loaded_var") != "Spectral_Temporal_Stack":
+        if state.get("loaded_var") != "Time_Series":
             _status(
-                "❌ Cloud masking applies to the 'Spectral_Temporal_Stack' time series, "
+                "❌ Cloud masking applies to the 'Time_Series' time series, "
                 f"but the loaded layer is '{state.get('loaded_var')}'.",
-                "Reload the cube and select the 'Spectral_Temporal_Stack' layer to mask.",
+                "Reload the cube and select the 'Time_Series' layer to mask.",
             )
             return
         if mask_stac_clouds is None:
@@ -12667,9 +13139,9 @@ def ard_cube_tools():
 
             spectral = state["loaded_obj"]
             if isinstance(spectral, xr.Dataset):
-                if "Spectral_Temporal_Stack" not in spectral.data_vars:
-                    raise ValueError("Loaded cube has no 'Spectral_Temporal_Stack'.")
-                spectral = spectral["Spectral_Temporal_Stack"]
+                if "Time_Series" not in spectral.data_vars:
+                    raise ValueError("Loaded cube has no 'Time_Series'.")
+                spectral = spectral["Time_Series"]
 
             spec_bands = [str(b).lower() for b in spectral["band"].values]
             for need in ("red", "green", "blue"):
@@ -12853,10 +13325,10 @@ def ard_cube_tools():
             _status("❌ Load a cube first.")
             return
         if isinstance(spectral, xr.Dataset):
-            if "Spectral_Temporal_Stack" not in spectral.data_vars:
-                _status("❌ Loaded cube has no 'Spectral_Temporal_Stack'.")
+            if "Time_Series" not in spectral.data_vars:
+                _status("❌ Loaded cube has no 'Time_Series'.")
                 return
-            spectral = spectral["Spectral_Temporal_Stack"]
+            spectral = spectral["Time_Series"]
         if "time" not in spectral.dims:
             _status(
                 "❌ The loaded layer is a single composite image; "
@@ -12985,13 +13457,13 @@ def ard_cube_tools():
         if state.get("loaded_path") is None:
             _status("❌ Load a cube first.")
             return
-        if state.get("loaded_var") != "Spectral_Temporal_Stack":
+        if state.get("loaded_var") != "Time_Series":
             _status(
-                "❌ Co-registration needs the 'Spectral_Temporal_Stack' time series, "
+                "❌ Co-registration needs the 'Time_Series' time series, "
                 f"but the loaded layer is '{state.get('loaded_var')}'.",
                 "Composite layers (e.g. median) are single images and cannot be "
                 "co-registered over time.",
-                "Reload the cube and select the 'Spectral_Temporal_Stack' layer.",
+                "Reload the cube and select the 'Time_Series' layer.",
             )
             return
         if coregister_cube is None:
@@ -13435,7 +13907,7 @@ def ard_cube_tools():
                 return []
             da = obj
             if isinstance(obj, xr.Dataset):
-                da = obj.get("Spectral_Temporal_Stack")
+                da = obj.get("Time_Series")
                 if da is None:
                     return []
             return [str(b) for b in da["band"].values]
@@ -13705,7 +14177,7 @@ def ard_cube_tools():
         existed_before = p_out.exists()
         old_mtime, old_size = _output_stat(p_out) if existed_before else (None, None)
 
-        sr_var_name = state.get("loaded_var") or "Spectral_Temporal_Stack"
+        sr_var_name = state.get("loaded_var") or "Time_Series"
 
         _status(
             "Super-resolving and exporting...",
@@ -14026,8 +14498,8 @@ def ard_cube_tools():
 
                 layer_select_w.options = _layer_dropdown_options(ds, layers)
                 layer_select_w.value = (
-                    "Spectral_Temporal_Stack"
-                    if "Spectral_Temporal_Stack" in layers
+                    "Time_Series"
+                    if "Time_Series" in layers
                     else layers[0]
                 )
                 layer_select_box.layout.display = ""
