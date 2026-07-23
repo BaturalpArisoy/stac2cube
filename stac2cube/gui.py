@@ -5112,9 +5112,10 @@ def datacube_builder(missions_func=missions):
                 ("Copernicus Data Space Ecosystem (Copernicus)", "cdse"),
             ]
             source_w.disabled = False
-            # Set the catalogue from the active source suggestion (defined below;
-            # exists by the time this runs). Default preset 1 -> Planetary Computer.
-            _apply_source_preset(_source_preset_state["n"])
+            # Keep whatever the user already picked if it is still offered;
+            # otherwise fall back to the default catalogue (Planetary Computer).
+            if source_w.value not in [v for _, v in source_w.options]:
+                source_w.value = "planetary_computer"
         elif m_name == "sentinel_2_l1c":
             source_w.options = [
                 ("Element84 (Earth Search)", "element84"),
@@ -6849,8 +6850,6 @@ def datacube_builder(missions_func=missions):
     # (cross-source spectral harmonization).
     source_info_bar = widgets.HTML(
         "<div style='font-size:12px; color:#475569; margin:0;'>"
-        "The right source depends on your study area and cloud-masking "
-        "preference.<br>"
         "<b>Note:</b> All data sources are scaled accordingly and matching Google's "
         "\"Harmonized Sentinel-2 L2A SR\"."
         "</div>"
@@ -6863,35 +6862,26 @@ def datacube_builder(missions_func=missions):
         "<b>1) Element84 (ready-to-use)</b><br>"
         "Good for long time-series, with some missing dates from the earlier "
         "years of the mission and some missing dates in 2023. It is free and "
-        "needs no credentials or login. Selected dates can also be masked by "
-        "s2cloudless. Note that Scene Classification Layer masking result is significantly poor comparing the other data sources.<br>"
-        "<b>s2cloudless masking:</b> Available<br><br>"
+        "needs no credentials or login. Note that Scene Classification Layer "
+        "masking result is significantly poor comparing the other data sources."
+        "<br><br>"
         "<b>2) Planetary Computer (ready-to-use)</b><br>"
         "Great for long time-series, usually with the full archive. It is free "
-        "and needs no credentials or login. Planetary Computer has no L1C "
-        "collection, so s2cloudless runs on the dates Element84 does have L1C "
-        "for, and the SCL cloud mask fills the rest.<br>"
-        "<b>s2cloudless masking:</b> Available (SCL fills any dates Element84 "
-        "is missing)<br><br>"
+        "and needs no credentials or login.<br><br>"
         "<b>3) terrabyte (only at terrabyte portal)</b><br>"
         "Best for terrabyte users collecting long time-series. However, data "
         "availability is limited if the study area is outside Europe. Requires "
-        "a terrabyte account. s2cloudless runs on the dates Element84 has L1C "
-        "for, and the SCL cloud mask fills the rest. For full-archive L1C "
-        "instead, request L1C data from DLR.<br>"
-        "<b>s2cloudless masking:</b> Available (SCL fills the rest). Full L1C @ "
+        "a terrabyte account. Full-archive L1C can be requested from DLR @ "
         "<a href='https://forum.terrabyte.lrz.de/c/data-requests' target='_blank' "
         "rel='noopener noreferrer'>https://forum.terrabyte.lrz.de/c/data-requests</a>"
         "<br><br>"
         "<b>4) Copernicus Data Space Ecosystem (credentials/README.md)</b><br>"
         "Copernicus' original data catalogue, with an always fully available "
-        "archive including L1C that can be used for s2cloudless masking. "
-        "HOWEVER, the data is not served as cloud-optimized files. Therefore "
-        "this source is good for a single date or a very short time-series, but quite "
-        "bad for long time-series (you will hit data-reading issues). It also "
-        "requires access keys (5-minute instructions in "
-        "<code>credentials/README.md</code>).<br>"
-        "<b>s2cloudless masking:</b> Available"
+        "archive. HOWEVER, the data is not served as cloud-optimized files. "
+        "Therefore this source is good for a single date or a very short "
+        "time-series, but quite bad for long time-series (you will hit "
+        "data-reading issues). It also requires access keys (5-minute "
+        "instructions in <code>credentials/README.md</code>)."
         "</div>"
     )
     about_sources_acc = widgets.Accordion(
@@ -7028,110 +7018,17 @@ def datacube_builder(missions_func=missions):
 
     check_avail_btn.on_click(_on_check_availability)
 
-    # -------------------------------------------------------------------------
-    # Guided data-source suggestions: two plain-language choices that pick the
-    # catalogue for the user, mirroring the cloud-masking presets. Unlike the
-    # cloud presets these DO NOT grey out the dropdown - it stays fully editable,
-    # so the suggestions are just a quick starting point. Mutually exclusive;
-    # picking a non-suggested catalogue (terrabyte / cdse) leaves both unchecked.
-    # -------------------------------------------------------------------------
-    _SOURCE_PRESET_VALUE = {1: "planetary_computer", 2: "element84"}
-
-    source_preset1_cb, _sp1_row = _make_preset_row(
-        "<b>Excellent time-series but no probabilistic cloud masking</b>",
-        "I need full time-series without credentials &amp; login but I am not "
-        "interested in s2cloudless cloud masking but only Scene Classification "
-        "Layer masking or no masking.",
-    )
-    source_preset2_cb, _sp2_row = _make_preset_row(
-        "<b>Good time-series that can be used for probabilistic cloud masking</b>",
-        "I need to use s2cloudless later with my own custom thresholds but I am "
-        "aware that some dates prior to 2021 might be missing, let's 'Check data availability' below.",
-    )
-    _source_preset_cbs = [source_preset1_cb, source_preset2_cb]
-    _source_preset_label = widgets.HTML(
-        "<div style='font-weight:600; font-size:13px; color:#374151;'>"
-        "Select one of the options below or check 'About Data Sources' for "
-        "details:</div>"
-    )
-    _source_preset_box = widgets.VBox(
-        [_source_preset_label, _sp1_row, _sp2_row],
-        layout=widgets.Layout(width="100%", gap="6px", overflow="hidden"),
-    )
-
-    _source_preset_guard = {"busy": False}
-    _source_preset_state = {"n": 1}
-
-    def _apply_source_preset(n):
-        """Point the dropdown at the suggested catalogue, clamped to what the
-        current mission offers. Never disables the dropdown."""
-        want = _SOURCE_PRESET_VALUE.get(n)
-        valid = [v for _, v in source_w.options]
-        if want in valid:
-            source_w.value = want
-
-    def _select_source_preset(n, apply=True):
-        _source_preset_state["n"] = n
-        _source_preset_guard["busy"] = True
-        try:
-            for i, cb in enumerate(_source_preset_cbs, start=1):
-                cb.value = (i == n)
-        finally:
-            _source_preset_guard["busy"] = False
-        if apply:
-            _apply_source_preset(n)
-
-    def _on_source_preset_toggle(n):
-        def _handler(change):
-            if _source_preset_guard["busy"]:
-                return
-            if change["new"]:
-                _select_source_preset(n)           # uncheck the other + apply
-            else:
-                # Clicking a checked box off is a no-op: re-check the active one
-                # (use the dropdown to reach terrabyte / cdse instead).
-                _source_preset_guard["busy"] = True
-                change["owner"].value = True
-                _source_preset_guard["busy"] = False
-        return _handler
-
-    for _i, _cb in enumerate(_source_preset_cbs, start=1):
-        _cb.observe(_on_source_preset_toggle(_i), names="value")
-
-    def _sync_source_preset_from_dropdown(*_):
-        """Reflect a manual dropdown change in the suggestion checkboxes: check
-        the matching one, or leave both unchecked for terrabyte / cdse."""
-        if _source_preset_guard["busy"]:
-            return
-        match = next(
-            (n for n, v in _SOURCE_PRESET_VALUE.items() if v == source_w.value),
-            None,
-        )
-        _source_preset_guard["busy"] = True
-        try:
-            for i, cb in enumerate(_source_preset_cbs, start=1):
-                cb.value = (i == match)
-            if match is not None:
-                _source_preset_state["n"] = match
-        finally:
-            _source_preset_guard["busy"] = False
-
-    source_w.observe(lambda c: _sync_source_preset_from_dropdown(), names="value")
-
-    # Default: preset 1 (Planetary Computer), selected but not greyed.
-    _select_source_preset(1)
-
     source_box = widgets.VBox(
         [
-            # Slim hint first, then the guided suggestions + dropdown; the
-            # "About Data Sources" explainer and the availability check follow.
+            # Slim hint first, then the dropdown; the "About Data Sources"
+            # explainer and the availability check follow. The two guided
+            # suggestion checkboxes that used to sit above the dropdown are
+            # gone - most users never read them, and the dropdown (defaulting
+            # to Planetary Computer) plus "About Data Sources" is enough.
             source_info_bar,
             _field_group(
                 "Data Source",
                 [
-                    # Suggestions in an accented sub-panel; the dropdown stays editable.
-                    _subpanel([_source_preset_box], accent="blue"),
-                    widgets.HTML("<div style='height:8px;'></div>"),
                     _boxed(source_w),
                     terrabyte_warning_html,
                     cdse_warning_html,
@@ -13250,7 +13147,18 @@ def ard_cube_tools():
     mask_tool_box = widgets.VBox(
         [
             #widgets.HTML("<b>1) Cloud Masking Data Cube</b>"),
-            widgets.HTML("<div style='font-size:12px; color:#666;'>If you already know the threshold value, proceed with Fully Automated Workflow. <br>If not, build your cloud data cube manually and inspect the result. <br>Cloud masking data cube can be also loaded and exported as Geotiffs with Data Cube Editor. </div>"),
+            widgets.HTML("<div style='font-size:12px; color:#666;'>If you already know the threshold value, proceed with Fully Automated Workflow. <br>If not, build your cloud data cube manually and inspect the result.</div>"),
+            widgets.HTML(
+                "<div style='font-size:12px; color:#1e40af; line-height:1.5; "
+                "background:#eff6ff; border:1px solid #bfdbfe; border-radius:8px; "
+                "padding:8px 10px; margin:0 0 4px 0;'>"
+                "s2cloudless needs L1C data, which may not be available for every "
+                "date. Dates without L1C are masked with the Scene "
+                "Classification Layer instead of being dropped from the time "
+                "series, so your cube keeps all its dates. "
+                "These dates can be filtered out later if you wish by scene's cloud masking method."
+                "</div>"
+            ),
             mask_a_acc,
             mask_b_acc,
         ],
