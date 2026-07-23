@@ -17,7 +17,7 @@ from .vector_refiner import (
 )
 from .stac_processing import scale_factor, cloud_mask, build_scl_mask_cube
 from .get_spectral_indices import calculate_spectral_index
-from .export_cfg import export_stac
+from .export_cfg import export_stac, export_to_cogs
 
 # from .get_topo import calculate_topo
 # from .time_series_tools import generate_animation
@@ -46,6 +46,100 @@ def _human_size(nbytes):
         if size < 1024.0 or unit == units[-1]:
             return f"{size:.2f} {unit}"
         size /= 1024.0
+
+
+_EXPORT_FORMATS = ("netcdf", "zarr", "cogs")
+
+
+def _validate_export_format(output, export_format):
+    """Normalise and check ``export_format`` against the output path.
+
+    ``None`` (default) keeps the long-standing extension dispatch of
+    export_stac ('.zarr' -> Zarr store, anything else -> NetCDF). An explicit
+    value is checked against the path, so a mismatch is an error instead of a
+    surprise file in the wrong format. 'cogs' makes ``output`` a FOLDER.
+    """
+    if export_format is None:
+        return None
+
+    fmt = str(export_format).strip().lower()
+    if fmt not in _EXPORT_FORMATS:
+        raise ValueError(
+            "export_format must be 'netcdf', 'zarr' or 'cogs' (or None to infer "
+            f"it from the output extension), got {export_format!r}."
+        )
+    if not output:
+        raise ValueError(
+            f"export_format='{fmt}' needs an output "
+            + ("folder for the GeoTIFFs." if fmt == "cogs" else "file path.")
+        )
+
+    is_zarr_path = str(output).lower().endswith(".zarr")
+    if fmt == "zarr" and not is_zarr_path:
+        raise ValueError(
+            "export_format='zarr' needs an output path ending in '.zarr' "
+            f"(got {output!r})."
+        )
+    if fmt == "netcdf" and is_zarr_path:
+        raise ValueError(
+            "export_format='netcdf' cannot write to a '.zarr' path "
+            f"(got {output!r}). Use export_format='zarr' or a '.nc' path."
+        )
+    return fmt
+
+
+def _export_result(
+    stac, output, export_format, crs=None, transform=None, compress=False
+):
+    """Write the finished cube, dispatching on ``export_format``.
+
+    'cogs' -> one Cloud-Optimized GeoTIFF per timestep into the output FOLDER
+    (export_to_cogs, which handles both a DataArray and a stats Dataset).
+    Anything else -> export_stac, whose own extension dispatch picks NetCDF vs
+    Zarr. Returns what was written / handed over, so callers can keep chaining.
+    """
+    if export_format == "cogs":
+        os.makedirs(output, exist_ok=True)
+        export_to_cogs(stac, output_dir=output, prefix="", dtype="float32")
+        return stac
+    return export_stac(stac, output, crs, transform, compress=compress)
+
+
+def _normalize_dates(dates):
+    """The ``dates`` keep-list as a set of ISO timestamp strings.
+
+    Accepts what the GUI Result date picker holds (``str(numpy.datetime64)``,
+    e.g. '2024-04-01T00:00:00.000000000') as well as plain 'YYYY-MM-DD' and
+    datetime-like objects; everything is normalised through numpy so both
+    spellings match the same scene.
+    """
+    if dates is None:
+        return None
+    if isinstance(dates, (str, bytes)):
+        dates = [dates]
+    try:
+        wanted = list(dates)
+    except TypeError:
+        raise ValueError(
+            "dates must be a list of acquisition timestamps (e.g. "
+            "['2024-04-01T00:00:00.000000000', ...])."
+        )
+    if not wanted:
+        raise ValueError(
+            "dates is empty: that would keep no scene at all. Pass None to keep "
+            "every date."
+        )
+    out = set()
+    for d in wanted:
+        try:
+            out.add(str(np.datetime64(d, "ns")))
+        except Exception:
+            raise ValueError(
+                f"dates entry {d!r} is not a valid acquisition timestamp "
+                "(expected e.g. '2024-04-01' or "
+                "'2024-04-01T00:00:00.000000000')."
+            )
+    return out
 
 
 def _mask_new_scenes_s2cloudless(
@@ -93,7 +187,9 @@ def get_stac_layers(
     cloud_mask_output=None,
     return_cloud_mask=False,
     indices=None,
+    dates=None,
     output=None,
+    export_format=None,
     aggregator=None,
     stats=None,
     topographic_features=None,
@@ -181,14 +277,34 @@ def get_stac_layers(
                 "cloud_percentage it filters on is derived from the detected "
                 "clouds (keep_clouds=True works too - detection without masking)."
             )
+    # --- Explicit date selection preconditions --------------------------------
+    # dates is the headless twin of the GUI Result panel's date picker: after
+    # the cube is built, only the listed acquisition timestamps are kept. It is
+    # a pure time selection on the finished cube, so it is single-cube only -
+    # the picker itself is disabled for multi-feature batches (rejected in the
+    # batching branch below).
+    _dates_keep = _normalize_dates(dates)
+    if _dates_keep is not None and update:
+        raise ValueError(
+            "dates is not supported in update mode: it would permanently drop "
+            "already-stored dates from the existing cube. Update first, then "
+            "slice the cube with the Data Cube Editor."
+        )
+
+    # --- Export format --------------------------------------------------------
+    _export_format = _validate_export_format(output, export_format)
+
     # With a temporal aggregator, the composite must describe the SURVIVING
     # scenes (GUI order: build -> filter -> composite), so the collapse is
     # deferred until after the scene filter instead of running at build time.
-    # Both scene filters (cloud % and partial-coverage removal) trigger the
-    # deferral so the composite only ever averages the kept scenes.
+    # All three scene filters (cloud %, partial-coverage removal, explicit date
+    # selection) trigger the deferral so the composite only ever averages the
+    # kept scenes.
     _scc_active = scene_cloud_coverage is not None and float(scene_cloud_coverage) < 100.0
     _remove_partial = partial_scene_handling == "remove"
-    _defer_agg = bool(aggregator) and (_scc_active or _remove_partial)
+    _defer_agg = bool(aggregator) and (
+        _scc_active or _remove_partial or _dates_keep is not None
+    )
 
     # --- Scene-level metadata coordinate preconditions -------------------------
     # scene_metadata attaches per-scene STAC item properties (solar/viewing
@@ -326,6 +442,15 @@ def get_stac_layers(
         features = polygon_2_features(polygon)
         if len(features) > 1:
             n = len(features)
+            # Date selection is a single-cube control (the GUI picker is
+            # disabled for batches): every feature has its own time axis, so
+            # one shared keep-list cannot describe them all.
+            if _dates_keep is not None:
+                raise ValueError(
+                    f"dates is not supported for batch processing: this polygon "
+                    f"file holds {n} features and each cube gets its own time "
+                    "axis. Build one feature at a time to select dates."
+                )
             results = []
             masks = []  # per-feature in-memory binary masks (return_cloud_mask)
             for pos, feature_gdf in enumerate(features):
@@ -363,7 +488,9 @@ def get_stac_layers(
                     cloud_mask_output=cmo_i,
                     return_cloud_mask=return_cloud_mask,
                     indices=list(indices) if indices else indices,
+                    dates=None,  # rejected above for batches
                     output=None,  # export below, per feature, so RAM frees each time
+                    export_format=None,  # nothing is written here; see below
                     aggregator=aggregator,
                     stats=stats,
                     topographic_features=topographic_features,
@@ -394,9 +521,18 @@ def get_stac_layers(
                 # stays lazy -- so RAM does not accumulate across features (peak is
                 # ~one feature, not the whole batch).
                 if output and isinstance(res, (xr.DataArray, xr.Dataset)):
-                    stem, ext = os.path.splitext(output)
-                    feature_output = f"{stem}_{idx}{ext}"
-                    export_stac(res, feature_output, compress=compress)
+                    if _export_format == "cogs":
+                        # COGs are a FOLDER of per-date GeoTIFFs, so each
+                        # feature gets its own subfolder (<folder>/1, /2, ...)
+                        # instead of a <stem>_<idx> filename - matching the
+                        # GUI's multi-feature COG export.
+                        feature_output = os.path.join(output, str(idx))
+                    else:
+                        stem, ext = os.path.splitext(output)
+                        feature_output = f"{stem}_{idx}{ext}"
+                    _export_result(
+                        res, feature_output, _export_format, compress=compress
+                    )
 
                 # Report each cube's estimated (logical, pre-load) data size.
                 if isinstance(res, (xr.DataArray, xr.Dataset)):
@@ -1132,6 +1268,47 @@ def get_stac_layers(
                         flush=True,
                     )
 
+        # ---- Explicit date selection (headless "Date Selection") ------------
+        # Same semantics as the GUI Result panel's date picker: keep only the
+        # listed acquisition timestamps, by positional selection (isel) so
+        # nothing is computed and the cube stays lazy. Matching is on the full
+        # ISO timestamp string, exactly as the picker does, so it is
+        # unambiguous when two scenes share a calendar day (separate tiles) and
+        # survives the cloud filter's isel above. Runs AFTER both scene filters
+        # and BEFORE the deferred composite / stats, reproducing the GUI order
+        # build -> filter -> composite.
+        if _dates_keep is not None:
+            if "time" not in getattr(stac, "dims", ()):
+                raise ValueError(
+                    "dates was requested but the built cube has no time "
+                    "dimension to select from."
+                )
+            _tvals = np.asarray(stac["time"].values)
+            _keep_d = np.array(
+                [str(np.datetime64(t, "ns")) in _dates_keep for t in _tvals]
+            )
+            if not _keep_d.any():
+                raise ValueError(
+                    "dates keeps no scene: none of the requested timestamps is "
+                    "in the built cube. The cube carries "
+                    f"{len(_tvals)} date(s) between "
+                    f"{np.datetime_as_string(_tvals.min(), unit='D')} and "
+                    f"{np.datetime_as_string(_tvals.max(), unit='D')}."
+                )
+            _missing = len(_dates_keep) - int(_keep_d.sum())
+            if not _keep_d.all():
+                stac = stac.isel(time=np.flatnonzero(_keep_d))
+            if not q:
+                print(
+                    f"dates: kept {int(_keep_d.sum())}/{len(_tvals)} scenes"
+                    + (
+                        f" ({_missing} requested date(s) not in this build)"
+                        if _missing > 0
+                        else ""
+                    ),
+                    flush=True,
+                )
+
         # Deferred temporal composite: collapse the SURVIVING scenes (GUI
         # order build -> filter -> composite). keep_attrs preserves the cube
         # metadata through the reduction, as the GUI composite does.
@@ -1239,7 +1416,9 @@ def get_stac_layers(
 
             print(stac, flush=True)
 
-        img = export_stac(stac, output, crs, transform, compress=compress)
+        img = _export_result(
+            stac, output, _export_format, crs, transform, compress=compress
+        )
         if return_cloud_mask:
             return img, mask_cube
         return img

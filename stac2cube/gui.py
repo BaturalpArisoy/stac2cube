@@ -1656,28 +1656,36 @@ def datacube_builder(missions_func=missions):
         value="", layout=widgets.Layout(flex="1 1 auto")
     )
 
-    # Overlapping-tile (multi-swath) warning: shown ABOVE the result when the
-    # built AOI straddles two swaths so some scenes image only part of it. Sits
-    # at the very top of the Result section, before the co-registration size
-    # warning. Filled by _show_result_summary from state["multiswath_hint"];
-    # hidden (display:none) when there is nothing to flag so it adds no gap.
-    # width="auto" (not 100%): with 100% plus the div's own padding/border the box
-    # overflowed the Result panel and forced a horizontal scrollbar. Now it sizes
-    # like the blue visualize/export note below it.
-    result_multiswath_warn_w = widgets.HTML(
-        value="", layout=widgets.Layout(width="auto", max_width="100%",
-                                        display="none")
+    # Notes strip: ONE collapsed line at the top of the Result section holding
+    # every blue ℹ️ notice the build produced (multi-swath coverage, projection).
+    # Collapsed by default and never yellow - these describe what happened, they
+    # are not a to-do list, and three stacked warning boxes made people feel they
+    # had to clear them before the cube was usable. The genuinely actionable
+    # notice (Area Size, which carries a Resize and Re-build button) deliberately
+    # stays OUTSIDE this strip, in its own yellow box.
+    #
+    # The body's children are rebuilt on each render, so the strip needs no
+    # per-notice widget and notices cannot go stale.
+    result_notes_body = widgets.VBox(
+        [], layout=widgets.Layout(width="100%", gap="6px", display="none")
     )
-    # Projection warning: shown when scenes had to be re-drawn into the cube's
-    # CRS, either because the area spans projections or because a specific CRS
-    # was requested. Same slot and behaviour as the multi-swath warning above.
-    # Note these two CAN appear together and are NOT the same thing: that one is
-    # about scenes covering only part of the AOI, this one about the grid the
-    # pixels were resampled onto.
-    result_projection_warn_w = widgets.HTML(
-        value="", layout=widgets.Layout(width="auto", max_width="100%",
-                                        display="none")
+    # width="auto": the header fills the row by stretching, not by a percentage -
+    # a rounded-up 100% loses its right border to the row's clip edge (see the
+    # .stac2cube-notes-toggle rule in gui_common).
+    result_notes_toggle = widgets.Button(
+        description="",
+        layout=widgets.Layout(width="auto", height="auto"),
     )
+    result_notes_toggle.add_class("stac2cube-notes-toggle")
+    # 99%, not 100%: at full width the strip ran visibly past the text it holds
+    # and read as the widest thing in the Result panel. The trim applies to the
+    # ROW, so the header button and every notice box below it shrink together and
+    # their edges stay flush.
+    result_notes_row = widgets.VBox(
+        [result_notes_toggle, result_notes_body],
+        layout=widgets.Layout(width="99%", gap="4px", display="none"),
+    )
+    result_notes_row.add_class("stac2cube-notes-row")
     # One-click fix for the warning above: writes an enlarged copy of the
     # polygon (short bbox edges expanded to the minimum co-registration edge,
     # original area kept centered) and re-runs the build with it - every other
@@ -2430,9 +2438,31 @@ def datacube_builder(missions_func=missions):
             return all(_cube_is_empty(c) for c in cubes)
         return _cube_is_empty(obj)
 
+    # Shared style for the blue Result-panel notices.
+    #
+    # Blue ℹ️ = "here is what happened", yellow ⚠️ = "you may want to act". The
+    # split is deliberate and yellow is deserved by exactly ONE notice - the Area
+    # Size one, which carries a Resize and Re-build button (it styles itself in
+    # _coreg_warn_html, hence no shared yellow constant here). Everything else is
+    # blue: three identical yellow boxes made people feel they had to clear a
+    # to-do list before their cube was usable, when nothing was actually wrong.
+    _INFO_BOX = (
+        "<div style='font-size:12px; color:#1e3a8a; background:#eff6ff; "
+        "border:1px solid #bfdbfe; border-radius:6px; padding:6px 8px; "
+        "margin:0; box-sizing:border-box;'>"
+    )
+
     def _compute_projection_hint(obj):
-        """Were any scenes re-drawn into a different projection? Returns a
-        Result-panel hint, or "" when the cube is entirely native.
+        """Were any scenes re-drawn into a different projection?
+
+        Returns a ``(title, html)`` note for the Result panel's notes strip, or
+        None when the cube is entirely native. Two wordings, never both - the
+        situations are mutually exclusive:
+
+        * "Projection Information" - the user asked for a CRS none of the scenes
+          come in, so this confirms what they requested.
+        * "Multiple Projections Detected" - the area itself spans projections,
+          so the build had to choose one.
 
         Reads NOTHING: everything comes from attrs the build already recorded
         (`crs`, `native_crs`, `native_crs_share`), which are only present when a
@@ -2446,14 +2476,14 @@ def datacube_builder(missions_func=missions):
                 if da is None and len(obj.data_vars):
                     da = obj[list(obj.data_vars)[0]]
             if da is None:
-                return ""
+                return None
             attrs = getattr(da, "attrs", {}) or {}
             natives = attrs.get("native_crs")
             if natives is None:
-                return ""
+                return None
             natives = [str(c) for c in np.asarray(natives).ravel()]
             if not natives:
-                return ""
+                return None
             target = str(attrs.get("crs", "") or "")
 
             shares = attrs.get("native_crs_share")
@@ -2469,26 +2499,21 @@ def datacube_builder(missions_func=missions):
                 mark = " <b>&larr; used</b>" if c == target else ""
                 return f"<code>{c}</code>{pct}{mark}"
 
-            box = (
-                "<div style='font-size:12px; color:#92400e; background:#fffbeb; "
-                "border:1px solid #fde68a; border-radius:6px; padding:6px 8px; "
-                "margin:0; box-sizing:border-box;'>"
-            )
             listing = ", ".join(_fmt(c) for c in natives)
 
             if target and target not in natives:
-                # Deliberate non-native choice, e.g. an equal-area CRS.
-                return (
-                    f"{box}⚠️ <b>Projection Warning:</b> Your cube uses "
-                    f"<code>{target}</code>, which no scene is delivered in "
-                    f"({listing}). <b>Every</b> scene was re-drawn into it, one "
-                    "extra resampling pass. That is expected if you chose this "
-                    "projection on purpose."
-                    "</div>"
+                # Deliberate non-native choice, e.g. an equal-area CRS. The user
+                # asked for this, so it is information, not a warning.
+                return "Projection Information", (
+                    f"{_INFO_BOX}ℹ️ <b>Projection Information:</b> Your cube uses "
+                    f"<code>{target}</code>, remember that provided native "
+                    f"projections are: ({listing}). All of them were stretched to "
+                    "fit the user-selected projection.</div>"
                 )
-            return (
-                f"{box}⚠️ <b>Projection Warning:</b> this area's scenes come in "
-                f"more than one projection: {listing}. <b>All scenes were kept "
+            return "Multiple Projections Detected", (
+                f"{_INFO_BOX}ℹ️ <b>Multiple Projections Detected:</b> This area's "
+                f"scenes come in more than one projection: {listing}. <b>All "
+                "scenes were kept "
                 "and mosaicked</b>; those not native to "
                 f"<code>{target}</code> were re-drawn into it (pixel size and "
                 "area are slightly distorted far from that zone's central "
@@ -2496,19 +2521,20 @@ def datacube_builder(missions_func=missions):
                 "<b>Advanced Parameters → Output Projection (CRS)</b>.</div>"
             )
         except Exception:
-            return ""
+            return None
 
     def _compute_multiswath_hint(obj):
         """GUI-only detection: does the built AOI sit across multiple swaths, so
-        some scenes image only part of it? Returns a Result-panel hint pointing
-        at the Across-track partial-scene removal, or "" when there's nothing to
-        flag. Never raises (a hint must never break a build).
+        some scenes image only part of it? Returns a ``(title, html)`` note for
+        the Result panel's notes strip, pointing at the Across-track
+        partial-scene removal, or None when there's nothing to flag. Never
+        raises (a hint must never break a build).
 
         Two modes, chosen by the FRACTION of partial scenes, so the message names
         the actual cause instead of always blaming swath overlap:
-          * >= 20% partial -> "Overlapping Tile Warning" (systematic: an AOI
+          * >= 20% partial -> "Overlapping Tiles Detected" (systematic: an AOI
             straddling two swaths is partial on roughly every other orbit).
-          * < 20% partial  -> "Incomplete Scene Warning" (sporadic: a faulty or
+          * < 20% partial  -> "Incomplete Scenes Detected" (sporadic: a faulty or
             partially-missing acquisition), naming the offending dates when few
             so they can be unticked in Dates before export - no rebuild needed.
 
@@ -2526,33 +2552,33 @@ def datacube_builder(missions_func=missions):
                 if da is None and len(obj.data_vars):
                     da = obj[list(obj.data_vars)[0]]
             if da is None or "time" not in getattr(da, "dims", ()):
-                return ""
+                return None
             if int(da.sizes.get("time", 0)) < 2:
-                return ""
+                return None
             # Already handled by the user -> nothing to suggest.
             if str(da.attrs.get("partial_scene_handling", "keep")) == "remove":
-                return ""
+                return None
             # Only suggest the tool where it actually applies (optical missions).
             if str(da.attrs.get("mission", "")) not in _PARTIAL_OK_MISSIONS:
-                return ""
+                return None
 
             # Use the ready coverage coord only. If it is absent (old cube) or
             # still lazy (cloud detection was off), stay silent - do not trigger
             # a read just to show a warning.
             sc = da.coords.get("scene_coverage")
             if sc is None:
-                return ""
+                return None
             if getattr(getattr(sc, "data", None), "chunks", None) is not None:
-                return ""  # lazy -> no SCL was read -> no warning by design
+                return None  # lazy -> no SCL was read -> no warning by design
             swath = np.asarray(sc.values, dtype=float)
 
             valid = ~np.isnan(swath)
             if int(valid.sum()) < 2:
-                return ""
+                return None
             partial = valid & (swath < 0.9)
             n_partial = int(partial.sum())
             if n_partial == 0:
-                return ""
+                return None
             n_total = int(valid.sum())
             frac = n_partial / float(n_total)
             pct_txt = f"{frac * 100:.1f}%" if frac < 0.01 else f"{round(frac * 100)}%"
@@ -2562,22 +2588,16 @@ def datacube_builder(missions_func=missions):
                 "rebuild with <b>Advanced Parameters → Overlapping Tile "
                 "Handling → Across-track → Remove partially missing scenes</b>"
             )
-            _box = (
-                "<div style='font-size:12px; color:#92400e; background:#fffbeb; "
-                "border:1px solid #fde68a; border-radius:6px; padding:6px 8px; "
-                "margin:0; box-sizing:border-box;'>"
-            )
-
             # Which cause? An AOI straddling two swaths is partial on roughly
             # every other orbit (systematic, tens of percent), whereas a faulty /
             # incomplete acquisition is a handful of scenes. The 20% cut sits
             # between the two regimes; the sporadic wording says "most likely"
             # because an AOI barely clipping a swath edge can also land low.
             if frac >= 0.20:
-                return (
-                    f"{_box}"
-                    "⚠️ <b>Overlapping Tile Warning:</b> This area is potentially "
-                    "covered by "
+                return "Overlapping Tiles Detected", (
+                    f"{_INFO_BOX}"
+                    "ℹ️ <b>Overlapping Tiles Detected:</b> This area is "
+                    "potentially covered by "
                     f"multiple swaths: <b>{n_partial}</b> of {n_total} scenes "
                     f"({pct_txt}) {_verb} less than 90% of it. To drop these "
                     f"partially-missing scenes, {_rebuild}.</div>"
@@ -2598,21 +2618,64 @@ def datacube_builder(missions_func=missions):
                 except Exception:
                     dates_txt = ""
             _them = "them" if n_partial > 1 else "it"
-            return (
-                f"{_box}"
-                "⚠️ <b>Incomplete Scene Warning:</b> "
+            return "Incomplete Scenes Detected", (
+                f"{_INFO_BOX}"
+                "ℹ️ <b>Incomplete Scenes Detected:</b> "
                 f"<b>{n_partial}</b> of {n_total} scenes ({pct_txt}) {_verb} less "
-                "than 90% of this area. "
+                # No trailing space: dates_txt already leads with one, and is ""
+                # when there are too many dates to list.
+                "than 90% of this area."
                 f"{dates_txt} You can untick "
                 f"{_them} in <b>Dates</b> below before exporting, or {_rebuild}."
                 "</div>"
             )
         except Exception:
-            return ""
+            return None
+
+    # Expanded/collapsed survives re-renders: _show_result_summary runs on every
+    # cloud-filter and date-filter change, and a strip that snapped shut each
+    # time would be unusable while reading it.
+    _notes_open = {"open": False}
+
+    def _render_notes_toggle(n):
+        arrow = "▾" if _notes_open["open"] else "▸"
+        word = "note" if n == 1 else "notes"
+        # "ℹ️" with the emoji variation selector, matching the notice boxes. The
+        # bare "ℹ" (U+2139) renders as a tiny serif letter, not an icon.
+        result_notes_toggle.description = (
+            f"{arrow}  ℹ️  {n} {word} about this data cube"
+        )
+        result_notes_body.layout.display = "" if _notes_open["open"] else "none"
+
+    def _on_notes_toggle(_btn):
+        _notes_open["open"] = not _notes_open["open"]
+        _render_notes_toggle(len(result_notes_body.children))
+
+    result_notes_toggle.on_click(_on_notes_toggle)
+
+    def _set_result_notes(notes):
+        """Fill the notes strip from a list of ``(title, html)`` pairs (None
+        entries dropped). An empty list hides the strip entirely, so a cube with
+        nothing to report shows no extra line at all."""
+        notes = [n for n in (notes or []) if n]
+        if not notes:
+            result_notes_body.children = ()
+            result_notes_row.layout.display = "none"
+            return
+        # width="100%", matching the header button exactly - see the
+        # .stac2cube-notes-row rules in gui_common for why "auto" drifts.
+        result_notes_body.children = tuple(
+            widgets.HTML(html_, layout=widgets.Layout(width="100%"))
+            for _title, html_ in notes
+        )
+        _render_notes_toggle(len(notes))
+        result_notes_row.layout.display = ""
 
     def _coreg_warn_html():
         """Yellow co-registration size warning for the Result panel, or empty
-        string when the last build carried no such hint."""
+        string when the last build carried no such hint. Deliberately NOT part of
+        the blue notes strip: it is the one notice with something to decide, and
+        its Resize and Re-build button must not be collapsed out of view."""
         hint = state.get("coreg_size_hint")
         if not hint:
             return ""
@@ -2638,16 +2701,14 @@ def datacube_builder(missions_func=missions):
         # makes sense next to a ready cube - hide it for empty/failed results.
         empty = _result_is_empty(obj)
         result_viz_note_w.value = "" if empty else _RESULT_VIZ_NOTE_HTML
-        # Both warnings live at the TOP of the Result section. The multi-swath
-        # (overlapping-tile) hint comes first, the co-registration size warning
-        # second; each is hidden entirely when it has nothing to say.
-        _ms_hint = "" if empty else (state.get("multiswath_hint") or "")
-        result_multiswath_warn_w.value = _ms_hint
-        result_multiswath_warn_w.layout.display = "" if _ms_hint else "none"
-        _proj_hint = "" if empty else (state.get("projection_hint") or "")
-        result_projection_warn_w.value = _proj_hint
-        result_projection_warn_w.layout.display = "" if _proj_hint else "none"
+        # Notices live at the TOP of the Result section: the yellow Area Size
+        # warning first (the only one with something to decide), then the blue
+        # notes strip. Both collapse away entirely when they have nothing to say.
         _set_coreg_warning("" if empty else _coreg_warn_html())
+        _set_result_notes([] if empty else [
+            state.get("multiswath_hint"),
+            state.get("projection_hint"),
+        ])
         with result_out:
             clear_output()
 
@@ -2670,8 +2731,8 @@ def datacube_builder(missions_func=missions):
                 _show_multi_feature_summary(obj)
                 return
 
-            # (The multi-swath hint is rendered above result_out, in
-            # result_multiswath_warn_w - see the top of this function.)
+            # (The multi-swath note is rendered above result_out, inside the
+            # notes strip - see the top of this function.)
 
             # Single cube: friendly summary by default; the bold toggle swaps in
             # the raw xarray repr for power users.
@@ -3340,10 +3401,7 @@ def datacube_builder(missions_func=missions):
         # generic 'no data' failure - tell the user to raise the value instead.
         if _result_is_empty(filtered) and not _result_is_empty(state["result"]):
             result_viz_note_w.value = ""
-            result_multiswath_warn_w.value = ""
-            result_multiswath_warn_w.layout.display = "none"
-            result_projection_warn_w.value = ""
-            result_projection_warn_w.layout.display = "none"
+            _set_result_notes([])
             _set_coreg_warning("")
             with result_out:
                 clear_output()
@@ -3372,10 +3430,7 @@ def datacube_builder(missions_func=missions):
         filtered = _effective_result(state["result"], composite=False)
         if _result_is_empty(filtered) and not _result_is_empty(state["result"]):
             result_viz_note_w.value = ""
-            result_multiswath_warn_w.value = ""
-            result_multiswath_warn_w.layout.display = "none"
-            result_projection_warn_w.value = ""
-            result_projection_warn_w.layout.display = "none"
+            _set_result_notes([])
             _set_coreg_warning("")
             with result_out:
                 clear_output()
@@ -3950,16 +4005,12 @@ def datacube_builder(missions_func=missions):
             else ((export_target_w.value or "").strip() or None)
         )
 
-        # JSON is for get_stac_layers config:
-        # - lazy -> output null
-        # - netcdf / zarr -> output path (extension selects the format in
-        #   get_stac_layers: .zarr -> Zarr store, otherwise NetCDF)
-        # - cogs -> output null (COG export is deferred / separate UI step)
-        output_for_json = (
-            export_target
-            if (export_mode in ("netcdf", "zarr") and export_target)
-            else None
-        )
+        # JSON is for get_stac_layers config, and a SLURM run always writes, so
+        # every export mode carries its target: a FILE for netcdf / zarr, a
+        # FOLDER for cogs. export_format says which - get_stac_layers dispatches
+        # on it (cogs -> export_to_cogs) instead of guessing from the path.
+        output_for_json = export_target or None
+        export_format_for_json = export_mode if output_for_json else None
 
         # Result panel's "Max cloud %" -> scene_cloud_coverage. Only meaningful
         # with cloud detection on (the cloud_percentage coord it filters does
@@ -3968,6 +4019,23 @@ def datacube_builder(missions_func=missions):
         scene_cloud_coverage = None
         if cloud_masking is True and int(result_cloud_max_w.value) < 100:
             scene_cloud_coverage = int(result_cloud_max_w.value)
+
+        # Result panel's "Date Selection" -> dates. Emitted only when the user
+        # actually deselected something: with every date ticked the list would
+        # just pin the build to what this preview happened to find, so null
+        # (keep everything) is the honest config. The picker is empty for
+        # multi-feature batches, so a batch config never carries dates -
+        # get_stac_layers rejects that combination anyway. An emptied selection
+        # is emitted as [] on purpose: it fails loudly there instead of
+        # silently exporting every date.
+        dates_for_json = None
+        _all_result_dates = _result_date_all_values()
+        if _all_result_dates:
+            _sel_dates = [
+                d for d in _all_result_dates if d in set(result_date_w.value)
+            ]
+            if len(_sel_dates) < len(_all_result_dates):
+                dates_for_json = _sel_dates
 
         json_payload = {
             "parameters": {
@@ -3989,7 +4057,9 @@ def datacube_builder(missions_func=missions):
                 "nir_dark_threshold": float(shadow_nir_dark_w.value),
                 "shadow_proj_distance": float(shadow_proj_dist_w.value),
                 "cloud_mask_output": cloud_mask_output,
+                "dates": dates_for_json,
                 "output": output_for_json,
+                "export_format": export_format_for_json,
                 "clip_raster": clip_raster,
                 "resampling_method": resampling_w.value,
                 # null = Automatic (chosen from the scenes at build time).
@@ -4027,7 +4097,10 @@ def datacube_builder(missions_func=missions):
                 "min_scene_coverage": float(min_coverage_w.value) / 100.0,
                 "aggregator": aggregator,
                 "stats": stats,
-                "compress": bool(export_compress_w.value),
+                # zlib compression is a NetCDF-only option (Zarr and COGs bring
+                # their own codecs), and the checkbox is hidden - not reset -
+                # for the other modes, so pin it to the mode it applies to.
+                "compress": bool(export_compress_w.value) and export_mode == "netcdf",
             }
         }
 
@@ -4337,12 +4410,15 @@ def datacube_builder(missions_func=missions):
                 "Statistics not available for this mission: " + ", ".join(missing_stats)
             )
 
-        # 11) Export. The JSON only carries a file output (NetCDF / Zarr); the
-        #     COG folder mode writes null there, so it cannot be told apart from
-        #     "no output set".
+        # 11) Export. export_format names the mode outright (netcdf / zarr /
+        #     cogs); a hand-written SLURM config may omit it, in which case the
+        #     format falls back to the file extension, as get_stac_layers does.
         output = params.get("output")
         if output:
-            export_mode_w.value = "zarr" if str(output).lower().endswith(".zarr") else "netcdf"
+            fmt = str(params.get("export_format") or "").strip().lower()
+            if fmt not in ("netcdf", "zarr", "cogs"):
+                fmt = "zarr" if str(output).lower().endswith(".zarr") else "netcdf"
+            export_mode_w.value = fmt
             export_target_w.value = str(output)
         else:
             warnings.append(
@@ -4356,6 +4432,16 @@ def datacube_builder(missions_func=missions):
         # 12) Result-panel cloud filter (greyed until a build produces cloud %).
         scc = params.get("scene_cloud_coverage")
         result_cloud_max_w.value = 100 if scc is None else int(scc)
+
+        # 13) Date selection cannot be restored: the picker is filled from a
+        #     built cube's time axis, which does not exist before the build.
+        if params.get("dates"):
+            warnings.append(
+                "Date selection: "
+                f"{len(params['dates'])} date(s) are stored in these settings. "
+                "Build the cube first, then pick them in Result > Date "
+                "Selection."
+            )
 
         return warnings
 
@@ -4969,6 +5055,14 @@ def datacube_builder(missions_func=missions):
     def _on_generate_clicked(_):
         with result_out:
             clear_output()
+        # The notices describe the cube that was just wiped, so they must go with
+        # it: left up during a rebuild they read as if they applied to the run in
+        # progress, which is misleading exactly when the user has changed the
+        # settings that produced them. _show_result_summary puts back whatever the
+        # NEW cube deserves.
+        _set_coreg_warning("")
+        _set_result_notes([])
+        result_viz_note_w.value = ""
 
         try:
             params, export_mode, export_target = _prepare_get_stac_layers_params()
@@ -5025,13 +5119,13 @@ def datacube_builder(missions_func=missions):
                 # Multi-swath hint (GUI-only): flag AOIs that sit across swaths
                 # so some scenes are partial. Single cubes only; never fatal.
                 state["multiswath_hint"] = (
-                    "" if isinstance(result, list)
+                    None if isinstance(result, list)
                     else _compute_multiswath_hint(result)
                 )
-                # Projection warning: only when scenes were actually re-drawn
-                # into the cube's CRS (the attrs are absent otherwise).
+                # Projection note: only when scenes were actually re-drawn into
+                # the cube's CRS (the attrs are absent otherwise).
                 state["projection_hint"] = (
-                    "" if isinstance(result, list)
+                    None if isinstance(result, list)
                     else _compute_projection_hint(result)
                 )
                 # The built cube already knows its projections, so fill the
@@ -6052,9 +6146,9 @@ def datacube_builder(missions_func=missions):
         [
             widgets.HTML(
                 "<div style='font-size:12px; color:#475569; margin:0 0 6px 0;'>"
-                "The grid your cube is drawn in. Leave it on <b>Automatic</b> "
-                "unless you need a specific projection - every scene is kept "
-                "either way."
+                "The common coordinate reference system that the data cube is "
+                "built on. Leave it on <b>Automatic</b> unless you need a "
+                "specific projection."
                 "</div>"
             ),
             _param_panel(
@@ -6200,7 +6294,7 @@ def datacube_builder(missions_func=missions):
             if not (crs_user_w.value or "").strip():
                 _set_crs_status(
                     "<div style='font-size:12px; color:#166534;'>✓ filled in from "
-                    f"the cube you just built (built in <b>{target}</b>).</div>"
+                    f"the cube you just built (<b>{target}</b>).</div>"
                 )
         except Exception:
             pass
@@ -6226,7 +6320,7 @@ def datacube_builder(missions_func=missions):
         crs_search_btn.disabled = True
         _set_crs_status(
             "<div style='font-size:12px; color:#475569;'>Searching the "
-            "catalogue for available projections...</div>"
+            "catalogue...</div>"
         )
         try:
             entries = probe_native_crs(
@@ -6238,24 +6332,23 @@ def datacube_builder(missions_func=missions):
             if not entries:
                 _set_crs_status(
                     "<div style='font-size:12px; color:#92400e;'>No scenes found "
-                    "for this area, so no projections could be detected.</div>"
+                    "for this area.</div>"
                 )
                 return
             _populate_detected_crs(entries)
             if len(entries) == 1:
                 _set_crs_status(
                     "<div style='font-size:12px; color:#166534;'>✓ one projection "
-                    f"covers this area: <b>{entries[0]['crs']}</b>. Nothing to "
-                    "choose - Automatic uses it.</div>"
+                    f"covers this area: <b>{entries[0]['crs']}</b>. Automatic "
+                    "uses it.</div>"
                 )
             else:
                 best = entries[0]
                 _set_crs_status(
                     "<div style='font-size:12px; color:#1e3a8a;'>Found "
-                    f"<b>{len(entries)}</b> projections. Automatic will use "
-                    f"<b>{best['crs']}</b> (the one covering most of your area). "
-                    "Scenes from the others are re-drawn onto it; none are "
-                    "dropped.</div>"
+                    f"<b>{len(entries)}</b> projections. Automatic uses "
+                    f"<b>{best['crs']}</b> - it covers most of your area. No "
+                    "scenes are dropped.</div>"
                 )
         except Exception as exc:
             _set_crs_status(
@@ -6538,9 +6631,8 @@ def datacube_builder(missions_func=missions):
                     "<div style='font-size:12px; color:#374151; margin-bottom:6px;'>"
                     "<b>NaN</b> = catalogue query failed (e.g. credentials or "
                     "API issue).<br>"
-                    "These are <b>raw archive dates</b>: the count ignores the "
-                    "<b>Max cloud %</b> filter, so a cube built with a filter "
-                    "below 100 will have fewer time steps than shown here."
+                    "The <b>Max cloud %</b> filter is not applied here, so a "
+                    "cube built with a filter below 100 will have fewer dates."
                     "</div>"
                 ))
 
@@ -6861,11 +6953,12 @@ def datacube_builder(missions_func=missions):
                               display="none"),
     )
 
-    # Both warnings sit at the TOP of the Result section (user request): the
-    # overlapping-tile / multi-swath warning first, then the area-size
-    # co-registration warning, then the cube summary and its controls.
+    # Notices sit at the TOP of the Result section (user request), in this order:
+    # the yellow Area Size warning with its Resize button (the only notice that
+    # asks for a decision), then the collapsed blue notes strip holding
+    # everything informational, and only then the cube summary and its controls.
     result_box = widgets.VBox(
-        [result_multiswath_warn_w, result_projection_warn_w, result_coreg_warn_row,
+        [result_coreg_warn_row, result_notes_row,
          result_out, result_cloud_filter_row, result_date_row,
          result_viz_note_w],
         layout=widgets.Layout(width="99%", gap="6px"),

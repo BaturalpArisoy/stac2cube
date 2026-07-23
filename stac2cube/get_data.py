@@ -647,6 +647,168 @@ def _s2_baseline(item):
         return 0.0
 
 
+# Processing baseline at which ESA introduced the -1000 DN radiometric offset.
+# Items on either side of it are radiometrically incompatible and scale_factor
+# applies ONE offset per timestep, so a single solar day must not mix the two.
+_S2_OFFSET_BASELINE = 4.00
+
+
+def _s2_offset_era(item):
+    """True once the -1000 DN offset is baked into an L1C item's pixels."""
+    return _s2_baseline(item) >= _S2_OFFSET_BASELINE
+
+
+def _s2_granule_key(item):
+    """Identity of the ground granule behind an L1C item, baseline-independent.
+
+    ``(tile, datastrip sensing time)``. The ``_S<YYYYMMDDThhmmss>`` token of the
+    datastrip id is the only field that survives reprocessing unchanged, which
+    is why neither obvious alternative works (both verified live on element84):
+
+      * the item's own ``datetime`` CHANGES between baselines - the N02.06 and
+        N05.00 copies of S2B tile 32UNC on 2018-06-15 report 04:05:41 and
+        04:15:57, so keying on it leaves both copies in;
+      * ``s2:product_uri`` carries the datatake time, which two DIFFERENT
+        datastrips of one orbit share (T32UNC 2018-06-26, both 102019), so
+        keying on it would merge two real acquisitions into one.
+
+    Falls back to the item's own timestamp when no datastrip id is published.
+    """
+    tile = _item_tile(item)
+    ds = str(
+        item.properties.get("s2:datastrip_id")
+        or item.properties.get("eopf:datastrip_id")  # cdse
+        or ""
+    )
+    m = re.search(r"_S(\d{8}T\d{6})", ds)
+    if m:
+        return (tile, m.group(1))
+    return (tile, str(item.properties.get("datetime", "")))
+
+
+def _aoi_coverage(geoms, bbox):
+    """Share of the AOI (0..1) covered by the union of the given footprints.
+
+    Returns None when the geometry or bbox is unusable, so callers can fall back
+    on something else instead of acting on a bogus 0.
+    """
+    try:
+        from shapely.geometry import box as _box
+        from shapely.ops import unary_union
+
+        geoms = [g for g in geoms if g is not None]
+        if not geoms:
+            return None
+        minx, miny, maxx, maxy = [float(v) for v in bbox]
+        aoi = (
+            gpd.GeoSeries([_box(minx, miny, maxx, maxy)], crs="EPSG:4326")
+            .to_crs(_EQUAL_AREA)
+            .iloc[0]
+        )
+        if aoi.area <= 0:
+            return None
+        footprint = (
+            gpd.GeoSeries([unary_union(geoms)], crs="EPSG:4326")
+            .to_crs(_EQUAL_AREA)
+            .iloc[0]
+        )
+        return float(aoi.intersection(footprint).area / aoi.area)
+    except Exception:
+        return None
+
+
+def _dedup_s2_l1c_items(items, bbox, q=False):
+    """Drop redundant Sentinel-2 L1C items WITHOUT dropping ground coverage.
+
+    Several items land on the same solar day for two opposite reasons:
+
+      * they cover DIFFERENT ground - the AOI spans several MGRS tiles, or one
+        tile was acquired as two datastrip segments. All of them are needed.
+      * they are the SAME granule at two processing baselines, because the
+        archive still holds the original next to its reprocessed copy. Only the
+        newest is wanted, and letting both in is worse than redundant: the
+        -1000 DN offset exists from baseline 04.00 on and scale_factor applies
+        a single offset per timestep.
+
+    The previous filter kept exactly one item per DAY, which handled the second
+    case but silently deleted the first. Verified against the live element84
+    catalogue over an AOI spanning 47TPK/47TPL: 17 of 18 dates lost a whole
+    tile, so that half of the AOI loaded as nodata - and through
+    get_cloud_layers it produced an empty s2cloudless probability map there.
+
+    Two passes:
+
+      1. per solar day, keep ONE radiometric era. Only reachable on a partially
+         reprocessed archive (element84); CDSE/terrabyte are uniform. The era
+         covering more of the AOI wins rather than always the newer one:
+         measured over three AOIs and six seasons, 33 of 581 mixed-baseline
+         (day, tile) groups have a datastrip that was never reprocessed, so
+         "newest always" would punch holes of up to 49% of the tile.
+      2. per granule (tile + datastrip), keep the highest baseline. This is the
+         only place an item is dropped as redundant, and by construction it
+         covers the same ground as the item kept in its place.
+    """
+    per_day = defaultdict(list)
+    for it in items:
+        per_day[str(it.properties.get("datetime", ""))[:10]].append(it)
+
+    kept = []
+    for day in sorted(per_day):
+        group = per_day[day]
+
+        eras = {_s2_offset_era(it) for it in group}
+        if len(eras) > 1:
+            new = [it for it in group if _s2_offset_era(it)]
+            old = [it for it in group if not _s2_offset_era(it)]
+            cov_new = _aoi_coverage([_shapely_geom(it) for it in new], bbox)
+            cov_old = _aoi_coverage([_shapely_geom(it) for it in old], bbox)
+            cov_both = _aoi_coverage([_shapely_geom(it) for it in group], bbox)
+            # Newer era unless the older one demonstrably covers more ground.
+            # The margin keeps footprint-polygon refinements between baselines
+            # (~1% differences on identical scenes) from flipping the choice.
+            if cov_old is not None and cov_new is not None and cov_old > cov_new + 0.02:
+                group, keep_label = old, "pre-04.00"
+                cov_keep = cov_old
+            else:
+                group, keep_label = new, ">=04.00"
+                cov_keep = cov_new
+            # Only worth telling the user about when the choice actually costs
+            # ground. Both eras holding the same scene is the normal case (the
+            # archive simply kept the original next to its reprocessed copy)
+            # and would otherwise warn on nearly every pre-2022 date.
+            _unmeasurable = cov_keep is None or cov_both is None
+            if not q and (_unmeasurable or cov_keep < cov_both - 0.02):
+                _lost = (
+                    "coverage could not be measured"
+                    if _unmeasurable
+                    else f"{cov_both - cov_keep:.0%} of the AOI is left out"
+                )
+                print(
+                    f"Warning: {day} is published at two processing baselines "
+                    f"({sorted({_s2_baseline(i) for i in per_day[day]})}), which "
+                    f"carry different radiometric offsets and cannot share one "
+                    f"timestep. Keeping the {keep_label} scenes - {_lost}."
+                )
+
+        by_granule = defaultdict(list)
+        for it in group:
+            by_granule[_s2_granule_key(it)].append(it)
+        for key in sorted(by_granule, key=lambda k: (str(k[0]), str(k[1]))):
+            kept.append(max(by_granule[key], key=_s2_baseline))
+
+    return kept
+
+
+def _shapely_geom(item):
+    """Item footprint as a shapely geometry, or None if it has none/unusable."""
+    try:
+        from shapely.geometry import shape as _shape
+
+        return _shape(item.geometry) if getattr(item, "geometry", None) else None
+    except Exception:
+        return None
+
+
 def _probe_window(daterange, window_days):
     """A short date window ending at the user's range end (or today).
 
@@ -886,21 +1048,11 @@ def get_stac(
         if str(canon).lower() in _CATEGORICAL_BANDS:
             resampling_cfg[mapped] = "nearest"
 
-    # Pre-filter duplicate items for sentinel_2_l1c based on processing baseline
+    # Sentinel-2 L1C: drop reprocessing duplicates of the same granule, but keep
+    # every distinct tile/datastrip of a day (see _dedup_s2_l1c_items - the old
+    # one-item-per-day filter deleted whole MGRS tiles on multi-tile AOIs).
     if mission == "sentinel_2_l1c":
-        from collections import defaultdict
-
-        grouped = defaultdict(list)
-        for item in items:
-            # Use date string (first 10 characters) as solar day key
-            date_key = item.properties.get("datetime", "")[:10]
-            grouped[date_key].append(item)
-        filtered_items = []
-        for date_key, group in grouped.items():
-            # Choose item with highest processing baseline (converted to float)
-            best_item = max(group, key=_s2_baseline)
-            filtered_items.append(best_item)
-        items = filtered_items
+        items = _dedup_s2_l1c_items(items, bbox, q=q)
 
     _load_kwargs = dict(
         bands=bands,
@@ -933,8 +1085,6 @@ def get_stac(
     # two tiles share a solar day (verified on the real split AOI).
     _separate = mission == "sentinel_2_l2a" and tile_handling == "separate"
     if _separate:
-        from collections import defaultdict
-
         by_tile = defaultdict(list)
         for it in items:
             by_tile[_item_tile(it)].append(it)
@@ -995,25 +1145,52 @@ def get_stac(
             stac = stac.rename(rename_dict)
 
     if mission == "sentinel_2_l1c":
-        date_list = [item.properties["datetime"] for item in items]
-        processing_baseline_list = [_s2_baseline(item) for item in items]
-        dates = pd.to_datetime(date_list, format="mixed").to_numpy(
-            dtype="datetime64[ns]"
-        )
-        baseline_da = xr.DataArray(
-            processing_baseline_list,
+        # One baseline per LOADED timestep, keyed by solar day (the same day-key
+        # convention as extract_scene_metadata). Deliberately NOT an exact
+        # timestamp join: odc-stac labels a merged solar day with the FIRST
+        # item's sensing time, so matching on the timestamp keeps only one item
+        # of a multi-tile day - and the duplicate-timestamp guard that used to
+        # follow it then deleted such dates from the cube outright.
+        # _dedup_s2_l1c_items has already made every day single-era, so the
+        # spread that can remain within a day (e.g. 3.00 next to 3.01) cannot
+        # flip the -1000 offset; max() reports the newest.
+        per_day_baseline = defaultdict(list)
+        for item in items:
+            day = str(item.properties.get("datetime", ""))[:10]
+            per_day_baseline[day].append(_s2_baseline(item))
+
+        item_times = pd.to_datetime(
+            [item.properties["datetime"] for item in items], format="mixed", utc=True
+        ).tz_localize(None).to_numpy(dtype="datetime64[ns]")
+        item_baselines = np.array([_s2_baseline(item) for item in items], dtype=float)
+
+        values = []
+        n_fallback = 0
+        for t in stac.time.values:
+            vals = per_day_baseline.get(str(pd.Timestamp(t).date()))
+            if vals:
+                values.append(max(vals))
+            else:
+                # odc-stac groups by SOLAR day, the item key is the UTC date;
+                # near the dateline the two can differ. Take the nearest item
+                # in time rather than guessing an offset.
+                n_fallback += 1
+                nearest = int(
+                    np.argmin(np.abs(item_times - np.datetime64(t, "ns")))
+                )
+                values.append(float(item_baselines[nearest]))
+        if n_fallback and not q:
+            print(
+                f"Warning: {n_fallback} loaded date(s) had no L1C item on the "
+                f"matching UTC day (solar-day grouping shifts the date near the "
+                f"dateline) - processing baseline taken from the nearest item."
+            )
+
+        baselines = xr.DataArray(
+            np.array(values, dtype=float),
             dims=["time"],
-            coords={"time": dates},
+            coords={"time": stac.time.values},
             name="processing_baseline",
-        )
-        baseline_da_filtered = baseline_da.sel(time=baseline_da.time.isin(stac.time))
-        unique_times, counts = np.unique(
-            baseline_da_filtered.time.values, return_counts=True
-        )
-        duplicate_times = unique_times[counts > 1]
-        stac = stac.sel(time=~np.isin(stac.time, duplicate_times))
-        baselines = baseline_da_filtered.sel(
-            time=~np.isin(baseline_da_filtered.time, duplicate_times)
         )
 
         if scene_metadata:

@@ -407,6 +407,78 @@ button.stac2cube-group-toggle:active {
     width: 100% !important;
 }
 
+/* Header button for the Result panel's collapsible notes strip. Same idea as
+   .stac2cube-group-toggle but in the blue notice palette, so the strip reads as
+   one of the info boxes it holds rather than as a parameter group. */
+button.stac2cube-notes-toggle,
+button.stac2cube-notes-toggle:hover,
+button.stac2cube-notes-toggle:focus,
+button.stac2cube-notes-toggle:active {
+    background: #eff6ff !important;
+    color: #1e3a8a !important;
+    font-weight: 600 !important;
+    font-size: 12px !important;
+    text-align: left !important;
+    justify-content: flex-start !important;
+    padding: 8px 10px !important;
+    border: 1px solid #bfdbfe !important;
+    border-radius: 6px !important;
+    box-shadow: none !important;
+    /* Fill the row by STRETCHING, not by width:100%. ipywidgets gives every Box
+       "overflow: auto", so the row is a scroll port: a percentage width that
+       rounds up by a subpixel gets its right border shaved off, which is exactly
+       how this button read - closed on the left, open on the right. Sizing it as
+       a stretched flex item makes it resolve to the row's width exactly, with
+       nothing to clip. width:auto is still needed because .widget-button
+       otherwise pins an explicit inline width. */
+    width: auto !important;
+    align-self: stretch !important;
+    max-width: 100% !important;
+    /* box-sizing: without it, this button's own padding and border overflow the
+       Result panel and raise a stray horizontal scrollbar - the same trap the
+       notice HTML boxes avoid with width:auto.
+       height/line-height: ipywidgets pins .widget-button to a fixed 28px, which
+       crops the padded text to a thin slit. */
+    box-sizing: border-box !important;
+    height: auto !important;
+    min-height: 34px !important;
+    line-height: 1.5 !important;
+    white-space: normal !important;
+}
+button.stac2cube-notes-toggle:hover {
+    background: #dbeafe !important;
+}
+
+/* The strip's own wrapper: clip rather than scroll, so nothing inside it can
+   push a horizontal scrollbar onto the Result panel. Width matches the 98% set
+   on the widget's own Layout (see gui.py) - the strip is deliberately a touch
+   narrower than the panel. The 1px right inset keeps the boxes' right borders
+   off the clip edge (see the notes-toggle rule above for why that matters). */
+.stac2cube-notes-row {
+    width: 99%;
+    box-sizing: border-box;
+    overflow-x: clip;
+    padding-right: 1px;
+}
+
+/* Line the notice boxes up EXACTLY with the header button above them.
+   Left alone, the two size themselves by different mechanisms - ipywidgets gives
+   .widget-html-content "align-self: stretch; flex-grow: 1" while .widget-button
+   gets an explicit width - so their edges agree only by luck. Pinning every
+   layer of the HTML wrapper to full width with no inset of its own makes both
+   resolve to the same box. */
+.stac2cube-notes-row .widget-vbox,
+.stac2cube-notes-row .widget-html,
+.stac2cube-notes-row .widget-html-content,
+.stac2cube-notes-row .jupyter-widget-html,
+.stac2cube-notes-row .jupyter-widget-html-content {
+    width: 100% !important;
+    max-width: 100% !important;
+    box-sizing: border-box !important;
+    margin: 0 !important;
+    padding: 0 !important;
+}
+
 /* Let widget containers shrink so long option text / long values can't push a
    stray horizontal scrollbar onto the field (the symptom inside accordions). */
 .stac2cube-card .widget-box,
