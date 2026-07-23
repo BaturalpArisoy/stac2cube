@@ -3,7 +3,7 @@
 # stac2cube <br> STACs to Analysis-Ready Data Cubes
 
 [![Preprint DOI](https://img.shields.io/badge/DOI-10.5194%2Fegusphere--2026--619-blue)](https://doi.org/10.5194/egusphere-2026-619)
-[![DOI](https://zenodo.org/badge/940592574.svg)](https://zenodo.org/records/18495808)
+[![DOI](https://zenodo.org/badge/940592574.svg)](https://doi.org/10.5281/zenodo.18458716)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
 
 
@@ -202,7 +202,7 @@ A documentation file on how to use stac2cube features on terrabyte's HPC for com
 ### Software
 **Please include the exact version**
 
-    Arisoy, B., Betz, F., Stauch, G., Klein, D., Dech, S., & Ullmann, T. (2026). stac2cube (Version 1.5.0). Zenodo. https://zenodo.org/records/18495808
+    Arisoy, B., Betz, F., Stauch, G., Klein, D., Dech, S., & Ullmann, T. (2026). stac2cube (Version 1.5.0). Zenodo. https://doi.org/10.5281/zenodo.20666787
 
 
 ## Contact 
