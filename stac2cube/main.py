@@ -1264,10 +1264,18 @@ def get_stac_layers(
         # was no cloud detection (no SCL): it attaches a LAZY band-0 coverage so a
         # build that never reads it triggers no extra band read; it materializes
         # only on first use (export, a coverage filter) or when partial-scene
-        # removal below reads it. Skipped in update mode, where the newly built
-        # dates are concatenated onto an existing cube that may predate the coord.
+        # removal below reads it.
+        #
+        # Runs in UPDATE mode too: the newly built dates are concatenated onto an
+        # existing cube that carries the coord, and a side that lacks it breaks
+        # the concat (update_stac reconciles what is still missing, e.g. legacy
+        # cubes predating the coord). Caveat in update mode: the coverage
+        # denominator is the footprint of the scenes in hand, and the fresh query
+        # holds only the NEW dates - so if every new scene is partial in the same
+        # place, their coverage is measured against that smaller footprint and
+        # reads higher than it would in a full rebuild.
         _scene_cov = None
-        if not update and "scene_coverage" not in stac.coords:
+        if "scene_coverage" not in stac.coords:
             try:
                 _scene_cov = compute_scene_coverage(
                     stac, cloud_mask=cloud_bool, compute=False

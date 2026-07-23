@@ -33,6 +33,54 @@ def _require_timeseries_layer(ds):
     )
 
 
+def _reconcile_time_coords(stac_old, stac_new, q=False):
+    """Drop per-scene (time,) coords that only ONE side of the time concat has.
+
+    The time concat needs both sides to carry the same per-scene coordinates -
+    `xr.concat` raises `ValueError: coordinate '<name>' not present in all
+    datasets` otherwise. A mismatch happens whenever a coordinate was added to
+    the build after a cube was written: the stored file has it and the freshly
+    fetched dates do not, or (for a legacy cube) the other way round. The
+    concrete case that broke updates was `scene_coverage` on cubes built with
+    cloud detection off.
+
+    The one-sided coordinate is DROPPED rather than filled: its values are
+    per-scene measurements, and there is nothing to compute them from on the
+    side that lacks them. Filling with NaN would leave a coordinate that looks
+    complete but silently excludes those dates from any later comparison (a
+    coverage or cloud-% filter), which is worse than not having it - the cube
+    can always be rebuilt, or the coordinate re-measured from the pixels.
+
+    Returns (stac_old, stac_new, dropped_names).
+    """
+    def _per_scene(da):
+        return {
+            str(c)
+            for c in da.coords
+            if str(c) != "time" and da[c].dims == ("time",)
+        }
+
+    only_old = _per_scene(stac_old) - _per_scene(stac_new)
+    only_new = _per_scene(stac_new) - _per_scene(stac_old)
+    dropped = sorted(only_old | only_new)
+
+    if dropped:
+        stac_old = stac_old.drop_vars(sorted(only_old), errors="ignore")
+        stac_new = stac_new.drop_vars(sorted(only_new), errors="ignore")
+        if not q:
+            print(
+                "Note: the coordinate(s) "
+                + ", ".join(f"'{c}'" for c in dropped)
+                + " are present on only one side of the update (the stored "
+                "cube or the newly fetched dates, not both), so they cannot "
+                "describe the merged time axis and were dropped. No values "
+                "were invented for the missing dates - rebuild the cube over "
+                "the full date range if you need them everywhere."
+            )
+
+    return stac_old, stac_new, dropped
+
+
 def get_stac_parameters(stac_existing):
 
     if isinstance(stac_existing, (str, os.PathLike)):
@@ -217,6 +265,14 @@ def update_stac(stac_existing, stac_updated, new_bands=None):
         stac_existing = stac_existing.sel(band=final_order)
 
     if missing_times:
+        # Both sides must carry the same per-scene (time,) coordinates or the
+        # concat below raises; drop any one-sided leftover first (dropping
+        # BEFORE .compute() also keeps a lazy coord from being materialized
+        # just to be discarded).
+        stac_existing, stac_missing, _ = _reconcile_time_coords(
+            stac_existing, stac_missing
+        )
+
         # Compute the missing slices (only these will be computed now)
         computed_missing = stac_missing.compute()
         if added_bands:
