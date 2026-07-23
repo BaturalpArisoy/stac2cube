@@ -791,6 +791,15 @@ def get_stac_layers(
                 # below, before the merge. The threshold is self-encoded in the
                 # status name; the shadow params (if stored) mean s2cloudless +
                 # shadow was applied.
+                if stac_parameters.get("cloud_fill_method") == "hybrid_s2cloudless_scl":
+                    raise ValueError(
+                        "This cube was masked with the hybrid s2cloudless + "
+                        "SCL-fill strategy (some dates had no L1C scene and were "
+                        "filled with the SCL cloud mask). Update mode cannot yet "
+                        "reproduce that mixed decision per new date, so it "
+                        "refuses hybrid cubes. Rebuild over the wider date range "
+                        "instead, or re-run the standalone cloud tools."
+                    )
                 if add_bands:
                     raise ValueError(
                         "Band addition is not supported for s2cloudless-masked "

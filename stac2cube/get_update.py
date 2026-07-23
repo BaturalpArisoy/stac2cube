@@ -167,6 +167,10 @@ def get_stac_parameters(stac_existing):
         # mode refuses to touch a "separate" cube (sub-day per-tile times).
         "tile_handling": stac_existing.attrs.get("tile_handling", "mosaic"),
         "cloud_status": cloud_status,
+        # Hybrid s2cloudless+SCL-fill provenance (set only on cubes where some
+        # dates lacked an L1C scene and were SCL-filled). Update mode does not
+        # yet reproduce mixed masking, so it uses this to refuse such cubes.
+        "cloud_fill_method": stac_existing.attrs.get("cloud_fill_method"),
         # Shadow projection params (present only on scl_shadow_masked cubes).
         "nir_dark_threshold": stac_existing.attrs.get("nir_dark_threshold"),
         "shadow_proj_distance": stac_existing.attrs.get("shadow_proj_distance"),

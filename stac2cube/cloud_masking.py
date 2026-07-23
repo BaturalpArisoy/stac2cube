@@ -204,7 +204,21 @@ def get_cloud_layers(
     input_cube=None,
     slurm_timer=None,
     compress=False,
+    missing_l1c="scl",
 ):
+    # missing_l1c: what to do with a cube date that has NO Sentinel-2 L1C scene
+    # (element84 is sparse before ~2021, so cubes built from Planetary Computer /
+    # terrabyte routinely carry dates with no L1C to run s2cloudless on):
+    #   "scl"   - fill those dates with the SCL binary cloud mask from the cube's
+    #             OWN source (0/100 in cloud_prob), so the cube is fully masked;
+    #   "drop"  - leave those dates out of the Cloud_Stack (they are then dropped
+    #             from the masked cube by the label-join in mask_stac_clouds);
+    #   "error" - the old behaviour: raise as soon as one date has no L1C scene.
+    if missing_l1c not in ("scl", "drop", "error"):
+        raise ValueError(
+            f"missing_l1c must be 'scl', 'drop', or 'error' (got {missing_l1c!r})."
+        )
+
     if output_clouds is None and output is not None:
         output_clouds = output
 
@@ -216,12 +230,22 @@ def get_cloud_layers(
     #   - masking=<cube>    -> derive dates AND mask the cube at the end
     #   - input_cube=<cube> -> derive dates only (probability / masks, no masking)
     reference_times = None
+    # Grid + source of the cube being masked, captured for the L1C query (grid
+    # pinning) and the SCL fill (which re-queries the cube's OWN source). Left
+    # None outside the standalone cube path (e.g. update mode), which keeps its
+    # historical unpinned behaviour.
+    _src_resolution = None
+    _src_crs = None
+    _src_params = None
 
     # `is not None`, not truthiness: masking/input_cube may be an in-memory
     # DataArray, whose bool() is ambiguous.
     source_cube = masking if masking is not None else input_cube
     if source_cube is not None:
         stac_parameters = get_stac_parameters(source_cube)
+        _src_params = stac_parameters
+        _src_resolution = stac_parameters.get("resolution")
+        _src_crs = stac_parameters.get("crs")
         polygon = stac_parameters["polygon"]
         daterange = stac_parameters["daterange"]
 
@@ -264,17 +288,30 @@ def get_cloud_layers(
         "cirrus", "swir16", "swir22",
     ]
 
-    def _filter_to_reference_times(stac_da: xr.DataArray, ref_times) -> xr.DataArray:
+    def _filter_to_reference_times(stac_da: xr.DataArray, ref_times):
+        """Align L1C scenes to the cube's exact reference timestamps.
+
+        Returns ``(matched_stac, present_times, missing_times)``:
+          * ``matched_stac`` - the L1C scenes for the reference times that HAVE
+            an L1C scene, in reference order, re-labelled to those exact
+            reference timestamps (``None`` if not a single date matched);
+          * ``present_times`` / ``missing_times`` - the reference timestamps
+            that do / do not have an L1C scene (matched at day precision).
+
+        No longer raises on a missing date: the caller decides what to do with
+        ``missing_times`` (SCL fill / drop / error) via ``missing_l1c``.
+        """
         st = np.asarray(stac_da.time.values).astype("datetime64[ns]")
         rt = np.asarray(ref_times).astype("datetime64[ns]")
+        empty = np.asarray([], dtype="datetime64[ns]")
 
-        # 1) exact timestamp match
+        # 1) exact timestamp match - every reference date has an L1C scene.
         if np.all(np.isin(rt, st)):
             order = [int(np.where(st == t)[0][0]) for t in rt]
-            out = stac_da.isel(time=order).assign_coords(time=ref_times)
-            return out
+            out = stac_da.isel(time=order).assign_coords(time=rt)
+            return out, rt, empty
 
-        # 2) fallback: day-level matching (handles duplicates in the reference list)
+        # 2) day-level matching (handles duplicates AND missing dates).
         st_d = st.astype("datetime64[D]")
         rt_d = rt.astype("datetime64[D]")
 
@@ -285,27 +322,22 @@ def get_cloud_layers(
 
         used = defaultdict(int)
         order = []
-        missing = []
-        for d in rt_d:
+        present_mask = np.zeros(len(rt), dtype=bool)
+        for j, d in enumerate(rt_d):
             k = used[d]
-            if d not in pos or k >= len(pos[d]):
-                missing.append(d)
-            else:
+            if d in pos and k < len(pos[d]):
                 order.append(pos[d][k])
                 used[d] += 1
+                present_mask[j] = True
 
-        if missing:
-            ex = ", ".join(np.datetime_as_string(m, unit="D") for m in missing[:5])
-            raise ValueError(
-                "Cloud STAC retrieval is missing some reference dates. "
-                f"Missing (first up to 5): {ex}"
-            )
-
-        out = stac_da.isel(time=order)
-        # Keep the reference time coordinate for alignment
-        if out.sizes["time"] == len(ref_times):
-            out = out.assign_coords(time=ref_times)
-        return out
+        present_times = rt[present_mask]
+        missing_times = rt[~present_mask]
+        out = (
+            stac_da.isel(time=order).assign_coords(time=present_times)
+            if order
+            else None
+        )
+        return out, present_times, missing_times
 
     stac = get_stac_layers(
         mission=mission,
@@ -314,6 +346,16 @@ def get_cloud_layers(
         bands=bands,
         max_cc=max_cc,
         clip_raster=clip_raster,
+        # Only element84 serves a usable L1C archive (PC has none; terrabyte L1C
+        # is request-gated; CDSE L1C is not cloud-optimised). Pinned explicitly.
+        source="element84",
+        # Put the L1C probability on the SAME grid (resolution + CRS) as the
+        # cube being masked, so the Cloud_Stack aligns to it pixel-for-pixel.
+        # Without this the query always built at 10 m in the L1C item's own CRS;
+        # masking a 20 m cube (or one in a different UTM zone) then label-joined
+        # to an all-different grid and silently produced an empty cube.
+        resolution=_src_resolution,
+        crs=_src_crs,
         # s2cloudless is documented and calibrated for bilinearly-resampled
         # reflectance. Pin bilinear explicitly so this does NOT inherit the
         # global get_stac_layers default (now "nearest") - nearest-resampled
@@ -322,12 +364,50 @@ def get_cloud_layers(
         q=True,
     )
 
+    # Reference alignment + missing-L1C policy (standalone cube path only;
+    # update mode keeps its own find_missing_times logic below).
+    _present_times = None
+    _missing_l1c_times = np.asarray([], dtype="datetime64[ns]")
     if reference_times is not None:
-        stac = _filter_to_reference_times(stac, reference_times)
+        stac, _present_times, _missing_l1c_times = _filter_to_reference_times(
+            stac, reference_times
+        )
+        if len(_missing_l1c_times) > 0:
+            _mstr = ", ".join(
+                np.datetime_as_string(np.sort(_missing_l1c_times), unit="D")
+            )
+            if missing_l1c == "error":
+                raise ValueError(
+                    "Cloud STAC retrieval is missing L1C scenes for some cube "
+                    f"dates: {_mstr}. Element84 lacks these dates. Use "
+                    "missing_l1c='scl' to fill them with the SCL cloud mask "
+                    "from the cube's own source, or 'drop' to leave them out."
+                )
+            elif missing_l1c == "drop":
+                print(
+                    f"{len(_missing_l1c_times)} cube date(s) have no L1C scene "
+                    f"and are dropped (missing_l1c='drop'): {_mstr}",
+                    flush=True,
+                )
+            else:  # "scl"
+                print(
+                    f"{len(_missing_l1c_times)} cube date(s) have no L1C scene; "
+                    "they will be filled with the SCL cloud mask from the "
+                    f"cube's own source (missing_l1c='scl'): {_mstr}",
+                    flush=True,
+                )
 
-    crs = stac.crs
-    transform = stac.transform
-    bbox = stac.bbox
+    _has_l1c = stac is not None and stac.sizes.get("time", 0) > 0
+
+    if _has_l1c:
+        crs = stac.crs
+        transform = stac.transform
+        bbox = stac.bbox
+    else:
+        # Every cube date fell back to SCL (e.g. a fully pre-2021 seasonal cube):
+        # there is no L1C stac to take the grid from. Geometry is recovered from
+        # the SCL-fill mask further down instead.
+        crs = transform = bbox = None
 
     if update:
         with open_cube(update) as ds:
@@ -349,89 +429,6 @@ def get_cloud_layers(
         all_bands=False,
     )
 
-    cloud_prob_results = []
-    times = []  # To store the time coordinate for each processed slice
-    total = len(stac.time)
-
-    if slurm_timer:
-        import time
-
-        slurm_timer = slurm_timer * 3600
-        start_time = time.time()
-
-    # Scenes are processed in batches: while s2cloudless predicts the current
-    # batch, the next one is already downloading in the background (the
-    # download is round-trip latency bound, ~constant per scene regardless of
-    # AOI size, and dominates the runtime for small/medium AOIs). Batch size
-    # and prefetch adapt to the memory actually available to this job (cgroup
-    # / SLURM limit / free RAM; override: STAC2CUBE_BATCH_MEMORY_MB). When not
-    # even one scene fits the budget, this degrades to one scene at a time
-    # without prefetch - the plain per-scene loop's memory profile.
-    values_per_scene = stac.sizes["y"] * stac.sizes["x"] * stac.sizes["band"]
-    batch_size, prefetch = _plan_scene_batches(values_per_scene)
-    scene_mb = values_per_scene * 4 / 1e6
-    print(
-        f"{total} scenes ({scene_mb:.0f} MB each), processed {batch_size} at a "
-        f"time, prefetch {'on' if prefetch else 'off'} "
-        f"(memory budget {_memory_budget_bytes() / 1e9:.1f} GB)",
-        flush=True,
-    )
-
-    progress = tqdm(
-        total=total,
-        desc="Computing",
-        unit="scene",
-        file=sys.stdout,
-        dynamic_ncols=False,
-    )
-    stop = False
-    for batch_times, batch_np in _iter_scene_batches(stac, batch_size, prefetch=prefetch):
-        progress.set_description(
-            f"Computing {np.datetime_as_string(batch_times[-1], unit='D')}"
-        )
-
-        # Guard against silent read failures: with fail_on_error=False a
-        # scene whose assets could not be read arrives filled with nodata
-        # (all zeros) and would yield a plausible-looking ~0% cloud map.
-        for i, bt in enumerate(batch_times):
-            if not batch_np[i].any():
-                warnings.warn(
-                    f"Scene {np.datetime_as_string(bt, unit='D')} is entirely "
-                    "empty (all asset reads failed or returned nodata); its "
-                    "cloud probability map is NOT valid."
-                )
-
-        # Cloud probability maps for the whole batch, shape: (k, y, x).
-        cp_batch = cloud_detector.get_cloud_probability_maps(batch_np)
-        cloud_prob_results.append(cp_batch)
-        times.extend(batch_times)
-        progress.update(len(batch_times))
-        del batch_np
-
-        if slurm_timer:
-            # Check if the elapsed time has reached or exceeded the threshold
-            elapsed = time.time() - start_time
-            if elapsed >= slurm_timer:
-                progress.close()
-                print(
-                    "Time threshold reached! Exiting loop and exporting the collected cloud maps..."
-                )
-                stop = True
-                break
-    if not stop:
-        progress.close()
-
-    # Assemble the cloud probability DataArray.
-    cp_stack = np.concatenate(cloud_prob_results, axis=0)  # shape: (time, y, x)
-    cp_da = xr.DataArray(
-        cp_stack,
-        dims=["time", "y", "x"],
-        coords={"time": times, "y": stac.y, "x": stac.x},
-    )
-    cp_da = cp_da.expand_dims(dim={"band": ["cloud_prob"]})
-
-    cp_da.name = "Cloud_Stack"
-
     def update_prob_maps(stac_existing, cloud_only_stack):
         # keep band dimension with correct label
         stac_existing = stac_existing.sel(band=["cloud_prob"])
@@ -441,21 +438,158 @@ def get_cloud_layers(
         out = out.sortby("time")
         return out
 
-    # --- Determine Output Based on 'threshold' Parameter ---
-    # If no threshold(s) are provided, return only the probability layer.
+    # --- s2cloudless probability for the dates that HAVE an L1C scene ----------
+    # Skipped entirely when every cube date fell back to SCL (_has_l1c False):
+    # there is then no L1C stack to run the detector on.
+    s2c_stack = None
+    if _has_l1c:
+        cloud_prob_results = []
+        times = []  # time coordinate for each processed slice
+        total = len(stac.time)
 
-    # Always build probability layer first (uint8 0-100)
-    cloud_prob_uint8 = (cp_da.sel(band="cloud_prob") * 100).astype(np.uint8)
+        if slurm_timer:
+            import time
 
-    # Create a proper 4D stack: (time, band, y, x) with band label "cloud_prob"
-    cloud_only_stack = cloud_prob_uint8.expand_dims(band=["cloud_prob"]).transpose("time", "band", "y", "x")
-    cloud_only_stack.name = "Cloud_Stack"
+            slurm_timer = slurm_timer * 3600
+            start_time = time.time()
+
+        # Scenes are processed in batches: while s2cloudless predicts the
+        # current batch, the next one is already downloading in the background
+        # (the download is round-trip latency bound, ~constant per scene
+        # regardless of AOI size, and dominates the runtime for small/medium
+        # AOIs). Batch size and prefetch adapt to the memory actually available
+        # to this job (cgroup / SLURM limit / free RAM; override:
+        # STAC2CUBE_BATCH_MEMORY_MB). When not even one scene fits the budget,
+        # this degrades to one scene at a time without prefetch - the plain
+        # per-scene loop's memory profile.
+        values_per_scene = stac.sizes["y"] * stac.sizes["x"] * stac.sizes["band"]
+        batch_size, prefetch = _plan_scene_batches(values_per_scene)
+        scene_mb = values_per_scene * 4 / 1e6
+        print(
+            f"{total} scenes ({scene_mb:.0f} MB each), processed {batch_size} at "
+            f"a time, prefetch {'on' if prefetch else 'off'} "
+            f"(memory budget {_memory_budget_bytes() / 1e9:.1f} GB)",
+            flush=True,
+        )
+
+        progress = tqdm(
+            total=total,
+            desc="Computing",
+            unit="scene",
+            file=sys.stdout,
+            dynamic_ncols=False,
+        )
+        stop = False
+        for batch_times, batch_np in _iter_scene_batches(
+            stac, batch_size, prefetch=prefetch
+        ):
+            progress.set_description(
+                f"Computing {np.datetime_as_string(batch_times[-1], unit='D')}"
+            )
+
+            # Guard against silent read failures: with fail_on_error=False a
+            # scene whose assets could not be read arrives filled with nodata
+            # (all zeros) and would yield a plausible-looking ~0% cloud map.
+            for i, bt in enumerate(batch_times):
+                if not batch_np[i].any():
+                    warnings.warn(
+                        f"Scene {np.datetime_as_string(bt, unit='D')} is entirely "
+                        "empty (all asset reads failed or returned nodata); its "
+                        "cloud probability map is NOT valid."
+                    )
+
+            # Cloud probability maps for the whole batch, shape: (k, y, x).
+            cp_batch = cloud_detector.get_cloud_probability_maps(batch_np)
+            cloud_prob_results.append(cp_batch)
+            times.extend(batch_times)
+            progress.update(len(batch_times))
+            del batch_np
+
+            if slurm_timer:
+                # Stop once the elapsed time reaches the threshold.
+                elapsed = time.time() - start_time
+                if elapsed >= slurm_timer:
+                    progress.close()
+                    print(
+                        "Time threshold reached! Exiting loop and exporting the "
+                        "collected cloud maps..."
+                    )
+                    stop = True
+                    break
+        if not stop:
+            progress.close()
+
+        # Assemble the cloud probability DataArray.
+        cp_stack = np.concatenate(cloud_prob_results, axis=0)  # (time, y, x)
+        cp_da = xr.DataArray(
+            cp_stack,
+            dims=["time", "y", "x"],
+            coords={"time": times, "y": stac.y, "x": stac.x},
+        )
+        cp_da = cp_da.expand_dims(dim={"band": ["cloud_prob"]})
+        cp_da.name = "Cloud_Stack"
+
+        # Probability layer as uint8 0-100, shaped (time, band, y, x).
+        cloud_prob_uint8 = (cp_da.sel(band="cloud_prob") * 100).astype(np.uint8)
+        s2c_stack = cloud_prob_uint8.expand_dims(band=["cloud_prob"]).transpose(
+            "time", "band", "y", "x"
+        )
+        s2c_stack.name = "Cloud_Stack"
+
+    # --- SCL fill for the dates that have NO L1C scene (missing_l1c='scl') -----
+    scl_stack = None
+    if (
+        reference_times is not None
+        and missing_l1c == "scl"
+        and len(_missing_l1c_times) > 0
+    ):
+        scl_stack, _scl_geom = _scl_fill_cloud_prob(
+            _missing_l1c_times, _src_params, grid_ref=s2c_stack
+        )
+        if not _has_l1c:
+            # All-SCL cube: no L1C stack gave us the grid, so take it here.
+            crs, transform, bbox = _scl_geom
+
+    # --- Combine the s2cloudless and SCL-fill parts ---------------------------
+    # A per-date 'mask_method' coord ("s2cloudless"/"scl") is attached ONLY when
+    # the cube is genuinely hybrid, so pure e84 (all-L1C) cubes stay byte-for-
+    # byte as before. The coord drives the SCL-exact bypass in
+    # mask_from_probability and is the cube's masking provenance.
+    _hybrid = scl_stack is not None
+    if _hybrid:
+        parts, methods = [], []
+        if s2c_stack is not None:
+            parts.append(s2c_stack)
+            methods.append(np.full(s2c_stack.sizes["time"], "s2cloudless", dtype="<U11"))
+        parts.append(scl_stack)
+        methods.append(np.full(scl_stack.sizes["time"], "scl", dtype="<U11"))
+        cloud_only_stack = (
+            xr.concat(parts, dim="time") if len(parts) > 1 else parts[0]
+        )
+        cloud_only_stack = cloud_only_stack.assign_coords(
+            mask_method=("time", np.concatenate(methods))
+        )
+        cloud_only_stack = cloud_only_stack.sortby("time")
+        cloud_only_stack.name = "Cloud_Stack"
+    else:
+        cloud_only_stack = s2c_stack
+
+    if cloud_only_stack is None:
+        # Only reachable with missing_l1c='drop' when EVERY cube date lacked an
+        # L1C scene (nothing left to build a cloud stack from).
+        raise ValueError(
+            "No cloud stack could be built: none of the cube's dates has an "
+            "L1C scene and missing_l1c='drop' discarded them all. Use "
+            "missing_l1c='scl' to fill them with the SCL cloud mask instead."
+        )
 
     # If update: merge new probability dates into existing stack
     if update:
         cloud_only_stack = update_prob_maps(stac_existing, cloud_only_stack)
 
-    # If threshold(s) are provided (NON-update only): compute masks and concat
+    # If threshold(s) are provided (NON-update only): compute masks and concat.
+    # mask_from_probability sees the mask_method coord (carried on cloud_prob's
+    # time axis) and keeps SCL-filled dates pixel-exact (no cv2 smoothing).
     if threshold is not None:
         mask_da = mask_from_probability(
             cloud_only_stack.sel(band="cloud_prob"),
@@ -463,17 +597,26 @@ def get_cloud_layers(
             average_over=average_over,
             dilation_size=dilation_size,
         )
+        # Preserve the per-date provenance coord across the band concat (xr can
+        # drop a non-dim coord that isn't present on both operands).
+        _mm = cloud_only_stack.coords.get("mask_method")
         cloud_only_stack = xr.concat([cloud_only_stack, mask_da], dim="band").transpose("time", "band", "y", "x")
+        if _mm is not None and "mask_method" not in cloud_only_stack.coords:
+            cloud_only_stack = cloud_only_stack.assign_coords(mask_method=_mm)
 
     # ---- attrs: set ALWAYS (update or not) ----
     cloud_only_stack.attrs["bbox"] = bbox
     cloud_only_stack.attrs["crs"] = crs
     cloud_only_stack.attrs["transform"] = transform
+    # Flag a genuinely hybrid cloud cube so downstream tools (and, until it is
+    # wired, update mode) can recognise the mixed s2cloudless/SCL provenance.
+    if _hybrid:
+        cloud_only_stack.attrs["cloud_fill_method"] = "hybrid_s2cloudless_scl"
 
     # ---- export: do NOT hide behind `if not update` ----
     if output_clouds is not None:
         export_stac(cloud_only_stack, output_clouds, crs, transform, compress=compress)
-    
+
 
     # ---- Masking (kept as before; typically not combined with update) ----
     if masking is not None:
@@ -493,9 +636,13 @@ def get_cloud_layers(
             name, ext = os.path.splitext(filename)
             output_masked = os.path.join(dirname, f"{name}_masked_{thr}{ext}")
 
+        # Stamp the hybrid provenance onto the masked cube too, so a later
+        # update can refuse it (v1 does not reproduce mixed masking).
+        _extra = {"cloud_fill_method": "hybrid_s2cloudless_scl"} if _hybrid else None
         return mask_stac_clouds(
             masking, cloud_only_stack, mask_layer, output_masked, compress=compress,
             cloud_status=mask_layer,  # e.g. "cloud_mask_50" - self-encodes threshold
+            extra_attrs=_extra,
         )
 
     # Always return in-memory stack
@@ -503,7 +650,7 @@ def get_cloud_layers(
 
 
 def mask_stac_clouds(stac, cloud, mask_layer, output=None, compress=False,
-                     cloud_status=None, shadow_attrs=None):
+                     cloud_status=None, shadow_attrs=None, extra_attrs=None):
     # Track datasets we open here so we can close them before returning.
     # Leaving these handles open makes each repeated call stack another open
     # handle onto the same netCDF/HDF5 files, which on Windows can crash the
@@ -530,6 +677,15 @@ def mask_stac_clouds(stac, cloud, mask_layer, output=None, compress=False,
         cloud_mask = cloud.sel(band=mask_layer)
         masked_stac = stac.where(cloud_mask == 0)
 
+        # Carry the per-date masking provenance ("s2cloudless"/"scl") onto the
+        # masked cube when the cloud cube is hybrid, so the mixed method travels
+        # with the data (a hybrid time series mixes two cloud algorithms - any
+        # per-date statistic across the boundary carries a method artefact).
+        if "mask_method" in cloud.coords and "mask_method" not in masked_stac.coords:
+            _mm = cloud.coords["mask_method"]
+            if _mm.dims == ("time",):
+                masked_stac = masked_stac.assign_coords(mask_method=_mm)
+
         # Cloud percentage per time slice, measured against the observable AOI
         # footprint. Pass the mask boolean explicitly: without it the metric
         # cannot tell a genuine swath/no-data gap from a cloud (both are NaN in
@@ -549,6 +705,9 @@ def mask_stac_clouds(stac, cloud, mask_layer, output=None, compress=False,
             masked_stac.attrs["cloud_status"] = cloud_status
         if shadow_attrs:
             for _k, _v in shadow_attrs.items():
+                masked_stac.attrs[_k] = _v
+        if extra_attrs:
+            for _k, _v in extra_attrs.items():
                 masked_stac.attrs[_k] = _v
 
         if output is not None:
@@ -601,6 +760,19 @@ def mask_from_probability(
     # internally), so no per-time Python loop / concat is needed.
     prob_np = prob_da.transpose("time", "y", "x").to_numpy()
 
+    # SCL-filled dates (hybrid cubes) carry cloud_prob as a hard 0/100 binary,
+    # NOT a continuous s2cloudless probability. The cv2 smoothing (average_over
+    # + dilation) that get_mask_from_prob applies is calibrated for the
+    # continuous field and would blur/grow a hard SCL mask, so those timesteps
+    # are taken straight through as (prob == 100). Every threshold reproduces
+    # the SCL decision identically, so the threshold value is irrelevant there.
+    scl_time = None
+    if "mask_method" in prob_da.coords:
+        _mm = np.asarray(prob_da.coords["mask_method"].values).astype(str)
+        scl_time = _mm == "scl"
+        if not scl_time.any():
+            scl_time = None
+
     for t_val in thresholds:
         # Scale the threshold from 0-100 to 0-1.
         scaled_threshold = t_val / 100.0
@@ -610,6 +782,10 @@ def mask_from_probability(
             dilation_size=dilation_size,
         )
         cm = cloud_detector.get_mask_from_prob(prob_np, threshold=scaled_threshold)
+        if scl_time is not None:
+            # Overwrite SCL timesteps with the exact binary (no smoothing).
+            cm = np.asarray(cm)
+            cm[scl_time] = (prob_np[scl_time] >= 1.0).astype(cm.dtype)
         threshold_mask_da = xr.DataArray(
             cm,
             dims=["time", "y", "x"],
@@ -662,6 +838,7 @@ _SCL_MASK_STATUSES = {"clouds_detected", "scl_masked", "scl_shadow_masked"}
 def _build_scl_mask_in_memory(
     mission, polygon, resolution, daterange, cloud_status,
     stac_api, resampling, nir_dark_threshold=None, shadow_proj_distance=None,
+    crs=None,
 ):
     """Re-query STAC and return the SCL binary mask (Cloud_Stack DataArray)
     over ``daterange``. keep_clouds=True: only the mask is wanted, never a
@@ -670,13 +847,17 @@ def _build_scl_mask_in_memory(
     The mask values come from the SCL band, not from the requested spectral
     bands (verified pixel-identical), so only a single band is fetched:
     'nir', which shadow projection also needs. This keeps builds/updates
-    light regardless of what the source cube contained."""
+    light regardless of what the source cube contained.
+
+    ``crs`` pins the target projection (used by the hybrid SCL fill so the mask
+    lands on the same grid as the cube being s2cloudless-masked). None keeps the
+    historical behaviour of letting the query derive the CRS itself."""
     shadow = (cloud_status == "scl_shadow_masked")
     kw = dict(
         mission=mission, polygon=polygon, resolution=resolution,
         daterange=daterange, bands=["nir"], indices=None, max_cc=100,
         cloud_masking=True, keep_clouds=True, shadow_masking=shadow,
-        source=stac_api, resampling_method=resampling,
+        source=stac_api, resampling_method=resampling, crs=crs,
         return_cloud_mask=True, output=None, q=True,
     )
     if shadow:
@@ -694,6 +875,102 @@ def _build_scl_mask_in_memory(
             "No cloud mask was produced (cloud detection returned nothing)."
         )
     return mask
+
+
+def _scl_fill_cloud_prob(missing_times, src_params, grid_ref=None):
+    """SCL cloud mask for cube dates that have NO L1C scene, encoded as a 0/100
+    ``cloud_prob`` Cloud_Stack (time, band=['cloud_prob'], y, x).
+
+    Re-queries the cube's OWN source (Planetary Computer / terrabyte / ...) for
+    SCL over the span of the missing dates, keeps the missing days, relabels
+    them to the cube's exact timestamps, and encodes 1=cloud -> 100, 0=clear
+    -> 0 so every downstream threshold reproduces the SCL decision exactly.
+
+    Returns ``(scl_stack, (crs, transform, bbox))``. ``grid_ref`` (the
+    s2cloudless part, when there is one) pins the spatial grid so the two parts
+    align exactly for the time concat; identical geobox params make the reindex
+    a pure relabel. When None the SCL grid is used as-is (all-SCL cube)."""
+    from collections import defaultdict
+
+    missing_times = np.asarray(missing_times).astype("datetime64[ns]")
+    lo = np.datetime_as_string(missing_times.min(), unit="D")
+    hi = np.datetime_as_string(missing_times.max(), unit="D")
+
+    mask = _build_scl_mask_in_memory(
+        mission=src_params.get("mission", "sentinel_2_l2a"),
+        polygon=src_params["polygon"],
+        resolution=src_params.get("resolution"),
+        daterange=[lo, hi],
+        cloud_status="scl_masked",
+        stac_api=src_params.get("stac_api"),
+        resampling=src_params.get("resampling"),
+        crs=src_params.get("crs"),
+    )
+
+    # Match SCL scenes to the missing cube timestamps at day precision and
+    # relabel to those exact timestamps, so the fill lines up with the cube in
+    # mask_stac_clouds' label-join.
+    scl_days = np.asarray(mask.time.values).astype("datetime64[D]")
+    day_to_idx = defaultdict(list)
+    for i, d in enumerate(scl_days):
+        day_to_idx[d].append(i)
+
+    used = defaultdict(int)
+    order, filled_times, unfilled = [], [], []
+    for t in missing_times:
+        d = t.astype("datetime64[D]")
+        k = used[d]
+        if d in day_to_idx and k < len(day_to_idx[d]):
+            order.append(day_to_idx[d][k])
+            used[d] += 1
+            filled_times.append(t)
+        else:
+            unfilled.append(t)
+
+    if unfilled:
+        _us = ", ".join(
+            np.datetime_as_string(np.sort(np.asarray(unfilled)), unit="D")
+        )
+        warnings.warn(
+            f"{len(unfilled)} cube date(s) have neither an L1C scene nor an SCL "
+            f"scene in the cube's own source and stay UNMASKED: {_us}"
+        )
+    if not order:
+        raise ValueError(
+            "SCL fill produced no scenes for the missing L1C dates - the cube's "
+            "source returned nothing over their date span."
+        )
+
+    mask = mask.isel(time=order).assign_coords(
+        time=np.asarray(filled_times, dtype="datetime64[ns]")
+    )
+
+    scl_bin = mask.sel(band="cloud_mask_scl")  # (time, y, x), 1=cloud/0=clear
+    scl_prob = scl_bin.astype("uint8") * np.uint8(100)
+    scl_stack = scl_prob.expand_dims(band=["cloud_prob"]).transpose(
+        "time", "band", "y", "x"
+    )
+    scl_stack.name = "Cloud_Stack"
+
+    if grid_ref is not None:
+        # Same crs/resolution/polygon -> identical odc geobox, so this reindex
+        # is an exact relabel guaranteeing y/x alignment for the concat. If the
+        # grids somehow differ, reindex fills the gaps with NaN (upcasting off
+        # uint8) - catch that and fail loudly rather than emit a corrupt mask.
+        scl_stack = scl_stack.reindex(
+            y=grid_ref["y"], x=grid_ref["x"], method="nearest"
+        )
+        if scl_stack.dtype != np.uint8 or bool(np.asarray(scl_stack.isnull().any())):
+            raise ValueError(
+                "SCL fill grid does not match the L1C grid (reindex introduced "
+                "gaps). The cube's stored CRS/resolution could not be reproduced "
+                "for the SCL source - please report this cube configuration."
+            )
+
+    crs = mask.attrs.get("crs")
+    transform = mask.attrs.get("transform")
+    bbox = list(np.asarray(src_params["polygon"]).ravel().tolist())
+    return scl_stack, (crs, transform, bbox)
 
 
 def _stamp_scl_mask_attrs(
