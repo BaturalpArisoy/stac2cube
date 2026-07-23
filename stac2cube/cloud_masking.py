@@ -10,7 +10,6 @@ from .export_cfg import export_stac, open_cube, normalize_stack_name
 from .clip import compute_cloud_percentage
 from rasterio.transform import Affine
 import rioxarray as rio
-import cv2
 import os
 import warnings
 from rasterio.errors import NotGeoreferencedWarning
