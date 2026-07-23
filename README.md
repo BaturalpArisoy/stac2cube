@@ -41,8 +41,8 @@ The result is a data cube that is cloud-masked with customizable thresholds, spa
 
 <div align="center">
   <h2>Before (Initial Data Cube)</h2>
-  <a href="https://github.com/user-attachments/assets/d6458ba1-6112-4127-899e-9fa06ce58772">
-    <img src="https://github.com/user-attachments/assets/d6458ba1-6112-4127-899e-9fa06ce58772" alt="Initial Data Cube">
+  <a href="interactive/animations/cube_before.gif">
+    <img src="interactive/animations/cube_before.gif" alt="Initial Data Cube">
   </a>
 </div>
 
@@ -50,8 +50,8 @@ The result is a data cube that is cloud-masked with customizable thresholds, spa
 
 <div align="center">
   <h2>After (Co-registered and Super Resolved Data Cube)</h2>
-  <a href="https://github.com/user-attachments/assets/529402c7-4ecc-4344-b63b-409aee94e3c9">
-    <img src="https://github.com/user-attachments/assets/529402c7-4ecc-4344-b63b-409aee94e3c9" alt="Co-registered and Super-resolved Data Cube">
+  <a href="interactive/animations/cube_after.gif">
+    <img src="interactive/animations/cube_after.gif" alt="Co-registered and Super-resolved Data Cube">
   </a>
 </div>
 
