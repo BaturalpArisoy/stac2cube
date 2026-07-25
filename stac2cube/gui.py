@@ -1598,6 +1598,31 @@ def datacube_builder(missions_func=missions):
         disabled=True,
     )
 
+    # Result-panel filter #2, directly below Max cloud %: keep only scenes that
+    # image at least this share of the area (the scene_coverage coord, 0..100%).
+    # Drops across-track / swath-edge and faulty partial acquisitions WITHOUT a
+    # rebuild - the same job the Advanced "Overlapping Tile Handling ->
+    # Across-track" dropdown does at build time, but reversible and composable
+    # with the cloud filter (a scene must pass BOTH).
+    #
+    # 0 = keep everything, so the filter is off by default. Enabled like the
+    # cloud box: only when the build actually carries usable coverage numbers -
+    # i.e. a READY (eager) scene_coverage coord, which is what cloud detection
+    # produces from the SCL "imaged" boolean. With cloud detection off the coord
+    # is left lazy on purpose (reading it would download a band), and the whole
+    # Result panel stays read-free, so the box is greyed out rather than
+    # triggering a hidden read.
+    result_coverage_min_w = widgets.BoundedIntText(
+        value=0,
+        min=0,
+        max=100,
+        step=1,
+        description="Min coverage %:",
+        layout=widgets.Layout(width="167px"),
+        style={"description_width": "102px"},
+        disabled=True,
+    )
+
     # Result-panel date picker: tick/untick individual acquisition dates to keep
     # or drop them. Like the Max cloud % filter, this is a reversible VIEW on the
     # built cube - state["result"] is never mutated, and unticked dates stay in
@@ -1952,7 +1977,7 @@ def datacube_builder(missions_func=missions):
     # Visualization widgets (disabled until cube is generated)
     # -------------------------------------------------------------------------
     viz_dropdown_btn = widgets.Button(
-        description="Open interactive view (dropdown)",
+        description="Open Interactive View",
         button_style="info",
         icon="image",
         layout=widgets.Layout(width="260px"),
@@ -1986,6 +2011,21 @@ def datacube_builder(missions_func=missions):
         disabled=True,
     )
     viz_layer_note = widgets.HTML("")
+
+    # Viewing resolution. A frame is drawn at most a couple of thousand pixels
+    # wide, so on a large AOI the full-detail read fetches far more pixels than
+    # can ever be shown. Picking a coarser value re-reads the scenes from the
+    # archive's own reduced-resolution copies, which is a genuinely smaller
+    # download - decimating the built cube is not, because the pixels have to
+    # be fetched before they can be thrown away. Default None = as built, so
+    # nothing changes unless the user asks for it.
+    viz_resolution_w = widgets.FloatText(
+        value=float(resolution_w.value or 10),
+        description="View resolution (m):",
+        style={"description_width": "initial"},
+        layout=widgets.Layout(width="auto"),
+        disabled=True,
+    )
 
     gif_display_mode_w = widgets.Dropdown(
         options=[
@@ -2043,12 +2083,6 @@ def datacube_builder(missions_func=missions):
         layout=widgets.Layout(width="380px"),
         disabled=True,
     )
-    gif_stretch_hint = widgets.HTML(
-        "<div style='font-size:11px; color:#6b7280; margin-left:4px;'>"
-        "Per-frame percentile clip, so outlier min/max pixels do not blind the "
-        "scenes (default 2-98)."
-        "</div>"
-    )
 
     # Contextual rows: only the active section's controls are visible.
     gif_preset_box = widgets.VBox(
@@ -2064,7 +2098,7 @@ def datacube_builder(missions_func=missions):
         layout=widgets.Layout(width="100%", display="none"),
     )
     gif_stretch_box = widgets.VBox(
-        [gif_stretch_w, gif_stretch_hint],
+        [gif_stretch_w],
         layout=widgets.Layout(width="100%", gap="0px", display="none"),
     )
 
@@ -2128,6 +2162,9 @@ def datacube_builder(missions_func=missions):
         "last_auto_netcdf_suggestion": None,
         "last_auto_mask_binary_suggestion": None,
         "cloud_mask_result": None,   # in-memory binary mask held from the build
+        # Coarse re-read of the current build for fast browsing, kept so the
+        # same resolution is not fetched twice: {"res", "stamp", "cube"}.
+        "viz_preview": None,
         "last_auto_daterange_example": None,
         "last_auto_gif_suggestion": None,
         "last_json_syntax": None,
@@ -2139,6 +2176,11 @@ def datacube_builder(missions_func=missions):
     # (e.g. snapping back to 100 on a fresh build) don't trigger the filter
     # change handler and re-render mid-build.
     _cloud_filter_guard = {"busy": False}
+
+    # Same guard for the Result panel's Min coverage % box (reset to 0 on a
+    # fresh build), kept separate so one filter's reset never swallows the
+    # other's change event.
+    _cov_filter_guard = {"busy": False}
 
     # Same idea for the Result date picker: populating it (and its select-all)
     # on a fresh build sets result_date_w.value programmatically, which must not
@@ -2663,10 +2705,10 @@ def datacube_builder(missions_func=missions):
             pct_txt = f"{frac * 100:.1f}%" if frac < 0.01 else f"{round(frac * 100)}%"
             _verb = "images" if n_partial == 1 else "image"
 
-            _rebuild = (
-                "rebuild with <b>Advanced Parameters → Overlapping Tile "
-                "Handling → Across-track → Remove partially missing scenes</b>"
-            )
+            # The Result panel's own Min coverage % box does this without a
+            # rebuild, and it is enabled exactly when this warning can appear
+            # (both need the ready scene_coverage coord), so point there.
+            _filter_hint = "set <b>Min coverage %</b> below"
             # Which cause? An AOI straddling two swaths is partial on roughly
             # every other orbit (systematic, tens of percent), whereas a faulty /
             # incomplete acquisition is a handful of scenes. The 20% cut sits
@@ -2679,7 +2721,7 @@ def datacube_builder(missions_func=missions):
                     "potentially covered by "
                     f"multiple swaths: <b>{n_partial}</b> of {n_total} scenes "
                     f"({pct_txt}) {_verb} less than 90% of it. To drop these "
-                    f"partially-missing scenes, {_rebuild}.</div>"
+                    f"partially-missing scenes, {_filter_hint}.</div>"
                 )
 
             # Sporadic: name the offending dates (when few) so they can simply be
@@ -2705,7 +2747,7 @@ def datacube_builder(missions_func=missions):
                 # when there are too many dates to list.
                 "than 90% of this area."
                 f"{dates_txt} You can untick "
-                f"{_them} in <b>Dates</b> below before exporting, or {_rebuild}."
+                f"{_them} in <b>Dates</b> below before exporting, or {_filter_hint}."
                 "</div>"
             )
         except Exception:
@@ -3313,34 +3355,114 @@ def datacube_builder(missions_func=missions):
             return obj
         return obj.isel(time=np.flatnonzero(keep))
 
-    def _dates_passing_cloud():
-        """The ISO timestamps that pass the current Max cloud % box, or None
-        when the filter is inactive or the cube carries no cloud %. NaN counts
-        as failing, matching _apply_cloud_threshold's `cp <= thr`."""
-        thr = int(result_cloud_max_w.value)
-        if thr >= 100:
+    def _result_scene_cov(da):
+        """The READY (already computed) scene_coverage coord of a cube, or None.
+
+        A still-lazy coord is treated as absent: materializing it means reading a
+        band, and no Result-panel control is allowed to trigger that (same rule
+        the Dates table, the date picker and the swath warning follow)."""
+        if not isinstance(da, (xr.DataArray, xr.Dataset)):
+            return None
+        sc = getattr(da, "coords", {}).get("scene_coverage")
+        if sc is None:
+            return None
+        if getattr(getattr(sc, "data", None), "chunks", None) is not None:
+            return None
+        return sc
+
+    def _result_has_scene_cov(obj):
+        """True when obj (cube or list of cubes) carries a ready scene_coverage
+        coord, i.e. it can be filtered by how much of the area each scene
+        images."""
+        if obj is None:
+            return False
+        if isinstance(obj, list):
+            return any(_result_has_scene_cov(c) for c in obj)
+        return _result_scene_cov(obj) is not None
+
+    def _apply_coverage_threshold(obj, thr=None):
+        """Return a view of obj keeping only timesteps whose scene_coverage is
+        >= thr percent. Pure coord selection on the existing scene_coverage
+        coord - no recompute, fully reversible by lowering thr.
+
+        thr defaults to the Result panel's Min coverage % box. thr <= 0 (or a
+        cube with no ready scene_coverage / no time dim) passes through
+        unchanged, so the filter is a no-op until the user asks for it. NaN
+        coverage counts as failing, mirroring the cloud filter's `cp <= thr`."""
+        if obj is None:
+            return None
+        if thr is None:
+            thr = int(result_coverage_min_w.value)
+        if thr <= 0:
+            return obj
+        if isinstance(obj, list):
+            return [
+                _apply_coverage_threshold(c, thr)
+                if isinstance(c, (xr.DataArray, xr.Dataset))
+                else c
+                for c in obj
+            ]
+        sc = _result_scene_cov(obj)
+        if sc is None or "time" not in getattr(obj, "dims", {}):
+            return obj
+        try:
+            cov = np.asarray(sc.values, dtype=float)
+        except Exception:
+            return obj
+        # The coord is a fraction (0..1); the box is a percentage.
+        keep = ~np.isnan(cov) & (cov * 100.0 >= float(thr))
+        if keep.all():
+            return obj
+        return obj.isel(time=np.flatnonzero(keep))
+
+    def _dates_passing_filters():
+        """The ISO timestamps that pass the current Max cloud % AND Min
+        coverage % boxes, or None when neither filters (or the cube carries
+        neither coord). A NaN percentage counts as failing, matching
+        _apply_cloud_threshold and _apply_coverage_threshold."""
+        thr_cloud = int(result_cloud_max_w.value)
+        thr_cov = int(result_coverage_min_w.value)
+        if thr_cloud >= 100 and thr_cov <= 0:
             return None
         obj = state["result"]
         if obj is None or isinstance(obj, list):
             return None
-        cp = _result_cloud_pct(obj)
-        if cp is None or "time" not in getattr(obj, "dims", {}):
+        if "time" not in getattr(obj, "dims", {}):
             return None
         try:
-            pct = np.asarray(cp.values, dtype=float)
             tvals = np.asarray(obj["time"].values)
         except Exception:
             return None
-        if pct.shape[0] != tvals.shape[0]:
+
+        def _vals(coord, scale):
+            if coord is None:
+                return None
+            try:
+                v = np.asarray(coord.values, dtype=float) * scale
+            except Exception:
+                return None
+            return v if v.shape[0] == tvals.shape[0] else None
+
+        pct = _vals(_result_cloud_pct(obj), 1.0) if thr_cloud < 100 else None
+        cov = _vals(_result_scene_cov(obj), 100.0) if thr_cov > 0 else None
+        if pct is None and cov is None:
             return None
-        return {
-            str(t)
-            for t, p in zip(tvals, pct)
-            if not np.isnan(p) and p <= thr
-        }
+
+        passing = set()
+        for i, t in enumerate(tvals):
+            if pct is not None and not (
+                not np.isnan(pct[i]) and pct[i] <= thr_cloud
+            ):
+                continue
+            if cov is not None and not (
+                not np.isnan(cov[i]) and cov[i] >= thr_cov
+            ):
+                continue
+            passing.add(str(t))
+        return passing
 
     def _sync_date_picker_to_cloud():
-        """Untick the dates the Max cloud % filter removed, so the picker shows
+        """Untick the dates the Result scene filters removed, so the picker shows
         what actually survives instead of leaving dropped dates highlighted.
 
         The user's own ticks are remembered separately in
@@ -3354,7 +3476,7 @@ def datacube_builder(missions_func=missions):
         chosen = state.get("date_user_selection")
         if chosen is None:
             chosen = set(all_vals)
-        passing = _dates_passing_cloud()
+        passing = _dates_passing_filters()
         new_val = tuple(
             v
             for v in all_vals
@@ -3379,9 +3501,17 @@ def datacube_builder(missions_func=missions):
         has_pct = _result_has_cloud_pct(state["result"])
         result_cloud_max_w.disabled = not (masking_on and has_pct)
 
+    def _sync_coverage_filter_enabled(change=None):
+        """The Min coverage % filter needs per-scene coverage numbers that are
+        already computed. Grey it out otherwise (before any build, for a cube
+        whose scene_coverage is still lazy because cloud detection was off, or
+        for missions that carry no coverage at all)."""
+        result_coverage_min_w.disabled = not _result_has_scene_cov(state["result"])
+
     # -------------------------------------------------------------------------
-    # Result-panel date picker (second reversible view; composes with the cloud
-    # filter). Both are pure time-axis selections on the built cube; the panel,
+    # Result-panel date picker (third reversible view; composes with the cloud
+    # and coverage filters). All are pure time-axis selections on the built cube;
+    # the panel,
     # visualization and export all read the combined view via _effective_result,
     # so nothing is stored twice and state["result"] is never mutated.
     # -------------------------------------------------------------------------
@@ -3504,15 +3634,22 @@ def datacube_builder(missions_func=missions):
 
     def _effective_result(obj, composite=True):
         """The cube as the Result panel / export should see it: the built cube
-        with both reversible views applied - the Max cloud % threshold and the
-        date picker - and (when composite=True) the Temporal Composites computed
-        over the surviving dates. state["result"] itself is never mutated.
+        with all three reversible views applied - the Max cloud % threshold, the
+        Min coverage % threshold and the date picker - and (when composite=True)
+        the Temporal Composites computed over the surviving dates.
+        state["result"] itself is never mutated.
+
+        The two scene filters are AND-ed (a date must be clear enough AND
+        complete enough), which is also the order get_stac_layers applies them
+        in, so a copied config reproduces this view.
 
         composite=False returns the filtered time series without composites;
         visualization uses it for the time slider and the GIF, which need the
         per-date axis. The viewer picks a composite layer through its own Layer
         dropdown instead."""
-        filtered = _apply_date_selection(_apply_cloud_threshold(obj))
+        filtered = _apply_date_selection(
+            _apply_coverage_threshold(_apply_cloud_threshold(obj))
+        )
         if composite:
             return _apply_composites(filtered)
         return filtered
@@ -3610,23 +3747,22 @@ def datacube_builder(missions_func=missions):
         result_date_clear_btn.disabled = False
         result_date_row.layout.display = ""
 
-    def _on_result_cloud_max_change(change=None):
-        """Re-render the Result panel for the new Max cloud %. Visualization and
-        export read the same view (via _effective_result), so the three stay in
-        sync without storing a second copy of the cube."""
-        if _cloud_filter_guard["busy"]:
-            return
-        if state["result"] is None:
-            return
+    def _rerender_for_scene_filter(empty_msg):
+        """Shared re-render for the two Result scene filters (Max cloud % and
+        Min coverage %). Both are threshold views on the same time axis, so they
+        need exactly the same follow-up: sync the date picker, then re-render the
+        panel, the viewer and the GIF suggestion from the combined view.
+
+        ``empty_msg`` is the HTML shown when THIS filter's threshold leaves no
+        scene at all - a build that succeeded must not be reported as 'no data'.
+        """
         # Reflect the new threshold in the date picker first (guarded, so it
         # re-renders only once, below).
         _sync_date_picker_to_cloud()
         # Emptiness is checked on the filtered TIME SERIES (composite=False): a
         # composite of zero dates would drop the time axis and read as a valid
-        # (all-NaN) scene, hiding the "raise the threshold" hint.
+        # (all-NaN) scene, hiding the "change the threshold" hint.
         filtered = _effective_result(state["result"], composite=False)
-        # Threshold excludes every scene: the build succeeded, so don't show the
-        # generic 'no data' failure - tell the user to raise the value instead.
         if _result_is_empty(filtered) and not _result_is_empty(state["result"]):
             _set_result_viz_note(False)
             _set_result_notes([])
@@ -3636,14 +3772,39 @@ def datacube_builder(missions_func=missions):
                 display(HTML(
                     "<div style='font-size:13px; color:#92400e; background:#fffbeb; "
                     "border:1px solid #fde68a; border-radius:6px; padding:10px 12px;'>"
-                    f"No scenes at or below <b>{int(result_cloud_max_w.value)}%</b> "
-                    "cloud cover. Raise <b>Max cloud %</b> to bring dates back."
-                    "</div>"
+                    f"{empty_msg}</div>"
                 ))
             return
         _show_result_summary(_apply_composites(filtered))
         _refresh_viz_layers()
         _update_gif_output_suggestion()
+
+    def _on_result_cloud_max_change(change=None):
+        """Re-render the Result panel for the new Max cloud %. Visualization and
+        export read the same view (via _effective_result), so the three stay in
+        sync without storing a second copy of the cube."""
+        if _cloud_filter_guard["busy"]:
+            return
+        if state["result"] is None:
+            return
+        _rerender_for_scene_filter(
+            f"No scenes at or below <b>{int(result_cloud_max_w.value)}%</b> "
+            "cloud cover. Raise <b>Max cloud %</b> to bring dates back."
+        )
+
+    def _on_result_coverage_min_change(change=None):
+        """Re-render the Result panel for the new Min coverage %. Same mechanics
+        as the cloud filter - a reversible time selection on the built cube -
+        and the two compose: a date is kept only if it passes both."""
+        if _cov_filter_guard["busy"]:
+            return
+        if state["result"] is None:
+            return
+        _rerender_for_scene_filter(
+            "No scenes image at least "
+            f"<b>{int(result_coverage_min_w.value)}%</b> of the area. Lower "
+            "<b>Min coverage %</b> to bring dates back."
+        )
 
     def _on_result_date_change(change=None):
         """Re-render the Result panel when the ticked dates change. Viz + export
@@ -3654,11 +3815,11 @@ def datacube_builder(missions_func=missions):
             return
         if state["result"] is None:
             return
-        # Record the user's own choice. Dates the cloud filter is currently
-        # hiding are kept in the remembered set: the user cannot see them to
-        # untick, so unticking a visible one must not silently discard them -
-        # raising the threshold still brings them back.
-        _passing = _dates_passing_cloud()
+        # Record the user's own choice. Dates the cloud / coverage filters are
+        # currently hiding are kept in the remembered set: the user cannot see
+        # them to untick, so unticking a visible one must not silently discard
+        # them - relaxing a threshold still brings them back.
+        _passing = _dates_passing_filters()
         _prev = state.get("date_user_selection")
         _hidden = (
             set()
@@ -3678,7 +3839,8 @@ def datacube_builder(missions_func=missions):
                 display(HTML(
                     "<div style='font-size:13px; color:#92400e; background:#fffbeb; "
                     "border:1px solid #fde68a; border-radius:6px; padding:10px 12px;'>"
-                    "No dates selected (or the cloud filter removed the rest). "
+                    "No dates selected (or the cloud / coverage filters removed "
+                    "the rest). "
                     "Tick at least one date - or press <b>All dates</b> - to bring "
                     "the cube back."
                     "</div>"
@@ -3689,9 +3851,9 @@ def datacube_builder(missions_func=missions):
         _update_gif_output_suggestion()
 
     def _on_result_dates_all(_):
-        # "All dates" restores the user's full choice; the cloud filter is then
-        # re-applied on top, so cloudy dates stay unticked (and come back by
-        # raising Max cloud %).
+        # "All dates" restores the user's full choice; the cloud and coverage
+        # filters are then re-applied on top, so filtered-out dates stay
+        # unticked (and come back by relaxing the threshold).
         state["date_user_selection"] = set(_result_date_all_values())
         _sync_date_picker_to_cloud()
         _on_result_date_change()
@@ -3701,10 +3863,120 @@ def datacube_builder(missions_func=missions):
         result_date_w.value = ()
 
     result_cloud_max_w.observe(_on_result_cloud_max_change, names="value")
+    result_coverage_min_w.observe(_on_result_coverage_min_change, names="value")
     cloud_masking_w.observe(_sync_cloud_filter_enabled, names="value")
     result_date_w.observe(_on_result_date_change, names="value")
     result_date_all_btn.on_click(_on_result_dates_all)
     result_date_clear_btn.on_click(_on_result_dates_clear)
+
+    # Coarser viewing resolutions, as multiples of the build resolution. Kept to
+    # round factors so the label reads as a plain metre value (10 m -> 20/30/60/
+    def _build_resolution():
+        """Metres per pixel the current result was built at, or None."""
+        params = state.get("last_call_params") or {}
+        base = params.get("resolution")
+        return float(base) if base else None
+
+    def _refresh_viz_resolution():
+        """Reset the viewing resolution to the build resolution.
+
+        Free-form: any value is allowed, the build resolution is only the
+        starting point. Enabled only when the params that produced the cube are
+        still known - a coarser view is a re-query with those same params, so
+        without them there is nothing to re-query."""
+        base = _build_resolution()
+        if base is None or state["result"] is None:
+            viz_resolution_w.disabled = True
+            return
+        viz_resolution_w.value = base
+        viz_resolution_w.disabled = False
+
+    def _preview_cube_at(res):
+        """The cube re-read at ``res`` metres, reusing the build's own settings.
+
+        Cached per (resolution, build), so re-opening the viewer at a resolution
+        already fetched costs nothing. Every output path is stripped: a preview
+        must never write a file or replace the held cloud mask.
+        """
+        # The feature index is part of the key: a multi-feature build keeps one
+        # state["result"], so without it switching feature would keep serving
+        # the previous feature's preview.
+        feat = viz_feature_w.value if isinstance(viz_feature_w.value, int) else 0
+        cache = state.get("viz_preview") or {}
+        stamp = (id(state["result"]), feat)
+        if cache.get("res") == res and cache.get("stamp") == stamp:
+            return cache["cube"]
+
+        params = dict(state["last_call_params"])
+        params.update(
+            resolution=res,
+            output=None,            # never write from a preview
+            return_cloud_mask=False,  # the held mask stays the built one
+            q=True,
+        )
+        built = get_stac_layers(**params)
+        if isinstance(built, tuple):   # defensive: return_cloud_mask is off
+            built = built[0]
+
+        # Multi-feature builds come back as a list; take the feature the viz
+        # tools are pointed at, so the preview shows the same polygon.
+        if isinstance(built, list):
+            cubes = [c for c in built if isinstance(c, (xr.DataArray, xr.Dataset))]
+            if not cubes:
+                raise ValueError("The preview build produced no cube.")
+            built = built[feat] if (0 <= feat < len(built) and isinstance(
+                built[feat], (xr.DataArray, xr.Dataset))) else cubes[0]
+
+        state["viz_preview"] = {"res": res, "stamp": stamp, "cube": built}
+        return built
+
+    def _viz_cube_for_display():
+        """The DataArray the viewer should show, honouring the resolution pick.
+
+        At full detail this is exactly what it always was. At a coarser setting
+        the preview cube is restricted to the dates the Result panel currently
+        shows and then run through the same composite step, so the preview
+        matches the filtered result date-for-date. The dates are COPIED from
+        the full-resolution view rather than re-filtered: cloud percentages are
+        measured per pixel grid, so re-applying the threshold on a coarser grid
+        could quietly select a different set of scenes.
+        """
+        full = _active_result_cube()
+        base = _build_resolution()
+        try:
+            res = float(viz_resolution_w.value)
+        except (TypeError, ValueError):
+            res = None
+        # Blank, nonsensical, or simply the build resolution -> the cube in
+        # hand already IS that view, so re-reading it would only cost a second
+        # download of the same pixels.
+        if full is None or not res or res <= 0 or (base and res == base):
+            return _pick_dataarray_for_visualization(full)
+
+        preview = _preview_cube_at(res)
+
+        # Match the Result panel's surviving dates.
+        kept = _active_result_cube(composite=False)
+        times = None
+        if kept is not None:
+            _k = kept if isinstance(kept, xr.DataArray) else (
+                kept["Time_Series"] if "Time_Series" in getattr(kept, "data_vars", {})
+                else None
+            )
+            if _k is not None and "time" in _k.dims:
+                times = np.asarray(_k["time"].values)
+        if times is not None and "time" in getattr(preview, "dims", {}):
+            preview = preview.sel(time=times, method="nearest")
+            preview = preview.assign_coords(time=times)
+        elif times is not None and isinstance(preview, xr.Dataset):
+            if "Time_Series" in preview.data_vars:
+                _p = preview["Time_Series"].sel(time=times, method="nearest")
+                preview = preview.assign(
+                    Time_Series=_p.assign_coords(time=times)
+                )
+
+        preview = _apply_composites(preview)
+        return _pick_dataarray_for_visualization(preview)
 
     def _refresh_viz_feature_options():
         """Show + populate the feature picker only when the result is a list of
@@ -3730,6 +4002,8 @@ def datacube_builder(missions_func=missions):
 
     def _set_visualization_enabled(enabled: bool):
         viz_dropdown_btn.disabled = not enabled
+        if not enabled:
+            viz_resolution_w.disabled = True
         gif_section_w.disabled = not enabled
         gif_display_mode_w.disabled = not enabled
         gif_band_dd.disabled = not enabled
@@ -4282,6 +4556,23 @@ def datacube_builder(missions_func=missions):
         # get_stac_layers rejects that combination anyway. An emptied selection
         # is emitted as [] on purpose: it fails loudly there instead of
         # silently exporting every date.
+        # Coverage filter -> partial_scene_handling / min_scene_coverage. TWO
+        # widgets can ask for it: the Advanced "Overlapping Tile Handling ->
+        # Across-track" dropdown (drops partial scenes during the build) and the
+        # Result panel's "Min coverage %" (the same threshold, applied to the
+        # built cube without a rebuild). get_stac_layers has ONE coverage filter,
+        # so emit the STRICTER of the two - that reproduces exactly the scenes
+        # the Result panel is currently showing.
+        partial_handling_for_json = partial_scene_w.value
+        min_cov_for_json = float(min_coverage_w.value) / 100.0
+        _result_min_cov = float(result_coverage_min_w.value) / 100.0
+        if _result_min_cov > 0:
+            if partial_handling_for_json == "remove":
+                min_cov_for_json = max(min_cov_for_json, _result_min_cov)
+            else:
+                partial_handling_for_json = "remove"
+                min_cov_for_json = _result_min_cov
+
         dates_for_json = None
         _all_result_dates = _result_date_all_values()
         if _all_result_dates:
@@ -4345,10 +4636,12 @@ def datacube_builder(missions_func=missions):
                 "tile_handling": (
                     "mosaic" if aggregator else tile_handling_w.value
                 ),
-                # Across-track partial-scene removal (compatible with a
-                # composite: partials are dropped before the collapse).
-                "partial_scene_handling": partial_scene_w.value,
-                "min_scene_coverage": float(min_coverage_w.value) / 100.0,
+                # Coverage filter (compatible with a composite: partials are
+                # dropped before the collapse). Merged from the Advanced
+                # Across-track dropdown and the Result panel's Min coverage % -
+                # see partial_handling_for_json above.
+                "partial_scene_handling": partial_handling_for_json,
+                "min_scene_coverage": min_cov_for_json,
                 "aggregator": aggregator,
                 "stats": stats,
                 "keep_timeseries": keep_timeseries,
@@ -4716,6 +5009,17 @@ def datacube_builder(missions_func=missions):
         # 12) Result-panel cloud filter (greyed until a build produces cloud %).
         scc = params.get("scene_cloud_coverage")
         result_cloud_max_w.value = 100 if scc is None else int(scc)
+
+        # The coverage filter came back as partial_scene_handling /
+        # min_scene_coverage and was applied to the Advanced widgets above, so
+        # the rebuild drops the same scenes. Reset the Result panel's own box to
+        # 0 - leaving it set would filter the already-filtered cube a second
+        # time (same scenes, but a threshold shown in two places at once).
+        _cov_filter_guard["busy"] = True
+        try:
+            result_coverage_min_w.value = 0
+        finally:
+            _cov_filter_guard["busy"] = False
 
         # 13) Date selection cannot be restored: the picker is filled from a
         #     built cube's time axis, which does not exist before the build.
@@ -5257,11 +5561,32 @@ def datacube_builder(missions_func=missions):
                     print("ℹ️ Build a data cube first.")
                 return
 
-            da = _pick_dataarray_for_visualization(cube)
+            # Honour the viewing-resolution pick. A coarse preview is a fresh
+            # (smaller) read from the archive, so it can fail where the cached
+            # cube would not - fall back to full detail and say so rather than
+            # leaving the user with no view at all.
+            try:
+                da = _viz_cube_for_display()
+            except Exception as _e:
+                da = _pick_dataarray_for_visualization(cube)
+                with viz_out:
+                    clear_output()
+                    print(
+                        "Could not build the coarse preview "
+                        f"({type(_e).__name__}) - showing full detail instead."
+                    )
 
             with viz_out:
                 clear_output()
-                print("Note: Scenes are computed on demand, so changing the date or bands may take a moment depending on your machine.")
+                display(
+                    widgets.HTML(
+                        f"{_INFO_BOX}ℹ️ <b>PLEASE BE PATIENT</b> while the "
+                        "scenes are being loaded! This data cube is not "
+                        "computed and the loading speed depends on your local "
+                        "machine.<br>For exported cubes, use Data Cube Editor "
+                        "Visualization.</div>"
+                    )
+                )
                 out = interactive_time_view(
                     stac=da,
                     widget_type="dropdown",
@@ -5461,6 +5786,10 @@ def datacube_builder(missions_func=missions):
                 export_result_btn.disabled = False
                 _set_visualization_enabled(True)
                 _refresh_viz_feature_options()
+                # A preview belongs to the cube it was read for; a fresh build
+                # invalidates it (different dates/AOI/bands entirely).
+                state["viz_preview"] = None
+                _refresh_viz_resolution()
                 _refresh_gif_band_options()
                 _update_gif_output_suggestion()
 
@@ -5473,6 +5802,16 @@ def datacube_builder(missions_func=missions):
                 finally:
                     _cloud_filter_guard["busy"] = False
                 _sync_cloud_filter_enabled()
+
+                # Same for the Min coverage % filter: back to 0 (keep every
+                # scene), enabled only when this build carries ready per-scene
+                # coverage numbers.
+                _cov_filter_guard["busy"] = True
+                try:
+                    result_coverage_min_w.value = 0
+                finally:
+                    _cov_filter_guard["busy"] = False
+                _sync_coverage_filter_enabled()
 
                 # Fresh build: repopulate the date picker (all dates ticked) for a
                 # single-cube result; hidden/disabled for lists or time-less cubes.
@@ -5521,6 +5860,7 @@ def datacube_builder(missions_func=missions):
                 export_result_btn.disabled = True
                 _set_visualization_enabled(False)
                 result_cloud_max_w.disabled = True
+                result_coverage_min_w.disabled = True
                 _populate_result_dates(None)
             except Exception:
                 pass
@@ -7084,16 +7424,20 @@ def datacube_builder(missions_func=missions):
                 # The output area the viewer renders into lives INSIDE the
                 # group, so collapsing the header hides the opened map too.
                 [
+                    widgets.HTML(
+                        f"{_INFO_BOX}ℹ️ Click <b>Open Interactive View</b> "
+                        "everytime you change the layer.<br>"
+                        "For enormous areas, lower the <b>View resolution</b> "
+                        "for much faster experience that won't affect "
+                        "visualization that much in huge extends.</div>"
+                    ),
                     viz_layer_w,
                     viz_layer_note,
+                    viz_resolution_w,
                     viz_renderer_box,
                     viz_dropdown_btn,
                     viz_out,
                 ],
-                subtitle="Explore the cube scene by scene: presets (RGB, false "
-                "color, indices), any single band in grey levels, or a custom "
-                "R/G/B band combination. Pick the time series or any temporal "
-                "composite in Layer. The viewer opens below.",
                 collapsible=True,
                 open=True,
             ),
@@ -7162,6 +7506,15 @@ def datacube_builder(missions_func=missions):
         ),
     )
 
+    # Min coverage % sits directly under Max cloud %, same right alignment: the
+    # two scene filters read as one block, and a scene must pass both.
+    result_coverage_filter_row = widgets.HBox(
+        [result_coverage_min_w],
+        layout=widgets.Layout(
+            width="100%", justify_content="flex-end", padding="0 6px 2px 0"
+        ),
+    )
+
     # Per-date picker: the fine-grained companion to the Max cloud % filter. Its
     # accordion is hidden until a single-cube build populates it (see
     # _populate_result_dates); ticking dates re-renders the table, visualization
@@ -7205,8 +7558,8 @@ def datacube_builder(missions_func=missions):
     # everything informational, and only then the cube summary and its controls.
     result_box = widgets.VBox(
         [result_coreg_warn_row, result_notes_row,
-         result_out, result_cloud_filter_row, result_date_row,
-         result_viz_note_row],
+         result_out, result_cloud_filter_row, result_coverage_filter_row,
+         result_date_row, result_viz_note_row],
         layout=widgets.Layout(width="99%", gap="6px"),
     )
     result_acc = widgets.Accordion(children=[result_box], selected_index=None)
@@ -7365,6 +7718,7 @@ def datacube_builder(missions_func=missions):
             "viz_layer": viz_layer_w,
             # Result-panel scene filters the composites reduce over.
             "result_cloud_max": result_cloud_max_w,
+            "result_coverage_min": result_coverage_min_w,
             "result_dates": result_date_w,
             "scene_metadata": scene_metadata_w,
             "export_granule_metadata": export_granule_meta_w,
@@ -7383,6 +7737,7 @@ def datacube_builder(missions_func=missions):
             "paste_json_area": paste_json_area_w,
             "viz_dropdown_btn": viz_dropdown_btn,
             "viz_renderer": viz_renderer_w,
+            "viz_resolution": viz_resolution_w,
             "gif_section": gif_section_w,
             "gif_display_mode": gif_display_mode_w,
             "gif_band": gif_band_dd,
@@ -8947,12 +9302,6 @@ def datacube_editor():
         layout=widgets.Layout(width="380px"),
         disabled=True,
     )
-    gif_stretch_hint = widgets.HTML(
-        "<div style='font-size:11px; color:#6b7280; margin-left:4px;'>"
-        "Per-frame percentile clip, so outlier min/max pixels do not blind the "
-        "scenes (default 2-98)."
-        "</div>"
-    )
 
     # Contextual rows: only the active section's controls are visible.
     gif_preset_box = widgets.VBox(
@@ -8968,7 +9317,7 @@ def datacube_editor():
         layout=widgets.Layout(width="100%", display="none"),
     )
     gif_stretch_box = widgets.VBox(
-        [gif_stretch_w, gif_stretch_hint],
+        [gif_stretch_w],
         layout=widgets.Layout(width="100%", gap="0px", display="none"),
     )
 

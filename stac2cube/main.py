@@ -1175,8 +1175,17 @@ def get_stac_layers(
             # "imaged" boolean - reliable even when a swath gap loads as 0 rather
             # than NaN, and cloud-aware for free - so it becomes a ready (eager)
             # scene_coverage coord and the GUI warning needs no further read.
+            #
+            # imaged_bool is handed to the percentage as well, so it too is
+            # derived from the class band alone. Without it the percentage's
+            # no-data term came from stac.isnull(), which pulls EVERY spectral
+            # band (and forces the indices) through memory - the single reason a
+            # cloud-detecting build was not lazy, and the source of the memory
+            # spike that killed kernels on large AOIs. Percentages are unchanged
+            # (verified bit-identical); see compute_cloud_percentage.
             pct_lazy = compute_cloud_percentage(
-                stac, aoi_mask=_aoi_mask, cloud_mask=_pct_mask, lazy=True
+                stac, aoi_mask=_aoi_mask, cloud_mask=_pct_mask, lazy=True,
+                imaged_mask=imaged_bool,
             )
             cov_lazy = (
                 compute_scene_coverage_from_imaged(

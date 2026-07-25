@@ -91,7 +91,7 @@ def _apply_crop(stac_mode: xr.DataArray, crop):
 # ==========================================================
 def _missing_frame(
     arr: np.ndarray, nan_fraction_thresh=0.9, variance_thresh=1e-12,
-    min_finite=None
+    min_finite=None, finite_mask=None
 ) -> bool:
     """
     Robust missing test:
@@ -106,11 +106,17 @@ def _missing_frame(
     missing. Callers pass a fraction of the cube's own valid-pixel footprint
     here (see _FootprintTracker), which is the same footprint-relative logic
     compute_cloud_percentage already uses.
+
+    ``finite_mask`` lets a caller that has already computed ``np.isfinite(arr)``
+    hand it over instead of having it recomputed here (_FootprintTracker needs
+    the same mask to track the footprint, so it was being built twice per
+    redraw - ~19 ms of the frame budget on a large cube).
     """
     if arr.size == 0:
         return True
 
-    finite_mask = np.isfinite(arr)
+    if finite_mask is None:
+        finite_mask = np.isfinite(arr)
     n_finite = int(finite_mask.sum())
     if n_finite == 0:
         return True
@@ -158,13 +164,16 @@ class _FootprintTracker:
         if arr is None or arr.size == 0:
             return True
         key = arr.shape
-        n_finite = int(np.isfinite(arr).sum())
+        # Computed once and passed on: _missing_frame needs the very same mask.
+        finite_mask = np.isfinite(arr)
+        n_finite = int(finite_mask.sum())
         seen = max(self._max_finite.get(key, 0), n_finite)
         self._max_finite[key] = seen
         return _missing_frame(
             arr,
             variance_thresh=variance_thresh,
             min_finite=self._frac * seen,
+            finite_mask=finite_mask,
         )
 
 
@@ -173,7 +182,6 @@ class _FootprintTracker:
 # ==========================================================
 def _get_scaling_policy(data_stac: xr.DataArray, display_mode: str):
     dm = str(display_mode).lower().strip()
-    lazy = _is_lazy_xarray(data_stac)
 
     if dm in ["rgb", "false_color"]:
         return {
@@ -186,26 +194,70 @@ def _get_scaling_policy(data_stac: xr.DataArray, display_mode: str):
             "rgb_gamma": 1.0,
         }
 
-    # NDVI/NDWI
-    if lazy:
-        return {"vmin": -1.0, "vmax": 1.0}
-    else:
-        vals = data_stac.values
-        vmin = float(np.nanpercentile(vals, 2))
-        vmax = float(np.nanpercentile(vals, 98))
-        if vmin == vmax:
-            vmin -= 1e-6
-            vmax += 1e-6
-        return {"vmin": vmin, "vmax": vmax}
+    # NDVI/NDWI: the index range, used as the fallback only.
+    #
+    # These used to be percentiles of the WHOLE cube whenever it was not lazy,
+    # which read every scene of every band just to pick two numbers - the same
+    # trap the cloud percentage had. The viewer now derives vmin/vmax from the
+    # displayed frame and the stretch slider (see _render_current), so the
+    # cube-wide read bought nothing and is gone. What is left is the honest
+    # default for a normalized difference index, and it costs no I/O.
+    return {"vmin": -1.0, "vmax": 1.0}
 
 
 # ==========================================================
 # RGB NORMALIZATION (per-frame, robust)
 # ==========================================================
+# Pixels the percentile stretch is estimated from. The stretch only needs the
+# shape of the histogram, and a regular subsample of a scene reproduces it: at
+# this size the 2nd/98th percentiles of a full 8.5 MP frame and of its stride-4
+# subsample agree to ~2e-4 on a 0-1 scale, i.e. below one uint8 step. Every
+# DISPLAYED pixel is still stretched and drawn at full resolution - only the two
+# bounds are estimated from the sample.
+_STRETCH_SAMPLE_PX = 500_000
+
+
+def _stretch_bounds(band: np.ndarray, p_low: float, p_high: float):
+    """(lo, hi) percentile bounds of one band, estimated from a subsample.
+
+    Both percentiles come from a SINGLE np.nanpercentile call: each call sorts
+    the array, so asking for them separately sorted the same data twice.
+
+    Non-finite values are dropped from the sample rather than from the whole
+    band: sanitizing the full array allocated a copy per band (34 MB each on a
+    large frame) purely to feed the percentile. +/-inf pixels are excluded from
+    the displayed image anyway by the caller's `valid` mask, so keeping them in
+    the clip below changes nothing.
+    """
+    npix = band.size
+    if npix > _STRETCH_SAMPLE_PX:
+        step = int(np.ceil(np.sqrt(npix / _STRETCH_SAMPLE_PX)))
+        sample = band[::step, ::step]
+    else:
+        sample = band
+
+    sample = sample[np.isfinite(sample)]
+    if sample.size:
+        lo, hi = np.nanpercentile(sample, [p_low, p_high])
+        if np.isfinite(lo) and np.isfinite(hi) and hi > lo:
+            return float(lo), float(hi)
+
+    # Degenerate sample (all non-finite, or flat). A sparse AOI can land a
+    # subsample entirely outside the valid area, so fall back to the full band
+    # before giving up - correctness first, the slow path is the rare one.
+    full = band[np.isfinite(band)]
+    if full.size:
+        lo, hi = np.nanpercentile(full, [p_low, p_high])
+        if np.isfinite(lo) and np.isfinite(hi) and hi > lo:
+            return float(lo), float(hi)
+    return None
+
+
 def _normalize_rgb_frame(rgb_yxb: np.ndarray, p_low=2, p_high=98) -> np.ndarray:
     """
     Per-frame robust RGB normalization:
-    - percentile clip per band
+    - percentile clip per band (bounds estimated from a subsample, see
+      _stretch_bounds - the displayed pixels are all still stretched)
     - valid pixels only if all 3 bands finite
     - invalid pixels -> neutral gray (prevents random red/blue speckles)
     Returns float RGB in [0,1]
@@ -217,20 +269,21 @@ def _normalize_rgb_frame(rgb_yxb: np.ndarray, p_low=2, p_high=98) -> np.ndarray:
 
     for i in range(3):
         band = rgb[:, :, i]
-        band = np.where(np.isfinite(band), band, np.nan)
 
-        lo = float(np.nanpercentile(band, p_low))
-        hi = float(np.nanpercentile(band, p_high))
-
-        if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
+        bounds = _stretch_bounds(band, p_low, p_high)
+        if bounds is None:
             out[:, :, i] = 0.5
             continue
+        lo, hi = bounds
 
-        band = np.clip(band, lo, hi)
-        out[:, :, i] = (band - lo) / (hi - lo)
+        out[:, :, i] = (np.clip(band, lo, hi) - lo) / (hi - lo)
 
     out[~valid] = 0.5
-    return np.clip(out, 0, 1)
+    # In-place: the values are already inside [0, 1] by construction (a clipped
+    # band mapped through (v-lo)/(hi-lo), plus the 0.5 fill), so this only
+    # guards against float edge cases - no reason to allocate a second full
+    # frame (100 MB on a large cube) to do it.
+    return np.clip(out, 0, 1, out=out)
 
 
 def _rgb_to_uint8(
@@ -1063,14 +1116,6 @@ def interactive_time_view(
         style={"description_width": "initial"},
         layout=widgets.Layout(width="380px"),
     )
-    stretch_hint = widgets.HTML(
-        "<div style='font-size:11px; color:#6b7280; margin-left:4px;'>"
-        "Per-scene percentile clip: values below/above the low/high percentile "
-        "are saturated, so outlier min/max pixels do not blind the scene "
-        "(default 2-98)."
-        "</div>"
-    )
-
     if widget_type == "slider":
         time_w = widgets.IntSlider(
             min=0,
@@ -1107,18 +1152,16 @@ def interactive_time_view(
     custom_box = widgets.HBox(
         [r_dd, g_dd, b_dd], layout=widgets.Layout(gap="8px")
     )
-    stretch_box = widgets.VBox(
-        [stretch_w, stretch_hint], layout=widgets.Layout(gap="0px")
-    )
+    stretch_box = widgets.VBox([stretch_w], layout=widgets.Layout(gap="0px"))
 
     def _sync_section_visibility():
         sec = section_w.value
         preset_box.layout.display = "" if sec == "preset" else "none"
         band_box.layout.display = "" if sec == "band" else "none"
         custom_box.layout.display = "" if sec == "custom" else "none"
-        # Presets keep their fixed, auto-balanced scaling policy; the manual
-        # stretch applies to the single-band and custom-RGB sections.
-        stretch_box.layout.display = "" if sec in ("band", "custom") else "none"
+        # The stretch drives every section, presets included: a preset's
+        # contrast is as much a viewing choice as a single band's.
+        stretch_box.layout.display = ""
 
     # ------------------------------------------------------------------
     # Rendering
@@ -1224,8 +1267,21 @@ def interactive_time_view(
             mode = mode_dd.value
             st = _get_mode_state(mode)
             raw = _get_preset_raw(mode, idx, st)
+            # The slider overrides the preset's own defaults, so a preset
+            # stretches exactly like the single-band and custom-RGB sections.
+            # RGB presets take the percentiles directly; NDVI/NDWI are drawn
+            # through a colormap, so the percentiles are first turned into the
+            # vmin/vmax that colormap needs - measured on THIS frame, which is
+            # what makes the slider do the same thing in every section.
+            scaling = dict(st["scaling"])
+            if mode in ("rgb", "false_color"):
+                scaling.update(rgb_p_low=p_lo, rgb_p_high=p_hi)
+            else:
+                bounds = _stretch_bounds(np.asarray(raw), p_lo, p_hi)
+                if bounds is not None:
+                    scaling["vmin"], scaling["vmax"] = bounds
             img = _render_frame_as_uint8(
-                st["stac_mode"], mode, idx, st["scaling"], raw=raw,
+                st["stac_mode"], mode, idx, scaling, raw=raw,
                 is_missing=_footprint.is_missing,
             )
             suffix = {
@@ -1672,13 +1728,6 @@ def interactive_cloud_overlay_view(
         style={"description_width": "initial"},
         layout=widgets.Layout(width="380px"),
     )
-    stretch_hint = widgets.HTML(
-        "<div style='font-size:11px; color:#6b7280; margin-left:4px;'>"
-        "Per-scene percentile clip applied to both panels. On cloudy scenes, "
-        "lower the high percentile so the bright clouds saturate and the "
-        "ground keeps the brightness range (default 2-98)."
-        "</div>"
-    )
     # Map layout control. "Vertical" stacks the two panels so each map spans the
     # whole output cell (biggest option on a laptop screen); "Horizontal" keeps
     # them side-by-side.
@@ -1828,7 +1877,7 @@ def interactive_cloud_overlay_view(
     controls2 = widgets.HBox(
         [
             opacity_w,
-            widgets.VBox([stretch_w, stretch_hint], layout=widgets.Layout(gap="0px")),
+            widgets.VBox([stretch_w], layout=widgets.Layout(gap="0px")),
         ],
         layout=widgets.Layout(gap="32px", align_items="flex-start"),
     )

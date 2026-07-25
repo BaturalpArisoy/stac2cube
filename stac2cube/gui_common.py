@@ -780,28 +780,28 @@ def make_viz_renderer_control():
     Both GUIs (builder and editor) offer the same choice, so the control and
     its wording live here rather than being duplicated per GUI.
     """
+    # Zoom & pan is parked, so Static is the only live choice. ipywidgets
+    # cannot grey out ONE option of a ToggleButtons, so the parked mode is a
+    # separate disabled Button beside it: that renders properly greyed and
+    # unclickable, where a two-option toggle would either accept the click and
+    # snap back, or grey out Static along with it.
     w = widgets.ToggleButtons(
-        options=[("Static (fast)", "static"), ("Zoom & pan", "interactive")],
+        options=[("Static (fast)", "static")],
         value="static",
         style={"button_width": "130px"},
         layout=widgets.Layout(margin="0"),
     )
-    hint = widgets.HTML(
-        "<div style='font-size:11px; color:#6b7280; margin-top:2px;'>"
-        "<b>Static</b>: a plain picture of each scene - lightest and quickest, "
-        "and enough for simply stepping through dates.<br>"
-        "<b>Zoom &amp; pan</b>: the same scene in a live map - scroll to zoom, "
-        "drag to pan, and the zoomed area is kept when you change date or "
-        "bands. Slower per scene and makes the notebook heavier."
-        "</div>"
+    coming_soon = widgets.Button(
+        description="Zoom & pan (Coming Soon)",
+        disabled=True,
+        layout=widgets.Layout(width="190px", margin="0"),
     )
     box = widgets.VBox(
         [
             widgets.HTML(
                 "<div style='font-weight:500; line-height:1.2;'>View mode</div>"
             ),
-            w,
-            hint,
+            widgets.HBox([w, coming_soon], layout=widgets.Layout(gap="6px")),
         ],
         layout=widgets.Layout(width="100%", gap="2px", margin="0 0 6px 0"),
     )
