@@ -919,9 +919,11 @@ def super_resolve_cube(
     # output encoding (compression / int16 packing)
     # ---------------------------
     # The output extension picks the container: *.zarr -> Zarr store, else
-    # NetCDF (unchanged). zlib/chunksizes are NetCDF/HDF5-only knobs; Zarr
-    # always compresses with its own default codec, so `compress` is a no-op
-    # there (mirrors export_stac).
+    # NetCDF (unchanged). zlib/chunksizes are NetCDF/HDF5-only knobs, so
+    # `compress` is a no-op on the Zarr side (mirrors export_stac); Zarr always
+    # compresses, and when `pack_to_int16` is on _write_zarr additionally
+    # switches that variable to a shuffling codec, which is what makes a packed
+    # store competitive with the NetCDF one (see _set_zarr_shuffle).
     write_zarr = is_zarr_path(output_path)
     var_encoding = {}
     if not write_zarr and (compress or pack_to_int16):

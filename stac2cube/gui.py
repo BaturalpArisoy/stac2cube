@@ -1,4 +1,5 @@
 import ast
+import fnmatch
 import io
 import json
 import os
@@ -72,6 +73,74 @@ from .gui_common import (
     help_button as _help_button,
     make_viz_renderer_control as _make_viz_renderer_control,
 )
+
+
+if FileChooser is None:
+    _CubeFileChooser = None
+else:
+
+    class _CubeFileChooser(FileChooser):
+        """FileChooser that picks a ``.zarr`` store in one click.
+
+        A Zarr cube is a directory, so the stock chooser walks INTO it and the
+        user has to select some file inside (``zarr.json``, a coordinate
+        folder, ...). Here a ``*.zarr`` folder behaves like a file: clicking it
+        fills the filename box instead of opening it, so ``selected`` is the
+        store root itself.
+
+        Only applies when the store name matches the chooser's file filter, so
+        a NetCDF-only or polygon chooser keeps browsing ``.zarr`` folders as
+        plain directories.
+        """
+
+        def _is_pickable_store(self, path, name):
+            if self._show_only_dirs or not name:
+                return False
+            if not is_zarr_path(name):
+                return False
+            if self._filter_pattern and not _fnmatch_any(name, self._filter_pattern):
+                return False
+            return os.path.isdir(os.path.join(path, name))
+
+        def _on_dircontent_select(self, change):
+            new = change.get("new")
+            if new is None:
+                return
+            base = self._expand_path(self._pathlist.value)
+            name = self._map_disp_to_name[new]
+            if self._is_pickable_store(base, name):
+                # Stay in the parent folder, put the store in the filename box.
+                self._set_form_values(base, name)
+                return
+            super()._on_dircontent_select(change)
+
+        def _set_form_values(self, path, filename):
+            super()._set_form_values(path, filename)
+            # The base class clears the highlight and disables Select for every
+            # directory entry; undo both when that directory is a Zarr store.
+            if not self._is_pickable_store(path, filename):
+                return
+            disp = getattr(self, "_map_name_to_disp", {}).get(filename)
+            if disp is not None and disp in (self._dircontent.options or ()):
+                self._dircontent.unobserve(self._on_dircontent_select, names="value")
+                self._dircontent.value = disp
+                self._dircontent.observe(self._on_dircontent_select, names="value")
+            if self._gb.layout.display is None:
+                already_selected = (
+                    self._selected_path is not None
+                    and self._selected_filename is not None
+                    and os.path.join(path, filename)
+                    == os.path.join(self._selected_path, self._selected_filename)
+                )
+                self._select.disabled = already_selected
+
+
+def _fnmatch_any(name, patterns):
+    """True when ``name`` matches any of the fnmatch ``patterns`` (case-insensitive)."""
+    if isinstance(patterns, str):
+        patterns = [patterns]
+    low = str(name).lower()
+    return any(fnmatch.fnmatch(low, str(p).lower()) for p in patterns)
 
 
 # Shown when the user tries to export while Export mode is still "Quick Result"
@@ -2208,7 +2277,7 @@ def datacube_builder(missions_func=missions):
 
     if filechooser_available:
         try:
-            polygon_fc = FileChooser(
+            polygon_fc = _CubeFileChooser(
                 path=str(Path(".").resolve()),
                 filename="",
                 title="Select polygon file",
@@ -2228,7 +2297,7 @@ def datacube_builder(missions_func=missions):
                 [polygon_fc], layout=widgets.Layout(display="none", width="100%")
             )
 
-            output_fc = FileChooser(
+            output_fc = _CubeFileChooser(
                 path=str(Path(".").resolve()),
                 filename="",
                 title="Select output",
@@ -2240,7 +2309,7 @@ def datacube_builder(missions_func=missions):
                 [output_fc], layout=widgets.Layout(display="none", width="100%")
             )
 
-            gif_out_fc = FileChooser(
+            gif_out_fc = _CubeFileChooser(
                 path=str(Path(".").resolve()),
                 filename="",
                 title="Select animation output folder",
@@ -8692,20 +8761,21 @@ def datacube_editor():
 
     if filechooser_available:
         try:
-            load_fc = FileChooser(
+            load_fc = _CubeFileChooser(
                 path=str(Path(".").resolve()),
                 filename="",
-                title="Select cube (.nc file, or any file inside a .zarr store)",
+                title="Select cube (.nc file or .zarr store)",
                 show_only_dirs=False,
                 select_default=False,
             )
-            # "*" so a Zarr store can be picked by clicking a file inside it
-            # (e.g. zarr.json); the load handler resolves it to the store root.
+            # "*" also lets a .zarr store be clicked directly (see
+            # _CubeFileChooser) or a file inside one be picked - the load
+            # handler resolves either to the store root.
             load_fc.filter_pattern = ["*.nc", "*.zarr", "*"]
             load_fc.use_dir_icons = True
             load_fc_box = widgets.VBox([load_fc], layout=widgets.Layout(display="none", width="100%"))
 
-            export_fc = FileChooser(
+            export_fc = _CubeFileChooser(
                 path=str(Path(".").resolve()),
                 filename="",
                 title="Select export output",
@@ -8715,7 +8785,7 @@ def datacube_editor():
             export_fc.use_dir_icons = True
             export_fc_box = widgets.VBox([export_fc], layout=widgets.Layout(display="none", width="100%"))
 
-            gif_fc = FileChooser(
+            gif_fc = _CubeFileChooser(
                 path=str(Path(".").resolve()),
                 filename="",
                 title="Select animation output folder",
@@ -8725,7 +8795,7 @@ def datacube_editor():
             gif_fc.use_dir_icons = True
             gif_fc_box = widgets.VBox([gif_fc], layout=widgets.Layout(display="none", width="100%"))
 
-            clip_fc = FileChooser(
+            clip_fc = _CubeFileChooser(
                 path=str(Path(".").resolve()),
                 filename="",
                 title="Select clipping polygon file",
@@ -8739,10 +8809,10 @@ def datacube_editor():
                 pass
             clip_fc_box = widgets.VBox([clip_fc], layout=widgets.Layout(display="none", width="100%"))
 
-            mask_file_fc = FileChooser(
+            mask_file_fc = _CubeFileChooser(
                 path=str(Path(".").resolve()),
                 filename="",
-                title="Select binary cloud-mask cube (.nc file, or any file inside a .zarr store)",
+                title="Select binary cloud-mask cube (.nc file or .zarr store)",
                 show_only_dirs=False,
                 select_default=False,
             )
@@ -8753,7 +8823,7 @@ def datacube_editor():
                 pass
             mask_file_fc_box = widgets.VBox([mask_file_fc], layout=widgets.Layout(display="none", width="100%"))
 
-            build_mask_fc = FileChooser(
+            build_mask_fc = _CubeFileChooser(
                 path=str(Path(".").resolve()),
                 filename="",
                 title="Select output for the binary cloud mask (.nc)",
@@ -10397,8 +10467,12 @@ def datacube_editor():
                 # array keeps reading from this file during preview/edit/export,
                 # so the handle must stay open -- do NOT wrap this in a closing
                 # `with` block. open_cube dispatches .zarr -> open_zarr (always
-                # lazy), else NetCDF with chunks="auto".
-                ds_open = open_cube(path, chunks="auto")
+                # lazy), else NetCDF with one chunk per scene ("frames"): the
+                # viewer, the GIF and every preview read one date at a time, and
+                # dask's "auto" sizing made each of those reads pull ~1 GB off
+                # disk for a 4.8 MB frame (~80x slower - see
+                # _frame_chunked_netcdf).
+                ds_open = open_cube(path, chunks="frames")
                 # Keep small coordinates in memory; only the data variables stay
                 # lazy. Otherwise chunked non-dimension coords (e.g.
                 # cloud_percentage) become dask arrays, which breaks boolean-indexer
@@ -11784,7 +11858,9 @@ def ard_cube_tools():
         if not s:
             return os.getcwd()
         p = Path(s).expanduser()
-        if p.is_dir():
+        # A .zarr store is one cube, not a folder to browse into: open its
+        # parent so the store itself is the entry to click.
+        if p.is_dir() and not is_zarr_path(p):
             return str(p)
         if p.parent.exists():
             return str(p.parent)
@@ -11812,7 +11888,7 @@ def ard_cube_tools():
         def _toggle(_):
             if fc_box.layout.display == "none":
                 start_dir = _guess_dir_from_text(text_widget.value)
-                fc = FileChooser(start_dir)
+                fc = _CubeFileChooser(start_dir)
                 fc.title = f"<b>{title}</b>"
                 fc.use_dir_icons = True
                 fc.show_only_dirs = bool(select_dirs)
@@ -11919,7 +11995,7 @@ def ard_cube_tools():
     load_fc_box = _attach_filechooser(
         browse_load_btn,
         load_path_w,
-        title="Select cube (.nc file, or any file inside a .zarr store)",
+        title="Select cube (.nc file or .zarr store)",
         pattern=["*.nc", "*.zarr", "*"],
         select_dirs=False,
     )
@@ -13183,11 +13259,11 @@ def ard_cube_tools():
         exclusive file access to the loaded cube (see the masking handler):
         two concurrent netCDF/HDF5 handles to one file crash the kernel on
         Windows, so we close ours during the op and reopen here. The reopen
-        stays lazy (chunks='auto'), so nothing is force-loaded into RAM."""
+        stays lazy (chunks='frames'), so nothing is force-loaded into RAM."""
         lp = state.get("loaded_path")
         if not lp:
             return
-        ds_open = open_cube(lp, chunks="auto")
+        ds_open = open_cube(lp, chunks="frames")
         ds = ds_open.assign_coords(
             {name: coord.compute() for name, coord in ds_open.coords.items()}
         )
@@ -14309,29 +14385,63 @@ def ard_cube_tools():
         layout=widgets.Layout(width="320px"),
     )
 
-    SR_DESC = {
+    SR_REQUIRED_BANDS = {
+        "rgbn": ["blue", "green", "red", "nir"],
+        "full_spectral": [
+            "blue", "green", "red", "nir", "nir08",
+            "rededge1", "rededge2", "rededge3", "swir16", "swir22",
+        ],
+        "20to10": [
+            "blue", "green", "red", "nir", "nir08",
+            "rededge1", "rededge2", "rededge3", "swir16", "swir22",
+        ],
+    }
+
+    # Bullet lines after the required-band line (which is built dynamically).
+    SR_DESC_REST = {
         "rgbn": (
-            "- Required band setup -> <code>blue, green, red, nir</code><br>"
             "- If exist, indices must be only 10-meter resolution ones, e.g., ndvi, ndwi<br>"
             "- Use this model if you don't have 20-m bands. Much faster model!"
         ),
         "full_spectral": (
-            "- Required band setup -> <code>blue, green, red, nir, nir08, rededge1, rededge2, rededge3, swir16, swir22</code><br>"
             "- If exist, indices can be both 10 and 20-meter resolution ones, e.g., ndvi, ndwi, ndmi<br>"
             "- Use this model only if you need to super resolve 20-meter bands.<br>"
             "- Even if you need to super-resolve one of the 20-meter bands, still need to include all of the required ones."
         ),
         "20to10": (
-            "- Required band setup -> <code>blue, green, red, nir, nir08, rededge1, rededge2, rededge3, swir16, swir22</code><br>"
             "- Sharpens the six 20-m bands (rededge1/2/3, nir08, swir16, swir22) to true 10-m detail; the 10-m bands are used as reference and pass through unchanged.<br>"
             "- The output keeps the cube's 10-m grid (no pixel-size change), so the cube must be built at 10-m resolution.<br>"
             "- If exist, indices can be both 10 and 20-meter resolution ones, e.g., ndvi, ndwi, ndmi"
         ),
     }
 
-    sr_desc_html = widgets.HTML(
-        f"<div style='font-size:12px; color:#666;'>{SR_DESC[sr_mode_w.value]}</div>"
-    )
+    def _sr_required_bands_html(mode):
+        """Required-band list for a mode. Once a cube is loaded, each band is
+        coloured green when the cube has it and red when it is missing, so the
+        user sees at a glance whether the mode is usable."""
+        req = SR_REQUIRED_BANDS[mode]
+        have = {b.lower() for b in _cube_band_list(state.get("loaded_obj"))}
+        if not have:
+            return "<code>" + ", ".join(req) + "</code>"
+        parts = [
+            "<span style='color:{c}; font-weight:600;'>{b}</span>".format(
+                c="#2e7d32" if b.lower() in have else "#c62828", b=b
+            )
+            for b in req
+        ]
+        return "<code>" + ", ".join(parts) + "</code>"
+
+    def _sr_desc_value(mode):
+        return (
+            "<div style='font-size:12px; color:#666;'>"
+            f"- Required band setup -> {_sr_required_bands_html(mode)}<br>"
+            f"{SR_DESC_REST[mode]}</div>"
+        )
+
+    sr_desc_html = widgets.HTML(_sr_desc_value(sr_mode_w.value))
+
+    def _refresh_sr_desc():
+        sr_desc_html.value = _sr_desc_value(sr_mode_w.value)
 
     # Output NetCDF
     sr_out_w = widgets.Text(value="", layout=widgets.Layout(width="100%"))
@@ -14410,8 +14520,7 @@ def ard_cube_tools():
     def _on_sr_mode_change(change):
         if change.get("name") != "value":
             return
-        mode = sr_mode_w.value
-        sr_desc_html.value = f"<div style='font-size:12px; color:#666;'>{SR_DESC[mode]}</div>"
+        _refresh_sr_desc()
 
         # enabled state depends on load status via _set_enabled_after_load
         sr_run_btn.disabled = (state.get("loaded_path") is None)
@@ -14653,6 +14762,10 @@ def ard_cube_tools():
         # state['loaded_path'], which _finalize_load sets before calling this).
         _sync_sr_compress_for_format()
 
+        # Colour the required-band list against the freshly loaded cube (and
+        # reset it to neutral when a cube is unloaded).
+        _refresh_sr_desc()
+
         sr_run_btn.disabled = not enabled
 
 
@@ -14721,8 +14834,10 @@ def ard_cube_tools():
 
             # Open lazily (Dask-backed): large cubes are read on demand instead of
             # being copied into RAM. The handle must stay open for later reads, so
-            # this is deliberately not a closing `with` block.
-            ds_open = open_cube(p, chunks="auto")
+            # this is deliberately not a closing `with` block. One chunk per scene
+            # ("frames"), because every interactive read here is one date at a
+            # time; see _frame_chunked_netcdf for why "auto" is ~80x slower.
+            ds_open = open_cube(p, chunks="frames")
             # Keep small coordinates in memory; only the data variables stay lazy
             # (chunked non-dimension coords otherwise break boolean-indexer ops).
             ds = ds_open.assign_coords(

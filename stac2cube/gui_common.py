@@ -57,11 +57,24 @@ def normalize_ui_path(path_str):
 
 
 def existing_dir_or_parent(path_str):
+    """Folder a file chooser should open at for a given path.
+
+    A Zarr store is a directory but the GUI treats it as one cube (a "file"),
+    so a ``*.zarr`` path opens its PARENT folder - the store itself is then
+    the entry to click, not a folder to browse into.
+    """
     s = (path_str or "").strip()
     if not s:
         return str(Path(".").resolve())
 
     p = Path(s)
+    if p.name.lower().endswith(".zarr"):
+        parent = p.parent if str(p.parent) not in ("", ".") else Path(".")
+        try:
+            return str(parent.resolve())
+        except Exception:
+            return str(parent)
+
     if p.is_dir():
         try:
             return str(p.resolve())

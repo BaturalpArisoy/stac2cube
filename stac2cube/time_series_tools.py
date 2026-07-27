@@ -1140,9 +1140,55 @@ def interactive_time_view(
     else:
         raise ValueError("widget_type must be 'slider' or 'dropdown'")
 
+    # Step buttons: browsing a time series one scene at a time is the common
+    # case, and re-opening the dropdown for every step is the slow way to do it.
+    prev_btn = widgets.Button(
+        description="",
+        icon="chevron-left",
+        tooltip="Previous scene",
+        layout=widgets.Layout(width="42px"),
+    )
+    next_btn = widgets.Button(
+        description="",
+        icon="chevron-right",
+        tooltip="Next scene",
+        layout=widgets.Layout(width="42px"),
+    )
+
+    def _time_position():
+        """(current index, number of selectable scenes) for either widget."""
+        if widget_type == "dropdown":
+            i = time_w.index
+            return (0 if i is None else int(i)), len(time_w.options)
+        return int(time_w.value), n_time
+
+    def _sync_step_buttons():
+        i, n = _time_position()
+        prev_btn.disabled = i <= 0
+        next_btn.disabled = i >= n - 1
+
+    def _step_time(delta):
+        i, n = _time_position()
+        j = min(max(i + delta, 0), n - 1)
+        if j == i:
+            return
+        # Setting the widget fires its own observer, which redraws the frame.
+        if widget_type == "dropdown":
+            time_w.index = j
+        else:
+            time_w.value = j
+
+    prev_btn.on_click(lambda _b: _step_time(-1))
+    next_btn.on_click(lambda _b: _step_time(+1))
+
+    time_box = widgets.HBox(
+        [time_w, prev_btn, next_btn],
+        layout=widgets.Layout(gap="4px", align_items="center"),
+    )
+
     if not has_time:
         # Single image: nothing to scrub through.
-        time_w.layout.display = "none"
+        time_box.layout.display = "none"
 
     out = widgets.Output()
 
@@ -1544,14 +1590,20 @@ def interactive_time_view(
     def _on_control_change(_change):
         plot_current()
 
+    def _on_time_change(_change):
+        _sync_step_buttons()
+        plot_current()
+
     section_w.observe(_on_section_change, names="value")
-    for w in (mode_dd, band_dd, r_dd, g_dd, b_dd, stretch_w, time_w):
+    for w in (mode_dd, band_dd, r_dd, g_dd, b_dd, stretch_w):
         w.observe(_on_control_change, names="value")
+    time_w.observe(_on_time_change, names="value")
 
     _sync_section_visibility()
+    _sync_step_buttons()
 
     controls = widgets.VBox(
-        [section_w, preset_box, band_box, custom_box, stretch_box, time_w],
+        [section_w, preset_box, band_box, custom_box, stretch_box, time_box],
         layout=widgets.Layout(gap="6px"),
     )
 
@@ -1695,6 +1747,35 @@ def interactive_cloud_overlay_view(
         description="Date:",
         layout=widgets.Layout(width="260px"),
     )
+    # Step buttons, same idea as in interactive_time_view: comparing a mask
+    # across consecutive scenes should not mean re-opening the dropdown.
+    prev_btn = widgets.Button(
+        description="",
+        icon="chevron-left",
+        tooltip="Previous scene",
+        layout=widgets.Layout(width="42px"),
+    )
+    next_btn = widgets.Button(
+        description="",
+        icon="chevron-right",
+        tooltip="Next scene",
+        layout=widgets.Layout(width="42px"),
+    )
+
+    def _sync_step_buttons():
+        i = 0 if date_w.index is None else int(date_w.index)
+        prev_btn.disabled = i <= 0
+        next_btn.disabled = i >= len(date_w.options) - 1
+
+    def _step_date(delta):
+        i = 0 if date_w.index is None else int(date_w.index)
+        j = min(max(i + delta, 0), len(date_w.options) - 1)
+        if j != i:
+            date_w.index = j  # fires the observer, which redraws
+
+    prev_btn.on_click(lambda _b: _step_date(-1))
+    next_btn.on_click(lambda _b: _step_date(+1))
+
     band_w = widgets.Dropdown(
         options=band_options,
         value=band_names[0],
@@ -1864,15 +1945,27 @@ def interactive_cloud_overlay_view(
     def _on_change(_change):
         plot_current()
 
-    date_w.observe(_on_change, names="value")
+    def _on_date_change(_change):
+        _sync_step_buttons()
+        plot_current()
+
+    date_w.observe(_on_date_change, names="value")
     band_w.observe(_on_change, names="value")
     opacity_w.observe(_on_change, names="value")
     stretch_w.observe(_on_change, names="value")
     view_w.observe(_on_change, names="value")
 
+    _sync_step_buttons()
+
     controls = widgets.HBox(
-        [date_w, band_w],
-        layout=widgets.Layout(gap="32px"),
+        [
+            widgets.HBox(
+                [date_w, prev_btn, next_btn],
+                layout=widgets.Layout(gap="4px", align_items="center"),
+            ),
+            band_w,
+        ],
+        layout=widgets.Layout(gap="32px", align_items="center"),
     )
     controls2 = widgets.HBox(
         [

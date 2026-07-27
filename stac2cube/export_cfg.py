@@ -94,6 +94,53 @@ def resolve_cube_path(path):
     return str(path)
 
 
+def _frame_chunked_netcdf(path):
+    """Open a NetCDF cube with one dask chunk per (time, band) image.
+
+    This is the chunking a viewer/animation wants: every redraw asks for a
+    single scene, so a chunk should hold a single scene and nothing more.
+
+    ``chunks="auto"`` does NOT do that. It sizes chunks by dask's ~128 MB
+    heuristic, which on a real cube (355 dates x 6 bands x 648 x 618, stored
+    contiguously) comes out as (174, 2, 317, 301): one RGB frame then spans 8
+    of those chunks, so drawing it reads ~1 GB off disk to keep 4.8 MB. Measured
+    on that cube: 0.96 s per frame with ``"auto"`` vs 0.012 s per frame here
+    (~80x). The compressed layout is hit the same way - each chunk must be
+    inflated in full - measured 0.28 s vs 0.014 s (~20x) on a 100-date cube.
+
+    A NetCDF written elsewhere may genuinely be chunked across several dates or
+    bands on disk. Splitting those stored chunks finer would make every frame
+    inflate the same block again, so that layout is followed as stored
+    (``chunks={}``) instead.
+    """
+    import warnings
+
+    frame_spec = {"time": 1, "band": 1}
+    with warnings.catch_warnings():
+        # Emitted when the spec cuts across stored chunks; that case is
+        # detected below and re-opened, so the warning has nothing to add.
+        warnings.filterwarnings(
+            "ignore", message=".*separate the stored chunks.*"
+        )
+        ds = xr.open_dataset(path, chunks=frame_spec)
+
+    # preferred_chunks is the on-disk chunking (absent for contiguous storage,
+    # where any hyperslab is cheap and per-image chunks are simply right).
+    spans_disk_chunk = False
+    for var in ds.data_vars.values():
+        if "y" not in var.dims or "x" not in var.dims:
+            continue
+        pref = var.encoding.get("preferred_chunks") or {}
+        if any(int(pref.get(d, 1)) > 1 for d in frame_spec):
+            spans_disk_chunk = True
+            break
+    if not spans_disk_chunk:
+        return ds
+
+    ds.close()
+    return xr.open_dataset(path, chunks={})
+
+
 def open_cube(path, chunks=None):
     """Open a cube from disk, dispatching on the path extension.
 
@@ -101,6 +148,11 @@ def open_cube(path, chunks=None):
     as stored); anything else -> :func:`xarray.open_dataset` (NetCDF), with
     ``chunks`` passed through unchanged so existing eager/lazy behavior is
     preserved.
+
+    ``chunks="frames"`` is a NetCDF-only shorthand for "lazy, one chunk per
+    scene" (see :func:`_frame_chunked_netcdf`) - what every interactive path
+    reading a cube from disk wants. Zarr stores are already written one scene
+    per chunk, so the flag needs no equivalent there.
 
     This is the single entry point every pipeline component uses to read a
     cube from a path, so NetCDF and Zarr cubes are interchangeable everywhere.
@@ -155,6 +207,8 @@ def open_cube(path, chunks=None):
         for var in out.variables.values():
             _restore_array_attrs(var.attrs)
         return normalize_stack_name(out)
+    if isinstance(chunks, str) and chunks == "frames":
+        return normalize_stack_name(_frame_chunked_netcdf(path))
     return normalize_stack_name(xr.open_dataset(path, chunks=chunks))
 
 
@@ -218,6 +272,40 @@ def _strip_netcdf_encoding(ds):
             var.encoding.pop(stale, None)
 
 
+def _set_zarr_shuffle(ds):
+    """Give int16-on-disk variables a byte-shuffling codec.
+
+    zarr-python 3's default codec chain is ``bytes`` + ``zstd(level=0)`` with no
+    shuffle filter. For int16 data packed with CF ``scale_factor``/``add_offset``
+    (what the super-resolution export writes) that is a poor default: the high
+    byte of a packed reflectance value is near-constant across a scene, so
+    grouping the bytes before compressing turns it into long runs. Measured on a
+    real SR cube, shuffling lifts the ratio from 1.20 to 1.61 - the NetCDF path
+    gets this for free because netCDF4-python enables the HDF5 shuffle filter
+    whenever zlib is on, which is why an SR cube used to be ~33% *larger* as
+    Zarr than as NetCDF.
+
+    Blosc is the portable way to ask for shuffle: it is a registered Zarr v3
+    codec that other implementations read (verified against GDAL's independent
+    C++ driver). The ``numcodecs.shuffle`` codec also works in zarr-python but
+    is outside the v3 spec and GDAL rejects it, so it is deliberately not used.
+
+    Only int16 is touched. Shuffling *hurts* the float32 cubes measurably
+    (ratio 1.52 -> 1.30) because their mantissa low bytes are noise, so those
+    keep the library default.
+    """
+    try:
+        from zarr.codecs import BloscCodec, BloscShuffle
+    except ImportError:
+        return  # older/newer zarr without this API: keep the default codec
+    for var in ds.variables.values():
+        if np.dtype(var.encoding.get("dtype", var.dtype)) != np.int16:
+            continue
+        var.encoding["compressors"] = (
+            BloscCodec(cname="zstd", clevel=4, shuffle=BloscShuffle.shuffle),
+        )
+
+
 def _write_zarr(ds, output, overwrite):
     """Write ``ds`` to a Zarr store, streaming chunks from dask.
 
@@ -227,14 +315,15 @@ def _write_zarr(ds, output, overwrite):
     than the full cube - the reason Zarr is offered for very large cubes.
 
     Compression: Zarr applies its own default lossless codec, so a store is
-    always compressed. The ``compress`` (zlib) flag is a NetCDF-only knob and
-    is intentionally not plumbed here - forcing a specific Zarr v3 codec object
-    is version-fragile, and the default already compresses well.
+    always compressed. The ``compress`` (zlib) flag is a NetCDF-only knob and is
+    intentionally not plumbed here. The one place the default is not good enough
+    is int16-packed data, which :func:`_set_zarr_shuffle` handles.
     """
     import shutil
     import warnings
 
     _strip_netcdf_encoding(ds)
+    _set_zarr_shuffle(ds)
 
     # Uniform per-slice chunks: valid for Zarr (which needs equal chunk sizes
     # bar the last) and good for partial reads. Daskifies an in-memory cube so
@@ -246,14 +335,79 @@ def _write_zarr(ds, output, overwrite):
         shutil.rmtree(output, ignore_errors=True)
 
     with warnings.catch_warnings():
-        # Both are informational and do not affect data read back by xarray
-        # (verified separately): (1) fixed-length unicode coords (e.g. band
-        # names) have no stable Zarr-v3 spec yet - other Zarr libraries may not
-        # read those *labels*, though values are fine; (2) consolidated
-        # metadata is an xarray convenience outside the v3 core spec.
+        # Both are informational for xarray, which reads everything back
+        # correctly: (1) fixed-length unicode coords (e.g. band names) have no
+        # stable Zarr-v3 spec yet; (2) consolidated metadata is an xarray
+        # convenience outside the v3 core spec.
+        #
+        # (1) is worse than it looks for OTHER readers, though: xarray stores
+        # `band` with v3 data_type "string", and GDAL 3.12 cannot parse that -
+        # it refuses to open the whole store ("Invalid or unsupported format
+        # for data_type: string"), not merely the labels. Casting the coord to
+        # fixed-width bytes does not help (GDAL rejects "null_terminated_bytes"
+        # too). So a Zarr cube is currently xarray/zarr-python-only in practice,
+        # while the NetCDF export stays GDAL-readable. Independent of the codec
+        # choice - the arrays themselves read fine in GDAL.
         warnings.filterwarnings("ignore", message=".*does not have a Zarr V3 specification.*")
         warnings.filterwarnings("ignore", message=".*[Cc]onsolidated metadata.*")
-        ds.to_zarr(output, mode="w")
+        # Same progress bar the NetCDF path shows. The chunk() above always
+        # leaves ds dask-backed, so to_zarr always drives the dask scheduler
+        # ProgressBar hooks and the bar is never a no-op.
+        with ProgressBar():
+            ds.to_zarr(output, mode="w")
+
+
+def _stream_chunks(ds, budget_bytes=128 * 1024**2):
+    """Re-group the non-spatial dims so one streamed write carries ~``budget``.
+
+    A dask-backed ``to_netcdf`` writes one dask chunk per call. With the
+    per-slice chunking a STAC load produces (one (time, band) image per chunk)
+    that is thousands of tiny HDF5 writes, which the *compressed* path pays for
+    twice over: measured on a real 40-date (404 MB) cube, per-slice streaming
+    took 89 s and produced a 379 MB file where one big write took 8 s and
+    309 MB - same values, same filters, same netCDF chunk layout, so the extra
+    bytes are HDF5 per-write allocation overhead and the extra time is per-call
+    overhead.
+
+    Grouping whole images together buys most of that back while keeping peak
+    memory at roughly one group per dask worker instead of the whole cube. The
+    128 MB budget is where the curve flattens on that cube: peak 386 MB
+    (vs 822 MB materialized), wall 15.7 s, file 316.7 MB (+2.6%). Bigger
+    budgets get closer to the materialized speed and size but give the memory
+    back; see the compress notes in export_stac.
+
+    Only the non-spatial dims are merged; ``y``/``x`` are left alone so the
+    dask chunks stay whole images and never straddle a netCDF chunk.
+    """
+    if not _is_dask_backed(ds):
+        return ds
+    spatial_vars = [
+        v for v in ds.data_vars.values() if "y" in v.dims and "x" in v.dims
+    ]
+    if not spatial_vars:
+        return ds
+    # Take the dim ORDER from the variable itself (Dataset.dims is a mapping and
+    # does not preserve it), so "fastest varying" below really is the innermost
+    # non-spatial dim - the one netCDF chunks run contiguously along.
+    ref = max(spatial_vars, key=lambda v: v.size)
+    slice_bytes = int(ds.sizes["y"]) * int(ds.sizes["x"]) * max(
+        v.dtype.itemsize for v in spatial_vars
+    )
+    if slice_bytes <= 0:
+        return ds
+    per_group = max(1, int(budget_bytes // slice_bytes))
+    other = [d for d in ref.dims if d not in ("y", "x")]
+    if not other:
+        return ds
+    # Fill the budget from the fastest-varying non-spatial dim outwards, so a
+    # group is a run of whole images rather than a stripe across many dates.
+    spec = {}
+    remaining = per_group
+    for d in reversed(other):
+        take = max(1, min(int(ds.sizes[d]), remaining))
+        spec[d] = take
+        remaining = max(1, remaining // take)
+    return ds.chunk(spec)
 
 
 def export_stac(
@@ -275,6 +429,13 @@ def export_stac(
     variables. NetCDF only (Zarr compresses by default). Values are
     bit-identical on read-back; the write is slower. Shrinks cloud-masked
     cubes especially well (NaN runs compress strongly).
+
+    Both containers now STREAM a dask-backed cube to disk instead of
+    materializing it first, so peak memory is a few chunks rather than the
+    whole cube. One consequence: the returned object is whatever was passed in,
+    so for a lazy input it stays lazy (this was already true of the Zarr path).
+    Callers that want the values in memory should ``.compute()`` the result -
+    or, cheaper, re-open the file that was just written.
     """
     if not isinstance(stac, (xr.DataArray, xr.Dataset)):
         raise TypeError(
@@ -289,12 +450,6 @@ def export_stac(
     stac.attrs["crs"] = crs
 
     is_zarr = str(output).lower().endswith(".zarr")
-
-    # NetCDF is written from an in-memory array (long-standing behavior). Zarr
-    # is kept lazy so dask can stream it chunk-by-chunk (see _write_zarr).
-    if not is_zarr and _is_dask_backed(stac):
-        with ProgressBar():
-            stac = stac.compute()
 
     if isinstance(stac, xr.DataArray):
         name = var_name or stac.name or "Time_Series"
@@ -316,8 +471,32 @@ def export_stac(
             suffix = datetime.now().strftime("_%Y%m%d_%H%M%S")
             output = str(Path(output).with_stem(Path(output).stem + suffix))
 
+    # NetCDF used to be written from a fully materialized array: the whole cube
+    # was .compute()d first, which peaks at ~2x its size (dask holds every
+    # finished chunk, then CONCATENATES them into one new contiguous array).
+    # It does not have to be. xarray hands a dask-backed variable to
+    # dask.array.store, which pulls one chunk at a time and routes every HDF5
+    # call through the backend's process-global HDF5 lock, so the write streams
+    # and peak memory is a few chunks. Measured on a real 3.59 GB cube:
+    # +7183 MB -> +57 MB peak RSS, and faster; the file reads back bit-
+    # identical (values, dtypes, dims, coords, attrs, CRS, _FillValue, netCDF
+    # chunk layout and filters all compared). The HDF5 lock is also what makes
+    # the graph safe when it READS from other open NetCDF files - the cloud
+    # masking / update pattern - which is why this is not the old "NetCDF: HDF
+    # error" trap.
     _set_compression(ds, compress)
-    ds.to_netcdf(output)
+    if compress:
+        # Only the compressed path needs coarser write chunks (see
+        # _stream_chunks); uncompressed per-slice streaming is already both
+        # cheaper and faster than materializing.
+        ds = _stream_chunks(ds)
+    if _is_dask_backed(ds):
+        # Keeps the familiar progress bar: the compute now happens inside
+        # to_netcdf, on the same dask scheduler ProgressBar hooks.
+        with ProgressBar():
+            ds.to_netcdf(output)
+    else:
+        ds.to_netcdf(output)
 
     print(f"Export is done: {output}")
     return stac
