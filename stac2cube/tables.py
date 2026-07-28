@@ -356,6 +356,14 @@ HELP_MD = r"""
 - `mean_timeseries` calculates mean over the full time series; `mean_monthly` calculates mean for each month present in the time series; `mean_annual` calculates mean for each year present in the time series.
 - ONE FOR ALL: `mean_all` generates `mean_timeseries` + `mean_monthly` + `mean_annual` (same for other stats).
 - Computed AFTER the scene filters (`scene_cloud_coverage`, `dates`, `partial_scene_handling`), so a composite always describes the scenes that survived them.
+- CUSTOM composites are dicts in the same list, with `op` (`mean`/`median`/`min`/`max`/`std`) and a `name` that becomes the variable name (letters, digits, underscores; not starting with a digit):
+  - Season, repeating in every year the cube covers: `{"op": "mean", "season": ["04-01", "06-21"], "name": "spring_mean"}` → `spring_mean_2024`, `spring_mean_2025`, ...
+  - Restricted to given years: `{"op": "mean", "season": ["04-01", "06-21"], "years": [2024, 2025], "name": "spring_mean"}`
+  - Single window, no year suffix: `{"op": "mean", "window": ["2024-04-01", "2024-06-21"], "name": "spring24"}`
+  - Both ends are inclusive of the whole day. A season starting later than it ends (`["12-01", "02-28"]`) runs over New Year and is labelled by its START year, like the seasonal `daterange`.
+  - Years in which no scene falls inside the window are skipped with a note; a composite matching no scene at all is an error.
+  - Each custom variable carries `composite_*` attributes (window, `composite_n_dates`, first/last contributing date), so a window only partly covered by the cube stays visible.
+  - `composite_n_dates` counts the SCENES inside the window, not the valid observations behind each pixel: in a cloud-masked cube a pixel can be NaN on some of those scenes and is then averaged over fewer values (all composites skip NaNs, and a pixel masked on every scene of the window stays NaN).
 
 **keep_timeseries**
 - `True` (default) → the time series is kept alongside the composites.

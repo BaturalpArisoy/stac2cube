@@ -56,6 +56,12 @@ from .get_data import (
 )
 from .clip import compute_scene_coverage
 
+# The custom-composite rows validate through the SAME parser calculate_statistics
+# uses, so the interface can never accept a composite a headless run rejects.
+from .get_statistics import _parse_custom as _parse_custom_composite
+from .get_statistics import _VALID_OPS as _COMPOSITE_OPS
+from .stac_processing import is_iso_date, is_mmdd
+
 from .gui_common import (
     human_readable_bytes as _human_readable_bytes,
     estimated_data_size_bytes as _estimated_data_size_bytes,
@@ -503,6 +509,25 @@ PARAM_HELP_HTML = {
         <li><code>mean_monthly</code> -> one image per month present: mean of Jan 2020, Feb 2020, ... Dec 2021</li>
         <li><code>mean_annual</code> -> one image per year: mean of 2020, and mean of 2021</li>
     </ul>
+    """,
+    "custom_composites": """
+    <b>Custom Composites</b><br>
+    A period you define yourself, instead of a whole month or year.<br><br>
+    <b>Every year</b> repeats the period in each year the cube covers. A spring
+    of <code>04-01</code> to <code>06-21</code> named <code>spring_mean</code>
+    gives <code>spring_mean_2024</code>, <code>spring_mean_2025</code>, and so
+    on - one image per year.<br><br>
+    <b>Single window</b> uses full dates and gives one image, named exactly as
+    you type it.<br><br>
+    Both dates are included. A period that starts later than it ends
+    (<code>12-01</code> to <code>02-28</code>) runs over New Year and is named
+    after the year it starts in.<br><br>
+    Composites are calculated from the dates left in the <b>Result</b> section
+    above, after the cloud and coverage filters - no new scenes are downloaded.
+    A year with no scene in the period is skipped.<br><br>
+    Cloudy pixels that were masked out are left out of the statistic, so a pixel
+    can be built from fewer dates than the period contains, and a pixel masked
+    on every date stays empty.
     """,
     # Kept for the legacy `aggregator` parameter of get_stac_layers; the GUI's
     # own control is now the Temporal Composites section.
@@ -1868,6 +1893,20 @@ def datacube_builder(missions_func=missions):
         layout=widgets.Layout(width="99%"),
     )
     keep_ts_note = widgets.HTML("")
+
+    # -- Custom Composites: user-defined periods, one row each ------------------
+    # A row is either a season ("Every year", MM-DD, expanded to name_YYYY per
+    # year the cube covers) or a single window (full dates, one variable). Rows
+    # are added and removed at runtime, so the container's children are rebuilt
+    # rather than declared here (see _custom_add_row / _custom_remove_row).
+    custom_rows_box = widgets.VBox(layout=widgets.Layout(width="100%", gap="4px"))
+    custom_add_btn = widgets.Button(
+        description="Add composite",
+        icon="plus",
+        layout=widgets.Layout(width="150px"),
+    )
+    # Red list of the rows that are incomplete or wrong, and therefore ignored.
+    custom_error_note = widgets.HTML("")
 
     # Legacy: the mean/median Temporal Composite dropdown this section replaces.
     # Kept as a hidden widget (never shown, never emitted) so the mission-meta
@@ -3641,10 +3680,210 @@ def datacube_builder(missions_func=missions):
             return obj
         return obj.isel(time=np.flatnonzero(keep))
 
+    # -- Custom Composites rows ------------------------------------------------
+    # Each row keeps its own widgets in a dict; custom_rows_box.children holds
+    # the rendered HBoxes in the same order, so a row is removed by rebuilding
+    # both lists.
+    _custom_rows = []
+
+    def _custom_row_is_blank(row):
+        """A freshly added row the user has not touched yet - ignored quietly
+        instead of being reported as an error."""
+        return not any(
+            (row[k].value or "").strip() for k in ("start", "end", "name")
+        )
+
+    def _custom_row_spec(row):
+        """The dict this row stands for, without validating it."""
+        return {
+            "op": row["op"].value,
+            ("season" if row["mode"].value == "season" else "window"): [
+                (row["start"].value or "").strip(),
+                (row["end"].value or "").strip(),
+            ],
+            "name": (row["name"].value or "").strip(),
+        }
+
+    def _custom_row_error(row, names_seen):
+        """A short, plain problem description for this row, or None when it is
+        fine. Short messages for the everyday mistakes, then the shared parser
+        as the final authority so nothing the headless run rejects gets through
+        here."""
+        seasonal = row["mode"].value == "season"
+        start = (row["start"].value or "").strip()
+        end = (row["end"].value or "").strip()
+        name = (row["name"].value or "").strip()
+        fmt = "MM-DD" if seasonal else "YYYY-MM-DD"
+
+        if not start or not end:
+            return f"fill both dates as {fmt}."
+        if not name:
+            return "give the composite a name."
+        if name in names_seen:
+            return f"the name '{name}' is already used by another row."
+
+        try:
+            _parse_custom_composite(_custom_row_spec(row))
+        except ValueError:
+            # Re-say the parser's complaint in the interface's own words.
+            checker = is_mmdd if seasonal else is_iso_date
+            if not checker(start) or not checker(end):
+                return f"dates must be written as {fmt}."
+            if not seasonal and start > end:
+                return "the start date is after the end date."
+            return (
+                "the name can only use letters, digits and _ , and cannot start "
+                "with a digit."
+            )
+        return None
+
+    def _custom_composite_specs():
+        """The valid custom composites, in row order. Blank and broken rows are
+        left out - _custom_validate() is what tells the user about them.
+
+        Emits the INPUT form ({"op", "season"|"window", "name"}), not the
+        parser's normal form: this list goes straight into Copy Settings, and a
+        SLURM run has to be able to feed it back to calculate_statistics.
+        """
+        specs = []
+        names_seen = set()
+        for row in _custom_rows:
+            if _custom_row_is_blank(row) or row["op"].disabled:
+                continue
+            if _custom_row_error(row, names_seen) is not None:
+                continue
+            names_seen.add((row["name"].value or "").strip())
+            spec = _custom_row_spec(row)
+            _parse_custom_composite(spec)  # validated, but keep the input form
+            specs.append(spec)
+        return specs
+
+    def _custom_validate():
+        """Refresh the red note under the rows. Rows listed here are ignored,
+        never silently applied."""
+        problems = []
+        names_seen = set()
+        for i, row in enumerate(_custom_rows):
+            if _custom_row_is_blank(row) or row["op"].disabled:
+                continue
+            err = _custom_row_error(row, names_seen)
+            if err:
+                problems.append(f"Row {i + 1}: {err}")
+            else:
+                names_seen.add((row["name"].value or "").strip())
+        if problems:
+            custom_error_note.value = (
+                "<div style='font-size:12px; color:#b91c1c; background:#fef2f2; "
+                "border:1px solid #fecaca; border-radius:6px; padding:6px 8px;'>"
+                "Ignored until fixed:<br>" + "<br>".join(problems) + "</div>"
+            )
+        else:
+            custom_error_note.value = ""
+
+    def _custom_row_widgets():
+        """One editable row: period type, the two dates, the statistic, the
+        name, and the button that removes it."""
+        mode = widgets.Dropdown(
+            options=[("Every year", "season"), ("Single window", "window")],
+            value="season",
+            layout=widgets.Layout(width="130px"),
+        )
+        # continuous_update=False: the value only changes when the field is left
+        # (or Enter is pressed), so a half-typed date is never checked and the
+        # Result panel is not re-rendered on every keystroke.
+        start = widgets.Text(
+            value="", placeholder="MM-DD", continuous_update=False,
+            layout=widgets.Layout(width="105px"),
+        )
+        end = widgets.Text(
+            value="", placeholder="MM-DD", continuous_update=False,
+            layout=widgets.Layout(width="105px"),
+        )
+        op = widgets.Dropdown(
+            options=sorted(_COMPOSITE_OPS),
+            value="mean",
+            layout=widgets.Layout(width="105px"),
+        )
+        name = widgets.Text(
+            value="", placeholder="name", continuous_update=False,
+            layout=widgets.Layout(width="150px"),
+        )
+        remove = widgets.Button(
+            icon="times",
+            tooltip="Remove this composite",
+            layout=widgets.Layout(width="38px"),
+        )
+        return {
+            "mode": mode, "start": start, "end": end,
+            "op": op, "name": name, "remove": remove,
+        }
+
+    def _custom_sync_placeholders(row):
+        """Season rows take MM-DD, single windows take full dates."""
+        hint = "MM-DD" if row["mode"].value == "season" else "YYYY-MM-DD"
+        row["start"].placeholder = hint
+        row["end"].placeholder = hint
+
+    def _custom_render():
+        custom_rows_box.children = tuple(row["box"] for row in _custom_rows)
+
+    def _custom_add_row(_=None, values=None):
+        """Add a row, optionally pre-filled from a pasted setting."""
+        row = _custom_row_widgets()
+        row["box"] = widgets.HBox(
+            [row["mode"], row["start"], row["end"], row["op"], row["name"],
+             row["remove"]],
+            layout=widgets.Layout(
+                width="100%", gap="4px", flex_flow="row wrap", align_items="center"
+            ),
+        )
+        if values:
+            row["mode"].value = values.get("mode", "season")
+            row["start"].value = values.get("start", "")
+            row["end"].value = values.get("end", "")
+            row["op"].value = values.get("op", "mean")
+            row["name"].value = values.get("name", "")
+        _custom_sync_placeholders(row)
+
+        def _changed(*_a):
+            _custom_sync_placeholders(row)
+            _on_composites_change()
+
+        for key in ("mode", "start", "end", "op", "name"):
+            row[key].observe(_changed, names="value")
+        row["remove"].on_click(lambda _b: _custom_remove_row(row))
+
+        # Inherit the enabled/disabled state of the section (mission gating).
+        for key in ("mode", "start", "end", "op", "name", "remove"):
+            row[key].disabled = stats_w.disabled
+
+        _custom_rows.append(row)
+        _custom_render()
+        if values is None:
+            # A blank row changes nothing yet; just refresh the note.
+            _custom_validate()
+        else:
+            _on_composites_change()
+        return row
+
+    def _custom_remove_row(row):
+        if row in _custom_rows:
+            _custom_rows.remove(row)
+        _custom_render()
+        _on_composites_change()
+
+    def _custom_clear_rows():
+        _custom_rows.clear()
+        _custom_render()
+        custom_error_note.value = ""
+
+    custom_add_btn.on_click(_custom_add_row)
+
     def _selected_composites():
-        """The composite tokens ticked in the Temporal Composites section, in a
-        stable order: the two promoted ones first, then the "More composites"
-        list. Empty list = time series only."""
+        """The composites chosen in the Temporal Composites section, in a stable
+        order: the two promoted ones, then the "More composites" list, then the
+        Custom Composites rows (dicts, understood by calculate_statistics).
+        Empty list = time series only."""
         tokens = []
         if comp_mean_w.value and not comp_mean_w.disabled:
             tokens.append("mean_timeseries")
@@ -3652,6 +3891,7 @@ def datacube_builder(missions_func=missions):
             tokens.append("median_timeseries")
         if not stats_w.disabled:
             tokens.extend(str(s) for s in stats_w.value)
+        tokens.extend(_custom_composite_specs())
         return tokens
 
     def _stats_tokens_used():
@@ -3710,11 +3950,28 @@ def datacube_builder(missions_func=missions):
 
         No-op when no composite is ticked - the cube stays the plain time
         series. Never mutates state["result"]; a derived copy is returned.
+
+        A custom composite can still be rejected here for something the rows
+        cannot check on their own - a name already taken by a band or by a
+        preset composite, or a period holding no scene at all. Report it in the
+        same red note and hand back the uncomposited cube, so the Result panel
+        keeps working instead of raising.
         """
         tokens = _selected_composites()
         if not tokens or obj is None:
             return obj
         keep_ts = bool(keep_ts_w.value) or keep_ts_w.disabled
+        try:
+            return _apply_composites_inner(obj, tokens, keep_ts)
+        except ValueError as exc:
+            custom_error_note.value = (
+                "<div style='font-size:12px; color:#b91c1c; background:#fef2f2; "
+                "border:1px solid #fecaca; border-radius:6px; padding:6px 8px;'>"
+                f"Composites not applied: {exc}</div>"
+            )
+            return obj
+
+    def _apply_composites_inner(obj, tokens, keep_ts):
         if isinstance(obj, list):
             return [
                 _apply_composites_single(o, tokens, keep_ts)
@@ -5049,7 +5306,38 @@ def datacube_builder(missions_func=missions):
         #     list. A legacy config written with the retired aggregator dropdown
         #     is translated into the equivalent composite (aggregator="median"
         #     == median_timeseries without the time series).
-        wanted_stats = [str(s) for s in (params.get("stats") or [])]
+        #     Custom composites are dicts in the same list and must be split off
+        #     BEFORE the mission-option filter below, which only knows tokens and
+        #     would otherwise report every one of them as unavailable.
+        _raw_stats = params.get("stats") or []
+        wanted_stats = [str(s) for s in _raw_stats if not isinstance(s, dict)]
+        _custom_stats = [s for s in _raw_stats if isinstance(s, dict)]
+
+        _custom_clear_rows()
+        for _spec in _custom_stats:
+            try:
+                _norm = _parse_custom_composite(_spec)
+            except ValueError as _exc:
+                warnings.append(f"Custom composite skipped - {_exc}")
+                continue
+            _custom_add_row(
+                values={
+                    "mode": _norm["mode"],
+                    "start": _norm["start"],
+                    "end": _norm["end"],
+                    "op": _norm["op"],
+                    "name": _norm["name"],
+                }
+            )
+            if _norm["years"]:
+                # The rows have no year picker: a season covers every year the
+                # cube holds. Say so rather than dropping the restriction quietly.
+                warnings.append(
+                    f"Custom composite '{_norm['name']}' was limited to years "
+                    f"{_norm['years']}; the interface applies it to every year "
+                    "of the cube."
+                )
+
         _legacy_agg = params.get("aggregator")
         _legacy_used = False
         if _legacy_agg and f"{_legacy_agg}_timeseries" not in wanted_stats:
@@ -5124,15 +5412,58 @@ def datacube_builder(missions_func=missions):
         finally:
             _cov_filter_guard["busy"] = False
 
-        # 13) Date selection cannot be restored: the picker is filled from a
-        #     built cube's time axis, which does not exist before the build.
-        if params.get("dates"):
-            warnings.append(
-                "Date selection: "
-                f"{len(params['dates'])} date(s) are stored in these settings. "
-                "Build the cube first, then pick them in Result > Date "
-                "Selection."
-            )
+        # 13) Date selection. The picker is filled from a BUILT cube's time axis,
+        #     so on the first paste there is nothing to tick - the user builds and
+        #     pastes again, and this second paste restores the exact selection.
+        #     Timestamps are normalised through numpy exactly as
+        #     get_stac_layers._normalize_dates does, so a config written from a
+        #     microsecond time axis still matches a nanosecond one.
+        _dates_json = params.get("dates")
+        if _dates_json:
+            def _iso_ns(v):
+                try:
+                    return str(np.datetime64(v, "ns"))
+                except Exception:
+                    return None
+
+            _picker_ready = bool(result_date_w.options) and not result_date_w.disabled
+            if not _picker_ready:
+                warnings.append(
+                    f"Date selection: {len(_dates_json)} date(s) are stored in "
+                    "these settings. In order to select them exactly, build the "
+                    "cube first, then paste the settings json AGAIN. You can "
+                    "ignore this same status message after pasting for the "
+                    "second time."
+                )
+            else:
+                _wanted = {n for n in (_iso_ns(d) for d in _dates_json) if n}
+                _sel = tuple(
+                    v for v in _result_date_all_values() if _iso_ns(v) in _wanted
+                )
+                if not _sel:
+                    warnings.append(
+                        f"Date selection: none of the {len(_dates_json)} stored "
+                        "date(s) is in the current cube - kept the current "
+                        "selection."
+                    )
+                else:
+                    # Guarded: one re-render below, after the selection and the
+                    # scene filters agree.
+                    _date_filter_guard["busy"] = True
+                    try:
+                        result_date_w.value = _sel
+                    finally:
+                        _date_filter_guard["busy"] = False
+                    state["date_user_selection"] = set(_sel)
+                    _sync_date_picker_to_cloud()
+                    _on_result_date_change()
+                    _missing = len(_wanted) - len(_sel)
+                    if _missing:
+                        warnings.append(
+                            f"Date selection: {_missing} of {len(_wanted)} stored "
+                            "date(s) are not in the current cube - ticked the "
+                            f"other {len(_sel)}."
+                        )
 
         return warnings
 
@@ -5487,12 +5818,18 @@ def datacube_builder(missions_func=missions):
                 comp_median_w.value = False
             if len(stats_w.value) > 0:
                 stats_w.value = ()
+            # A mission with no time axis has nothing to reduce over a period.
+            _custom_clear_rows()
 
         comp_mean_w.disabled = not supported
         comp_median_w.disabled = not supported
         stats_w.disabled = not supported
         stats_all_btn.disabled = not supported
         stats_none_btn.disabled = not supported
+        custom_add_btn.disabled = not supported
+        for _row in _custom_rows:
+            for _key in ("mode", "start", "end", "op", "name", "remove"):
+                _row[_key].disabled = not supported
         _sync_keep_timeseries()
 
     def _sync_keep_timeseries(*_):
@@ -6089,10 +6426,11 @@ def datacube_builder(missions_func=missions):
     mission_dd.observe(_update_from_mission, names="value")
 
     def _on_composites_change(*_):
-        """A composite selection changed: re-sync the keep-time-series choice
-        and re-render the Result panel so the layer list updates immediately.
-        No rebuild - composites are derived from the built time series. The
-        re-render no-ops when no cube has been built yet."""
+        """A composite selection changed: re-check the custom rows, re-sync the
+        keep-time-series choice and re-render the Result panel so the layer list
+        updates immediately. No rebuild - composites are derived from the built
+        time series. The re-render no-ops when no cube has been built yet."""
+        _custom_validate()
         _sync_keep_timeseries()
         _on_result_cloud_max_change()
 
@@ -6317,10 +6655,30 @@ def datacube_builder(missions_func=missions):
             "margin:18px 0 16px 0;'></div>"
         )
 
+    # Column captions for the Custom Composites rows. The widths mirror the row
+    # widgets in _custom_row_widgets, so the captions sit above their fields.
+    def _custom_caption(text, width):
+        return widgets.HTML(
+            f"<div style='font-size:11px; font-weight:600; color:#6b7280;'>{text}</div>",
+            layout=widgets.Layout(width=width),
+        )
+
+    _custom_header_row = widgets.HBox(
+        [
+            _custom_caption("Period", "130px"),
+            _custom_caption("From", "105px"),
+            _custom_caption("To", "105px"),
+            _custom_caption("Statistic", "105px"),
+            _custom_caption("Name", "150px"),
+            _custom_caption("", "38px"),
+        ],
+        layout=widgets.Layout(width="100%", gap="4px", flex_flow="row wrap"),
+    )
+
     # --- Temporal Composites section -----------------------------------------
     # Two promoted checkboxes (what most people want) in an accented sub-panel,
     # then the long list of the remaining ops and the monthly / annual variants
-    # in a collapsed group, then the keep-or-drop choice.
+    # in a collapsed group, the user's own periods, then the keep-or-drop choice.
     composites_box = widgets.VBox(
         [
             widgets.HTML(
@@ -6346,6 +6704,28 @@ def datacube_builder(missions_func=missions):
                 "monthly and annual composites.",
                 collapsible=True,
                 open=False,
+            ),
+            widgets.HTML("<div style='height:6px;'></div>"),
+            _field_group(
+                "Custom Composites",
+                [
+                    _custom_header_row,
+                    custom_rows_box,
+                    custom_add_btn,
+                    custom_error_note,
+                    widgets.HTML(
+                        "<div style='font-size:12px; color:#6b7280;'>"
+                        "<b>Every year</b> repeats the period in every year of "
+                        "the cube and saves one image per year, named "
+                        "<code>name_2024</code>, <code>name_2025</code>, ... "
+                        "<b>Single window</b> saves one image."
+                        "</div>"
+                    ),
+                ],
+                subtitle="Your own period, for example a growing season.",
+                collapsible=True,
+                open=False,
+                help_html=PARAM_HELP_HTML.get("custom_composites", ""),
             ),
             _line_divider(),
             keep_ts_w,
@@ -7835,6 +8215,12 @@ def datacube_builder(missions_func=missions):
             "stats": stats_w,
             "composite_mean": comp_mean_w,
             "composite_median": comp_median_w,
+            # Custom Composites: the "Add composite" button and the container
+            # whose children are the rows (each an HBox of period / from / to /
+            # statistic / name / remove).
+            "custom_add_btn": custom_add_btn,
+            "custom_rows": custom_rows_box,
+            "custom_error_note": custom_error_note,
             "keep_timeseries": keep_ts_w,
             "viz_layer": viz_layer_w,
             # Result-panel scene filters the composites reduce over.
@@ -7951,6 +8337,25 @@ def datacube_editor():
         </ul>
         Untick <b>Keep the full time series</b> to keep only the composites -
         the "just give me the median" case.
+        """,
+        "custom_composites": """
+        <b>Custom Composites</b><br>
+        A period you define yourself, instead of a whole month or year.<br><br>
+        <b>Every year</b> repeats the period in each year the cube covers. A
+        spring of <code>04-01</code> to <code>06-21</code> named
+        <code>spring_mean</code> gives <code>spring_mean_2024</code>,
+        <code>spring_mean_2025</code>, and so on - one image per year.<br><br>
+        <b>Single window</b> uses full dates and gives one image, named exactly
+        as you type it.<br><br>
+        Both dates are included. A period that starts later than it ends
+        (<code>12-01</code> to <code>02-28</code>) runs over New Year and is
+        named after the year it starts in.<br><br>
+        Composites are calculated from the dates of the current result, after
+        any filter or edit already applied - no new scenes are downloaded. A
+        year with no scene in the period is skipped.<br><br>
+        Cloudy pixels that were masked out are left out of the statistic, so a
+        pixel can be built from fewer dates than the period contains, and a
+        pixel masked on every date stays empty.
         """,
         "export_mode": """
         <b>Which format should I pick?</b><br>
@@ -8299,6 +8704,9 @@ def datacube_editor():
         stats_clear_btn.disabled = not enabled
         comp_mean_w.disabled = not enabled
         comp_median_w.disabled = not enabled
+        # Custom Composites rows follow the same gate (they read
+        # stats_select_w.disabled, so this has to come after it is set).
+        _custom_sync_enabled()
         # "Keep the full time series" additionally needs a selected composite.
         _sync_keep_timeseries()
 
@@ -9175,9 +9583,219 @@ def datacube_editor():
     )
     keep_ts_note = widgets.HTML("")
 
+    # -- Custom Composites: user-defined periods, one row each ------------------
+    # Same model as the Data Cube Builder: a row is either a season ("Every
+    # year", MM-DD, expanded to name_YYYY per year the cube covers) or a single
+    # window (full dates, one variable). Rows are added and removed at runtime,
+    # so the container's children are rebuilt rather than declared here.
+    custom_rows_box = widgets.VBox(layout=widgets.Layout(width="100%", gap="4px"))
+    custom_add_btn = widgets.Button(
+        description="Add composite",
+        icon="plus",
+        layout=widgets.Layout(width="150px"),
+        disabled=True,
+    )
+    custom_error_note = widgets.HTML("")
+
+    _custom_rows = []
+
+    def _custom_row_is_blank(row):
+        """A freshly added row the user has not touched yet - ignored quietly
+        instead of being reported as an error."""
+        return not any(
+            (row[k].value or "").strip() for k in ("start", "end", "name")
+        )
+
+    def _custom_row_spec(row):
+        """The dict this row stands for, without validating it."""
+        return {
+            "op": row["op"].value,
+            ("season" if row["mode"].value == "season" else "window"): [
+                (row["start"].value or "").strip(),
+                (row["end"].value or "").strip(),
+            ],
+            "name": (row["name"].value or "").strip(),
+        }
+
+    def _custom_row_error(row, names_seen):
+        """A short, plain problem description for this row, or None when it is
+        fine. Short messages for the everyday mistakes, then the shared parser
+        as the final authority so nothing calculate_statistics rejects gets
+        through here."""
+        seasonal = row["mode"].value == "season"
+        start = (row["start"].value or "").strip()
+        end = (row["end"].value or "").strip()
+        name = (row["name"].value or "").strip()
+        fmt = "MM-DD" if seasonal else "YYYY-MM-DD"
+
+        if not start or not end:
+            return f"fill both dates as {fmt}."
+        if not name:
+            return "give the composite a name."
+        if name in names_seen:
+            return f"the name '{name}' is already used by another row."
+
+        try:
+            _parse_custom_composite(_custom_row_spec(row))
+        except ValueError:
+            checker = is_mmdd if seasonal else is_iso_date
+            if not checker(start) or not checker(end):
+                return f"dates must be written as {fmt}."
+            if not seasonal and start > end:
+                return "the start date is after the end date."
+            return (
+                "the name can only use letters, digits and _ , and cannot start "
+                "with a digit."
+            )
+        return None
+
+    def _custom_composite_specs():
+        """The valid custom composites, in row order, in the input form
+        calculate_statistics accepts. Blank and broken rows are left out -
+        _custom_validate() is what tells the user about them."""
+        specs = []
+        names_seen = set()
+        for row in _custom_rows:
+            if _custom_row_is_blank(row) or row["op"].disabled:
+                continue
+            if _custom_row_error(row, names_seen) is not None:
+                continue
+            names_seen.add((row["name"].value or "").strip())
+            spec = _custom_row_spec(row)
+            _parse_custom_composite(spec)  # validated, but keep the input form
+            specs.append(spec)
+        return specs
+
+    def _custom_validate(*_):
+        """Refresh the red note under the rows. Rows listed here are skipped by
+        the Edit, never silently applied."""
+        problems = []
+        names_seen = set()
+        for i, row in enumerate(_custom_rows):
+            if _custom_row_is_blank(row) or row["op"].disabled:
+                continue
+            err = _custom_row_error(row, names_seen)
+            if err:
+                problems.append(f"Row {i + 1}: {err}")
+            else:
+                names_seen.add((row["name"].value or "").strip())
+        if problems:
+            custom_error_note.value = (
+                "<div style='font-size:12px; color:#b91c1c; background:#fef2f2; "
+                "border:1px solid #fecaca; border-radius:6px; padding:6px 8px;'>"
+                "Ignored until fixed:<br>" + "<br>".join(problems) + "</div>"
+            )
+        else:
+            custom_error_note.value = ""
+
+    def _custom_row_widgets():
+        """One editable row: period type, the two dates, the statistic, the
+        name, and the button that removes it."""
+        mode = widgets.Dropdown(
+            options=[("Every year", "season"), ("Single window", "window")],
+            value="season",
+            layout=widgets.Layout(width="130px"),
+        )
+        # continuous_update=False: the value only changes when the field is left
+        # (or Enter is pressed), so a half-typed date is never checked.
+        start = widgets.Text(
+            value="", placeholder="MM-DD", continuous_update=False,
+            layout=widgets.Layout(width="105px"),
+        )
+        end = widgets.Text(
+            value="", placeholder="MM-DD", continuous_update=False,
+            layout=widgets.Layout(width="105px"),
+        )
+        op = widgets.Dropdown(
+            options=sorted(_COMPOSITE_OPS),
+            value="mean",
+            layout=widgets.Layout(width="105px"),
+        )
+        name = widgets.Text(
+            value="", placeholder="name", continuous_update=False,
+            layout=widgets.Layout(width="150px"),
+        )
+        remove = widgets.Button(
+            icon="times",
+            tooltip="Remove this composite",
+            layout=widgets.Layout(width="38px"),
+        )
+        return {
+            "mode": mode, "start": start, "end": end,
+            "op": op, "name": name, "remove": remove,
+        }
+
+    def _custom_sync_placeholders(row):
+        """Season rows take MM-DD, single windows take full dates."""
+        hint = "MM-DD" if row["mode"].value == "season" else "YYYY-MM-DD"
+        row["start"].placeholder = hint
+        row["end"].placeholder = hint
+
+    def _custom_render():
+        custom_rows_box.children = tuple(row["box"] for row in _custom_rows)
+
+    def _custom_add_row(_=None, values=None):
+        row = _custom_row_widgets()
+        row["box"] = widgets.HBox(
+            [row["mode"], row["start"], row["end"], row["op"], row["name"],
+             row["remove"]],
+            layout=widgets.Layout(
+                width="100%", gap="4px", flex_flow="row wrap", align_items="center"
+            ),
+        )
+        if values:
+            row["mode"].value = values.get("mode", "season")
+            row["start"].value = values.get("start", "")
+            row["end"].value = values.get("end", "")
+            row["op"].value = values.get("op", "mean")
+            row["name"].value = values.get("name", "")
+        _custom_sync_placeholders(row)
+
+        def _changed(*_a):
+            _custom_sync_placeholders(row)
+            _custom_validate()
+            _sync_keep_timeseries()
+
+        for key in ("mode", "start", "end", "op", "name"):
+            row[key].observe(_changed, names="value")
+        row["remove"].on_click(lambda _b: _custom_remove_row(row))
+
+        # Inherit the enabled/disabled state of the section (no cube loaded yet).
+        for key in ("mode", "start", "end", "op", "name", "remove"):
+            row[key].disabled = stats_select_w.disabled
+
+        _custom_rows.append(row)
+        _custom_render()
+        _custom_validate()
+        _sync_keep_timeseries()
+        return row
+
+    def _custom_remove_row(row):
+        if row in _custom_rows:
+            _custom_rows.remove(row)
+        _custom_render()
+        _custom_validate()
+        _sync_keep_timeseries()
+
+    def _custom_clear_rows():
+        _custom_rows.clear()
+        _custom_render()
+        custom_error_note.value = ""
+
+    def _custom_sync_enabled():
+        """Follow the rest of the section: greyed until a cube is loaded."""
+        off = stats_select_w.disabled
+        custom_add_btn.disabled = off
+        for row in _custom_rows:
+            for key in ("mode", "start", "end", "op", "name", "remove"):
+                row[key].disabled = off
+
+    custom_add_btn.on_click(_custom_add_row)
+
     def _selected_composites():
-        """The composite tokens ticked in the Temporal Composites section, in a
-        stable order: the two promoted ones first, then "More Composites"."""
+        """The composites chosen in the Temporal Composites section, in a stable
+        order: the two promoted ones, then "More Composites", then the Custom
+        Composites rows (dicts, understood by calculate_statistics)."""
         tokens = []
         if comp_mean_w.value and not comp_mean_w.disabled:
             tokens.append("mean_timeseries")
@@ -9185,6 +9803,7 @@ def datacube_editor():
             tokens.append("median_timeseries")
         if not stats_select_w.disabled:
             tokens.extend(str(s) for s in stats_select_w.value)
+        tokens.extend(_custom_composite_specs())
         return tokens
 
     def _sync_keep_timeseries(*_):
@@ -11392,6 +12011,26 @@ def datacube_editor():
     indices_acc.set_title(0, "Calculate Spectral Indices")
     indices_acc.layout = widgets.Layout(width="99%")
 
+    # Column captions for the Custom Composites rows. The widths mirror the row
+    # widgets in _custom_row_widgets, so the captions sit above their fields.
+    def _custom_caption(text, width):
+        return widgets.HTML(
+            f"<div style='font-size:11px; font-weight:600; color:#6b7280;'>{text}</div>",
+            layout=widgets.Layout(width=width),
+        )
+
+    _custom_header_row = widgets.HBox(
+        [
+            _custom_caption("Period", "130px"),
+            _custom_caption("From", "105px"),
+            _custom_caption("To", "105px"),
+            _custom_caption("Statistic", "105px"),
+            _custom_caption("Name", "150px"),
+            _custom_caption("", "38px"),
+        ],
+        layout=widgets.Layout(width="100%", gap="4px", flex_flow="row wrap"),
+    )
+
     # Temporal Composites: the mean/median Temporal Composite dropdown that used
     # to live in Export Options is now the two promoted checkboxes here, plus
     # "Keep the full time series" - one section for one concept, matching the
@@ -11458,6 +12097,28 @@ def datacube_editor():
                 "monthly and annual composites.",
                 collapsible=True,
                 open=False,
+            ),
+            widgets.HTML("<div style='height:6px;'></div>"),
+            _field_group(
+                "Custom Composites",
+                [
+                    _custom_header_row,
+                    custom_rows_box,
+                    custom_add_btn,
+                    custom_error_note,
+                    widgets.HTML(
+                        "<div style='font-size:12px; color:#6b7280;'>"
+                        "<b>Every year</b> repeats the period in every year of "
+                        "the cube and saves one image per year, named "
+                        "<code>name_2024</code>, <code>name_2025</code>, ... "
+                        "<b>Single window</b> saves one image."
+                        "</div>"
+                    ),
+                ],
+                subtitle="Your own period, for example a growing season.",
+                collapsible=True,
+                open=False,
+                help_html=HELP_HTML.get("custom_composites", ""),
             ),
             _line_divider(),
             keep_ts_w,
@@ -11802,6 +12463,12 @@ def datacube_editor():
             "stats_select": stats_select_w,
             "composite_mean": comp_mean_w,
             "composite_median": comp_median_w,
+            # Custom Composites: the "Add composite" button and the container
+            # whose children are the rows (each an HBox of period / from / to /
+            # statistic / name / remove).
+            "custom_add_btn": custom_add_btn,
+            "custom_rows": custom_rows_box,
+            "custom_error_note": custom_error_note,
             "keep_timeseries": keep_ts_w,
             "edit_btn": edit_btn,
             "update_run_btn": update_run_btn,

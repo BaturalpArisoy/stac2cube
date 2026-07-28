@@ -1,5 +1,70 @@
+import datetime
+import re
+
 import numpy as np
 import xarray as xr
+
+
+# ==========================================================
+# SEASON / DATE WINDOW HELPERS
+# ==========================================================
+# Shared by the seasonal `daterange` of get_stac_layers (which searches STAC one
+# season window per year) and the custom seasonal composites of
+# calculate_statistics (which reduces an already-built cube over the same
+# windows), so both read "MM-DD" exactly the same way. They live here rather
+# than in get_data because get_data pulls odc/pystac/geopandas at import.
+_MMDD_RE = re.compile(r"^\d{2}-\d{2}$")
+_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def is_mmdd(s) -> bool:
+    """Return True if string is in MM-DD format and represents a valid calendar day."""
+    if not isinstance(s, str) or not _MMDD_RE.match(s.strip()):
+        return False
+    mm, dd = map(int, s.strip().split("-"))
+    try:
+        # Use a leap year to allow 02-29 in case someone needs it
+        datetime.date(2000, mm, dd)
+    except ValueError:
+        return False
+    return True
+
+
+def is_iso_date(s) -> bool:
+    """Return True if string is a valid YYYY-MM-DD calendar date."""
+    if not isinstance(s, str) or not _ISO_DATE_RE.match(s.strip()):
+        return False
+    try:
+        datetime.date.fromisoformat(s.strip())
+    except ValueError:
+        return False
+    return True
+
+
+def season_crosses_year(start_md: str, end_md: str) -> bool:
+    """True when a MM-DD season starts later in the calendar than it ends, i.e.
+    it runs over New Year (e.g. 11-01 .. 03-31)."""
+    sm, sd = map(int, start_md.split("-"))
+    em, ed = map(int, end_md.split("-"))
+    return (sm, sd) > (em, ed)
+
+
+def expand_season_windows(start_md: str, end_md: str, years):
+    """Expand a season (MM-DD .. MM-DD) into per-year concrete ISO windows.
+
+    If start_md is later than end_md (e.g. 11-01 .. 03-31), season crosses year
+    boundary and the window is labelled by its START year.
+    """
+    crosses_year = season_crosses_year(start_md, end_md)
+
+    windows = []
+    for y in years:
+        start_date = f"{int(y)}-{start_md}"
+        end_year = int(y) + 1 if crosses_year else int(y)
+        end_date = f"{end_year}-{end_md}"
+        windows.append([start_date, end_date])
+
+    return windows
 
 
 def cloud_mask(stac, mission, keep_clouds=False, keep_layer=False):

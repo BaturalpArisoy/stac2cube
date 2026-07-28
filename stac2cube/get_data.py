@@ -1,5 +1,9 @@
 from .vector_refiner import polygon_2_bbox
 from .cdse_auth import configure_cdse_environment, configure_anonymous_aws_environment
+from .stac_processing import (
+    expand_season_windows as _expand_season_windows,
+    is_mmdd as _is_mmdd,
+)
 
 import pandas as pd
 import geopandas as gpd
@@ -1239,20 +1243,8 @@ def get_stac(
 # ==========================================================
 # DATE RANGE HELPERS
 # ==========================================================
-_MMDD_RE = re.compile(r"^\d{2}-\d{2}$")
-
-
-def _is_mmdd(s: str) -> bool:
-    """Return True if string is in MM-DD format and represents a valid calendar day."""
-    if not isinstance(s, str) or not _MMDD_RE.match(s.strip()):
-        return False
-    mm, dd = map(int, s.split("-"))
-    try:
-        # Use a leap year to allow 02-29 in case someone needs it
-        datetime.date(2000, mm, dd)
-    except ValueError:
-        return False
-    return True
+# _is_mmdd / _expand_season_windows are imported from stac_processing, shared
+# with the custom seasonal composites of calculate_statistics.
 
 
 def _parse_season_daterange(daterange):
@@ -1336,26 +1328,6 @@ def _parse_years_spec(years_spec, mission: str):
     raise ValueError(
         "Invalid years specification. Use 'all', [2019,2020], '2019-2024', or '2019,2021,2023'."
     )
-
-
-def _expand_season_windows(start_md: str, end_md: str, years):
-    """Expand a season (MM-DD .. MM-DD) into per-year concrete ISO windows.
-
-    If start_md is later than end_md (e.g. 11-01 .. 03-31), season crosses year boundary.
-    """
-    sm, sd = map(int, start_md.split("-"))
-    em, ed = map(int, end_md.split("-"))
-    crosses_year = (sm, sd) > (em, ed)
-
-    windows = []
-    for y in years:
-        start_date = f"{int(y)}-{start_md}"
-        end_year = int(y) + 1 if crosses_year else int(y)
-        end_date = f"{end_year}-{end_md}"
-        windows.append([start_date, end_date])
-
-    return windows
-
 
 
 def _catalogue_search(catalog, collection, bbox, daterange, query, mission,
