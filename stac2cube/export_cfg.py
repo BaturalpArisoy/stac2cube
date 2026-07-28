@@ -300,11 +300,25 @@ def _strip_netcdf_encoding(ds):
     Needed before a Zarr write: encoding inherited from a NetCDF source (or set
     by :func:`_set_compression`) carries keys like ``chunksizes``/``zlib`` that
     Zarr does not understand and that would raise on ``to_zarr``.
+
+    ``_FillValue`` is deliberately NOT in that list even though xarray's Zarr
+    backend rejects it, because the backend never sees it: ``to_zarr`` runs
+    ``encode_cf_variable`` first, which moves ``_FillValue`` out of encoding and
+    into attrs (and the error is raised only afterwards, for whatever survives).
+    Dropping it here instead defeated that encode step - and for a cube read
+    from a PACKED NetCDF, where ``_FillValue`` is the only record of the
+    no-data value and ``encoding["dtype"]`` is still int16, that silently lost
+    data: with no fill value to substitute, the float NaNs were cast straight
+    to int16 and came back as arbitrary numbers rather than NaN (xarray warns
+    "saving variable with floating point data as an integer dtype without any
+    _FillValue to use for NaNs", easy to miss in a batch export). Keeping the
+    key lets the NaNs be encoded as -32768 and the CF attribute be written, so
+    the store round-trips.
     """
     for var in ds.variables.values():
         for stale in (
             "contiguous", "chunksizes", "zlib", "complevel", "shuffle",
-            "fletcher32", "preferred_chunks", "compression", "_FillValue",
+            "fletcher32", "preferred_chunks", "compression",
         ):
             var.encoding.pop(stale, None)
 
@@ -343,6 +357,71 @@ def _set_zarr_shuffle(ds):
         )
 
 
+def _set_zarr_fill_value(ds):
+    """Make each array's native Zarr ``fill_value`` match its CF ``_FillValue``.
+
+    Zarr stores the no-data value twice over: once as the array's own
+    ``fill_value`` in ``zarr.json``, and once as the CF ``_FillValue``
+    attribute. xarray keeps them in sync only for Zarr *v2*, where the writer
+    reads ``attrs["_FillValue"]`` directly; on *v3* - the format zarr-python 3
+    writes by default - it instead reads ``encoding["fill_value"]``, defaults a
+    missing one to NaN for floats, and leaves INTEGER arrays to zarr's own
+    default of 0.
+
+    That default is actively wrong for the int16-packed cubes
+    (``pack_to_int16``): their CF ``_FillValue`` is -32768, so a native
+    ``fill_value`` of 0 declares the packed integer 0 - which decodes to
+    ``add_offset``, an ordinary mid-range reflectance - to be no-data. xarray
+    reads such a store back correctly (it honors the CF attribute), but readers
+    that go by the native value do not: GDAL/QGIS report ``NoDataValue = 0``
+    and punch every pixel that happens to pack to 0 out of the image, scattered
+    across the scene. The equivalent NetCDF has only the CF attribute, so it
+    shows no such holes - the cubes differ purely in declared metadata, not in
+    a single pixel value.
+
+    Setting the encoding key fixes both readers at once and costs nothing: on
+    v3 the CF attribute is written alongside it regardless, so xarray's own
+    decoding is unchanged. Left alone on v2, where ``fill_value`` is not a
+    valid encoding key (xarray raises) and the attrs path already does the
+    right thing.
+
+    The CF ``_FillValue`` is treated as authoritative and overwrites any
+    ``fill_value`` already in ``.encoding``. That is not paranoia: reading a
+    Zarr store back stores its native fill in ``encoding["fill_value"]``, so a
+    cube that came from a Zarr input carries the SOURCE store's value - which
+    is stale the moment the pipeline changes the array (super-resolving a
+    float32 cube, whose inherited fill is NaN, into an int16-packed one). Like
+    the NetCDF keys :func:`_strip_netcdf_encoding` drops, an inherited fill
+    describes where the data was read from, not where it is going.
+    """
+    try:
+        import zarr
+
+        if int(zarr.config.get("default_zarr_format", 3)) != 3:
+            return
+    except Exception:
+        return
+    for var in ds.variables.values():
+        fill = var.attrs.get("_FillValue", var.encoding.get("_FillValue"))
+        dtype = np.dtype(var.encoding.get("dtype", var.dtype))
+        if fill is None:
+            # No CF no-data value to honor. Drop an inherited fill that the
+            # outgoing dtype cannot represent (a NaN carried onto an integer
+            # array), which zarr would reject, and let xarray default it.
+            stale = var.encoding.get("fill_value")
+            if (
+                stale is not None
+                and dtype.kind in "iu"
+                and not np.isfinite(stale)
+            ):
+                var.encoding.pop("fill_value")
+            continue
+        # Cast so the value written matches the array's own dtype exactly.
+        var.encoding["fill_value"] = (
+            dtype.type(fill) if dtype.kind in "iufc" else fill
+        )
+
+
 def _write_zarr(ds, output, overwrite):
     """Write ``ds`` to a Zarr store, streaming chunks from dask.
 
@@ -359,6 +438,7 @@ def _write_zarr(ds, output, overwrite):
     import shutil
     import warnings
 
+    _set_zarr_fill_value(ds)
     _strip_netcdf_encoding(ds)
     _set_zarr_shuffle(ds)
 
