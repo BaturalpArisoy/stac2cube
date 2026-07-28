@@ -477,6 +477,7 @@ def super_resolve_cube(
     precision: str = "auto",        # "auto" | "fp32" | "fp16" | "bf16"
     compress: bool = False,         # zlib-compress the output NetCDF (lossless, ~10x slower export)
     pack_to_int16: bool = True,     # CF scale/offset int16 packing (near-lossless, 2x smaller, fast)
+    vrt: bool = False,              # also write a QGIS band-mapping .vrt (NetCDF only)
 ):
     """
     Super-resolve full cube.
@@ -1009,6 +1010,16 @@ def super_resolve_cube(
             ds_out[var_name].encoding.update(var_encoding)
         ds_out.to_netcdf(output_path)
         size_mb = os.path.getsize(output_path) / 1e6
+        if vrt:
+            # NetCDF only (a VRT cannot read a Zarr store's pixels back). A
+            # failure must not lose the cube that was just written.
+            from .export_cfg import write_qgis_vrt
+
+            try:
+                print(f"QGIS band-labelled VRT: {write_qgis_vrt(output_path)}")
+            except Exception as exc:
+                print(f"Note: could not write the QGIS VRT ({exc}). "
+                      "The NetCDF is fine.")
     target_str = "10-meters" if model_type_used == "20to10" else "2.5-meters"
     print(
         f"Data cube is super-resolved to {target_str}! "

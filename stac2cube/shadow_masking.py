@@ -454,6 +454,7 @@ def get_shadow_layers(
     output_shadows=None,
     output_masked=None,
     compress=False,
+    vrt=False,
 ):
     """Detect cloud shadows in a Sentinel-2 L2A cube (GEE s2cloudless approach).
 
@@ -665,7 +666,8 @@ def get_shadow_layers(
         )
 
         if output_shadows is not None:
-            export_stac(stack, output_shadows, crs, transform, compress=compress)
+            export_stac(stack, output_shadows, crs, transform,
+                        compress=compress, vrt=vrt)
 
         if masking or output_masked is not None:
             # Record the masking recipe so update mode can reproduce it. SCL
@@ -682,7 +684,7 @@ def get_shadow_layers(
             }
             masked = mask_stac_clouds(
                 cube, stack, "cloudshadow_mask", output_masked, compress=compress,
-                cloud_status=_status, shadow_attrs=_shadow_attrs,
+                vrt=vrt, cloud_status=_status, shadow_attrs=_shadow_attrs,
             )
             if output_masked is None:
                 # The in-memory masked cube is lazy and still reads from the

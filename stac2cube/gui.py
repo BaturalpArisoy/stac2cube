@@ -1925,17 +1925,40 @@ def datacube_builder(missions_func=missions):
     )
     export_compress_warn_html.layout.display = "none"
 
+    # Writes a small .vrt beside the NetCDF that labels every band with its date
+    # and band name, so a GIS shows "2024-04-01 red" instead of "Band 3". NetCDF
+    # only: COGs already carry band names, and a VRT over a Zarr store cannot
+    # read its pixels back (see write_qgis_vrt).
+    export_vrt_w = widgets.Checkbox(
+        value=False,
+        description="Export Band Mapping for GIS Tools",
+        indent=False,
+        layout=widgets.Layout(width="auto"),
+    )
+    export_vrt_note_html = widgets.HTML(
+        "<div style='font-size:12px; color:#555; margin-left:2px;'>"
+        "&#8505;&#65039; Open the <b>.vrt</b> file in QGIS, not the .nc, "
+        "and keep both files in the same folder.</div>"
+    )
+    export_vrt_note_html.layout.display = "none"
+
     def _apply_compress_visibility(*_):
-        # The zlib option only applies to NetCDF; hide it entirely for cogs /
-        # zarr (already compressed) / lazy. The warning shows only when the
-        # option is both visible and ticked.
+        # Both options are NetCDF-only (Zarr and COGs bring their own codecs,
+        # and a VRT cannot read a Zarr store's pixels back), so hide them
+        # entirely for the other modes. Each explanation shows only when its
+        # own box is both visible and ticked.
         show = export_mode_w.value == "netcdf"
         export_compress_w.layout.display = "" if show else "none"
         export_compress_warn_html.layout.display = (
             "" if (show and export_compress_w.value) else "none"
         )
+        export_vrt_w.layout.display = "" if show else "none"
+        export_vrt_note_html.layout.display = (
+            "" if (show and export_vrt_w.value) else "none"
+        )
 
     export_compress_w.observe(_apply_compress_visibility, names="value")
+    export_vrt_w.observe(_apply_compress_visibility, names="value")
 
     browse_polygon_btn = widgets.Button(
         description="",
@@ -4329,16 +4352,17 @@ def datacube_builder(missions_func=missions):
                 stem = export_target
             ext = want_ext
             compress = bool(export_compress_w.value)
+            want_vrt = bool(export_vrt_w.value) and export_mode == "netcdf"
             for i, c in enumerate(cubes, 1):
                 out_i = f"{stem}_{i}{ext}"
                 Path(out_i).parent.mkdir(parents=True, exist_ok=True)
                 if isinstance(c, xr.DataArray):
                     export_stac(c, out_i, var_name=(c.name or "Time_Series"),
-                                compress=compress)
+                                compress=compress, vrt=want_vrt)
                 else:
                     crs_ref, transform_ref = _ref(c)
                     export_stac(c, out_i, crs=crs_ref, transform=transform_ref,
-                                compress=compress)
+                                compress=compress, vrt=want_vrt)
                 written.append(out_i)
             return {"mode": export_mode, "target": export_target, "files": written, "count": n}
 
@@ -4492,6 +4516,9 @@ def datacube_builder(missions_func=missions):
 
             Path(target).parent.mkdir(parents=True, exist_ok=True)
             compress = bool(export_compress_w.value)
+            # NetCDF-only sidecar; export_stac ignores it on the Zarr path, but
+            # gate it here too so the intent is visible at the call site.
+            want_vrt = bool(export_vrt_w.value) and export_mode == "netcdf"
 
             if isinstance(obj, xr.DataArray):
                 export_stac(
@@ -4499,6 +4526,7 @@ def datacube_builder(missions_func=missions):
                     output=target,
                     var_name=(obj.name or "Time_Series"),
                     compress=compress,
+                    vrt=want_vrt,
                 )
 
             elif isinstance(obj, xr.Dataset):
@@ -4529,7 +4557,7 @@ def datacube_builder(missions_func=missions):
 
                 export_stac(
                     stac=obj, output=target, crs=crs_ref, transform=transform_ref,
-                    compress=compress,
+                    compress=compress, vrt=want_vrt,
                 )
 
             else:
@@ -4718,6 +4746,8 @@ def datacube_builder(missions_func=missions):
                 # their own codecs), and the checkbox is hidden - not reset -
                 # for the other modes, so pin it to the mode it applies to.
                 "compress": bool(export_compress_w.value) and export_mode == "netcdf",
+                # Same NetCDF-only pinning for the QGIS band-mapping sidecar.
+                "vrt": bool(export_vrt_w.value) and export_mode == "netcdf",
             }
         }
 
@@ -5072,6 +5102,10 @@ def datacube_builder(missions_func=missions):
                 "kept the current choice."
             )
         export_compress_w.value = bool(params.get("compress"))
+        # Absent from an older/hand-written config -> keep the default (on)
+        # rather than silently turning the sidecar off.
+        if "vrt" in params:
+            export_vrt_w.value = bool(params.get("vrt"))
         if not export_granule_meta_w.disabled:
             export_granule_meta_w.value = params.get("metadata_output") is not None
 
@@ -5362,6 +5396,16 @@ def datacube_builder(missions_func=missions):
         mode = export_mode_w.value
         current = (export_target_w.value or "").strip()
 
+        # The COG default is a FOLDER, so it is meaningless as a file/store path
+        # and must be cleared when switching to netcdf or zarr. Listed once
+        # here because all three branches need to recognise it - keeping the
+        # list in only one of them is what left "./results/cogs" sitting in the
+        # field after a cogs -> zarr switch.
+        cog_defaults = ("./results/cogs", "results/cogs", r"results\cogs")
+        if current in cog_defaults and mode in ("netcdf", "zarr"):
+            current = ""
+            export_target_w.value = ""
+
         # Show the zlib option only in NetCDF mode.
         _apply_compress_visibility()
 
@@ -5379,9 +5423,8 @@ def datacube_builder(missions_func=missions):
             export_target_w.description = "Export file:"
             export_target_w.placeholder = "./results/test.nc"
 
-            if current in ["./results/cogs", "results/cogs", r"results\cogs"]:
-                export_target_w.value = ""
-            elif current.lower().endswith(".zarr"):
+            # (a leftover COG folder path was already cleared above)
+            if current.lower().endswith(".zarr"):
                 # Switching zarr -> netcdf: keep the name, swap the extension.
                 export_target_w.value = f"{os.path.splitext(current)[0]}.nc"
 
@@ -5412,11 +5455,16 @@ def datacube_builder(missions_func=missions):
             browse_output_btn.disabled = False
             export_target_w.description = "Export dir:"
             export_target_w.placeholder = "./results/cogs"
-            # Replace an empty field OR a leftover auto NetCDF suggestion with the
-            # COG default, so switching netcdf -> cogs updates the recommendation
-            # (mirrors how netcdf mode clears a leftover cogs path above). A path
-            # the user typed themselves is preserved.
-            if current == "" or current == state.get("last_auto_netcdf_suggestion"):
+            # COGs write to a DIRECTORY, so any ".nc"/".zarr" path left over
+            # from another mode is meaningless here - it would create a folder
+            # literally named "*.nc". Drop it whether it was suggested or typed
+            # (a file name is simply the wrong kind of thing) and offer the COGs
+            # default. A folder path the user typed has no cube extension, so it
+            # survives. Same rule as the Data Cube Editor.
+            if current.lower().endswith((".nc", ".zarr")):
+                export_target_w.value = ""
+
+            if not export_target_w.value:
                 export_target_w.value = "./results/cogs"
 
             _sync_output_filechooser_from_mode_and_text()
@@ -7458,9 +7506,13 @@ def datacube_builder(missions_func=missions):
         "Export mode & Output",
         [
             _with_help_left(export_mode_w, "export_mode", label_text="Export mode"),
-            _stacked_field(output_input_box, "Output"),
+            # Both are NetCDF-only switches, so they sit with the mode that
+            # owns them rather than below the shared Output field.
             export_compress_w,
             export_compress_warn_html,
+            export_vrt_w,
+            export_vrt_note_html,
+            _stacked_field(output_input_box, "Output"),
         ],
     )
 
@@ -8284,6 +8336,7 @@ def datacube_editor():
         export_mode_w.disabled = not enabled
         aggregator_w.disabled = not enabled
         export_compress_w.disabled = not enabled
+        export_vrt_w.disabled = not enabled
         if enabled:
             _set_export_mode_defaults()
         else:
@@ -8553,6 +8606,7 @@ def datacube_editor():
 
             Path(target).parent.mkdir(parents=True, exist_ok=True)
             compress = bool(export_compress_w.value) if mode == "netcdf" else False
+            want_vrt = bool(export_vrt_w.value) if mode == "netcdf" else False
 
             if isinstance(obj, xr.DataArray):
                 export_stac(
@@ -8560,6 +8614,7 @@ def datacube_editor():
                     output=target,
                     var_name=(obj.name or "Time_Series"),
                     compress=compress,
+                    vrt=want_vrt,
                 )
                 return {"mode": mode, "target": target}
 
@@ -8571,6 +8626,7 @@ def datacube_editor():
                 crs=crs_ref,
                 transform=transform_ref,
                 compress=compress,
+                vrt=want_vrt,
             )
             return {"mode": mode, "target": target}
 
@@ -9277,16 +9333,39 @@ def datacube_editor():
     )
     export_compress_warn_html.layout.display = "none"
 
+    # QGIS band-mapping sidecar, same option as the Data Cube Builder.
+    export_vrt_w = widgets.Checkbox(
+        value=False,
+        description="Export Band Mapping for GIS Tools",
+        indent=False,
+        layout=widgets.Layout(width="auto"),
+        disabled=True,
+    )
+    export_vrt_note_html = widgets.HTML(
+        "<div style='font-size:12px; color:#555; margin-left:2px;'>"
+        "&#8505;&#65039; Open the <b>.vrt</b> file in QGIS, not the .nc, "
+        "and keep both files in the same folder.</div>"
+    )
+    export_vrt_note_html.layout.display = "none"
+
     def _apply_editor_compress_visibility(*_):
-        # The zlib option only applies to NetCDF; hide it for cogs (already
-        # compressed). The warning shows only when the option is visible + ticked.
+        # Both options are NetCDF-only; hide them for cogs / zarr. Each
+        # explanation shows only when its own box is visible + ticked.
         show = export_mode_w.value == "netcdf"
         export_compress_w.layout.display = "" if show else "none"
         export_compress_warn_html.layout.display = (
             "" if (show and export_compress_w.value) else "none"
         )
+        export_vrt_w.layout.display = "" if show else "none"
+        export_vrt_note_html.layout.display = (
+            "" if (show and export_vrt_w.value) else "none"
+        )
 
     export_compress_w.observe(_apply_editor_compress_visibility, names="value")
+    export_vrt_w.observe(_apply_editor_compress_visibility, names="value")
+    # Set the initial visibility explicitly instead of relying on the export
+    # mode happening to default to NetCDF.
+    _apply_editor_compress_visibility()
 
     # Legacy: the mean/median Temporal Composite dropdown that used to sit in
     # Export Options. Replaced by the Temporal Composites section, where it is
@@ -11499,9 +11578,13 @@ def datacube_editor():
             # Composites feature above, so this section is about format and
             # path again.
             _stacked_field_with_help(export_mode_w, "Export mode", "export_mode"),
-            _stacked_field(export_input_box, "Output"),
+            # NetCDF-only switches sit with the mode that owns them, above the
+            # shared Output field (same order as the Data Cube Builder).
             export_compress_w,
             export_compress_warn_html,
+            export_vrt_w,
+            export_vrt_note_html,
+            _stacked_field(export_input_box, "Output"),
         ],
         layout=widgets.Layout(width="100%", gap="6px"),
     )
@@ -11787,7 +11870,6 @@ def ard_cube_tools():
     # Outputs
     # -----------------------------------------
     loaded_summary_out = widgets.Output(layout=widgets.Layout(width="99%", max_height="420px", overflow="auto"))
-    result_out = widgets.Output(layout=widgets.Layout(width="99%", max_height="420px", overflow="auto"))
     status_out = widgets.Output(layout=widgets.Layout(width="99%", max_height="260px", overflow="auto"))
 
     def _status(*lines, append=False):
@@ -11819,36 +11901,6 @@ def ard_cube_tools():
             return mtime, size
         st = p.stat()
         return st.st_mtime, st.st_size
-
-    def _show_result_from_path(nc_path: str):
-        with result_out:
-            clear_output()
-            if not nc_path:
-                print("No exported result yet.")
-                return
-
-            p = Path(nc_path)
-            if not p.exists():
-                print(f"Exported file not found: {p.as_posix()}")
-                return
-
-            print(f"Exported file: {p.as_posix()}")
-            with open_cube(p) as ds:
-                if "Time_Series" in ds.data_vars:
-                    display(ds["Time_Series"])
-                elif "Cloud_Stack" in ds.data_vars:
-                    display(ds["Cloud_Stack"])
-                else:
-                    rasters = _raster_layer_names(ds)
-                    if len(rasters) == 1:
-                        display(ds[rasters[0]])
-                    else:
-                        display(ds)
-
-        try:
-            result_acc.selected_index = 0
-        except Exception:
-            pass
 
     # -----------------------------------------
     # File chooser helper (optional)
@@ -12151,6 +12203,62 @@ def ard_cube_tools():
     # --- Tool 1: Cloud Masking Data Cube (a) Fully Automated Workflow) ---
     # NOTE: threshold + outputs live inside sub-accordion (a)
 
+    # Umbrella NetCDF output options for the whole cloud/shadow tool. This
+    # section writes from six places ((a)'s masked cube and cloud layers, plus
+    # (b) i-iv), so per-export checkboxes would mean repeating the same pair six
+    # times; one group above (a) and (b) applies to all of them.
+    cm_compress_w = widgets.Checkbox(
+        value=False,
+        description="Lossless compression (zlib)",
+        indent=False,
+        layout=widgets.Layout(width="auto"),
+    )
+    cm_compress_warn_html = widgets.HTML(
+        "<div style='font-size:12px; color:#b00020;'>"
+        "⚠️ <b>Warning:</b> compression shrinks the output file a further "
+        "~20-40% (scene-dependent), but the export step takes roughly "
+        "<b>10x longer</b>. Enable it only for archiving, when disk space "
+        "matters more than your time.</div>"
+    )
+    cm_compress_warn_html.layout.display = "none"
+    cm_vrt_w = widgets.Checkbox(
+        value=False,
+        description="Export Band Mapping for GIS Tools",
+        indent=False,
+        layout=widgets.Layout(width="auto"),
+    )
+    cm_vrt_note_html = widgets.HTML(
+        "<div style='font-size:12px; color:#555; margin-left:2px;'>"
+        "&#8505;&#65039; Open the <b>.vrt</b> file in QGIS, not the .nc, "
+        "and keep both files in the same folder.</div>"
+    )
+    cm_vrt_note_html.layout.display = "none"
+    cm_scope_html = widgets.HTML(
+        "<div style='font-size:12px; color:#555;'>"
+        "&#8505;&#65039; These settings will be applied to all exportings.</div>"
+    )
+
+    def _sync_cm_output_options(*_):
+        """Hide the pair for a Zarr cube (same rule as the other two tools)."""
+        lp = state.get("loaded_path")
+        zarr_loaded = bool(lp) and is_zarr_path(lp)
+        if zarr_loaded:
+            cm_compress_w.value = False
+            cm_vrt_w.value = False
+        for w in (cm_compress_w, cm_vrt_w):
+            w.layout.display = "none" if zarr_loaded else ""
+            w.disabled = lp is None
+        cm_scope_html.layout.display = "none" if zarr_loaded else ""
+        cm_compress_warn_html.layout.display = (
+            "none" if zarr_loaded or lp is None or not cm_compress_w.value else ""
+        )
+        cm_vrt_note_html.layout.display = (
+            "none" if zarr_loaded or lp is None or not cm_vrt_w.value else ""
+        )
+
+    cm_compress_w.observe(_sync_cm_output_options, names="value")
+    cm_vrt_w.observe(_sync_cm_output_options, names="value")
+
     # Widgets used in sub-accordion (a)
     mask_threshold_w = widgets.BoundedIntText(value=70, min=0, max=100, step=1, layout=widgets.Layout(width="120px"))
 
@@ -12367,6 +12475,8 @@ def ard_cube_tools():
                         output_clouds=out_clouds,
                         output_masked=out_masked,
                         threshold=threshold,
+                        compress=bool(cm_compress_w.value),
+                        vrt=bool(cm_vrt_w.value),
                     )
                 else:
                     # 1) probability + binary mask at the threshold (in memory)
@@ -12384,6 +12494,8 @@ def ard_cube_tools():
                         proj_distance=float(auto_proj_dist_w.value),
                         masking=True,
                         output_masked=out_masked,
+                        compress=bool(cm_compress_w.value),
+                        vrt=bool(cm_vrt_w.value),
                     )
                     # 3) optional cloud-layers export: probability + mask +
                     #    the two shadow bands, matching the manual workflow's
@@ -12409,6 +12521,8 @@ def ard_cube_tools():
                             _comb.attrs.get("crs"),
                             _comb.attrs.get("transform"),
                             var_name="Cloud_Stack",
+                            compress=bool(cm_compress_w.value),
+                            vrt=bool(cm_vrt_w.value),
                         )
 
             # --- Verify export actually happened (prevents false ✅).
@@ -12439,7 +12553,6 @@ def ard_cube_tools():
                 return
 
             state["current_result_path"] = out_masked
-            _show_result_from_path(out_masked)
 
             lines = [f"✅ Mask and export finished: {out_masked}"]
             if out_clouds:
@@ -12625,6 +12738,8 @@ def ard_cube_tools():
                     clip_raster=False,
                     masking=None,            # IMPORTANT: do not trigger masking branch
                     update=None,
+                    compress=bool(cm_compress_w.value),
+                    vrt=bool(cm_vrt_w.value),
                 )
 
             # --- Verify export actually happened (prevents false ✅).
@@ -12654,7 +12769,6 @@ def ard_cube_tools():
                 return
 
             state["current_result_path"] = out_cloud
-            _show_result_from_path(out_cloud)
             _status(f"✅ Cloud probability cube exported: {out_cloud}")
 
         except Exception as e:
@@ -12804,7 +12918,10 @@ def ard_cube_tools():
 
             # --- Overwrite the same file (no need to pass crs/transform) ---
             with status_out:
-                export_stac(combined, p.as_posix(), overwrite=True, var_name="Cloud_Stack")
+                export_stac(combined, p.as_posix(), overwrite=True,
+                            var_name="Cloud_Stack",
+                            compress=bool(cm_compress_w.value),
+                            vrt=bool(cm_vrt_w.value))
 
             # --- Verify the file was actually overwritten (prevents false ✅).
             # On failure, append into status_out (never call _status, which
@@ -12822,7 +12939,6 @@ def ard_cube_tools():
                 return
 
             state["current_result_path"] = p.as_posix()
-            _show_result_from_path(p.as_posix())
             _status(f"✅ Masks generated and file overwritten: {p.as_posix()}")
 
         except Exception as e:
@@ -13047,7 +13163,6 @@ def ard_cube_tools():
 
             _sfx = mask_band[len("cloud_mask_"):] if mask_band.startswith("cloud_mask_") else mask_band
             state["current_result_path"] = p.as_posix()
-            _show_result_from_path(p.as_posix())
             _status(
                 f"✅ Shadow masks generated and file overwritten: {p.as_posix()}",
                 f"New layers: shadow_mask_{_sfx}, cloudshadow_mask_{_sfx}",
@@ -13332,6 +13447,8 @@ def ard_cube_tools():
                     cloud=state["cloud_path"],
                     mask_layer=mask_layer,
                     output=out_path,
+                    compress=bool(cm_compress_w.value),
+                    vrt=bool(cm_vrt_w.value),
                 )
 
             # --- Verify export actually happened (prevents false ✅).
@@ -13360,9 +13477,7 @@ def ard_cube_tools():
                     print(f"❌ Masking failed: output file is not readable ({type(e).__name__}: {e})")
                 return
 
-            # Show result from exported masked cube
             state["current_result_path"] = out_path
-            _show_result_from_path(out_path)
             _status(f"✅ Masked cube exported: {out_path}")
 
         except Exception as e:
@@ -13584,6 +13699,17 @@ def ard_cube_tools():
                 "These dates can be filtered out later if you wish by scene's cloud masking method."
                 "</div>"
             ),
+            # Applies to every export in (a) and (b), so it sits above both.
+            _field_group(
+                "Output options (NetCDF)",
+                [
+                    cm_scope_html,
+                    cm_compress_w,
+                    cm_compress_warn_html,
+                    cm_vrt_w,
+                    cm_vrt_note_html,
+                ],
+            ),
             mask_a_acc,
             mask_b_acc,
         ],
@@ -13729,6 +13855,63 @@ def ard_cube_tools():
     )
     cr_out_box = widgets.VBox([cr_out_row, cr_out_fc_box], layout=widgets.Layout(width="100%", gap="4px"))
 
+    # NetCDF-only output options, same pair as the Data Cube Builder. Hidden for
+    # a Zarr cube (zlib is a no-op there and a VRT cannot read a Zarr store's
+    # pixels back) - see _sync_cr_output_options.
+    cr_compress_w = widgets.Checkbox(
+        value=False,
+        description="Lossless compression (zlib)",
+        indent=False,
+        layout=widgets.Layout(width="auto"),
+    )
+    cr_compress_warn_html = widgets.HTML(
+        "<div style='font-size:12px; color:#b00020;'>"
+        "⚠️ <b>Warning:</b> compression shrinks the output file a further "
+        "~20-40% (scene-dependent), but the export step takes roughly "
+        "<b>10x longer</b>. Enable it only for archiving, when disk space "
+        "matters more than your time.</div>"
+    )
+    cr_compress_warn_html.layout.display = "none"
+    cr_vrt_w = widgets.Checkbox(
+        value=False,
+        description="Export Band Mapping for GIS Tools",
+        indent=False,
+        layout=widgets.Layout(width="auto"),
+    )
+    cr_vrt_note_html = widgets.HTML(
+        "<div style='font-size:12px; color:#555; margin-left:2px;'>"
+        "&#8505;&#65039; Open the <b>.vrt</b> file in QGIS, not the .nc, "
+        "and keep both files in the same folder.</div>"
+    )
+    cr_vrt_note_html.layout.display = "none"
+
+    def _sync_cr_output_options(*_):
+        """Show the NetCDF-only switches only when the output really is NetCDF.
+
+        Keyed off the OUTPUT path rather than the loaded cube: co-registration
+        picks its container from the output extension, so a NetCDF cube can be
+        written to a .zarr store and vice versa.
+        """
+        out = (cr_out_w.value or "").strip()
+        lp = state.get("loaded_path")
+        target_zarr = is_zarr_path(out) if out else (bool(lp) and is_zarr_path(lp))
+        if target_zarr:
+            cr_compress_w.value = False
+            cr_vrt_w.value = False
+        for w in (cr_compress_w, cr_vrt_w):
+            w.layout.display = "none" if target_zarr else ""
+            w.disabled = lp is None
+        cr_compress_warn_html.layout.display = (
+            "none" if target_zarr or lp is None or not cr_compress_w.value else ""
+        )
+        cr_vrt_note_html.layout.display = (
+            "none" if target_zarr or lp is None or not cr_vrt_w.value else ""
+        )
+
+    cr_compress_w.observe(_sync_cr_output_options, names="value")
+    cr_vrt_w.observe(_sync_cr_output_options, names="value")
+    cr_out_w.observe(_sync_cr_output_options, names="value")
+
     # optional binary cloud mask (for co-registering unmasked / keep-clouds cubes)
     cr_cloud_mask_w = widgets.Text(value="", layout=widgets.Layout(width="100%"))
     browse_cr_mask_btn = widgets.Button(icon="folder-open", description="", layout=widgets.Layout(width="36px"))
@@ -13859,6 +14042,8 @@ def ard_cube_tools():
                         max_cloud_update_ref=float(cr_max_cloud_update_ref_w.value),
                         first_scene_mode=first_scene_mode,
                         composite_window_days=int(cr_composite_window_days_w.value),
+                        compress=bool(cr_compress_w.value),
+                        vrt=bool(cr_vrt_w.value),
                         iteration=cr_iteration_w.value,  # "auto" or int
                         output_path=out_path,
                     )
@@ -13885,7 +14070,6 @@ def ard_cube_tools():
                 return
 
             state["current_result_path"] = out_path
-            _show_result_from_path(out_path)
             # Spectral profiler: point the "after" path at the fresh co-registered
             # cube, and default the "before" path to the loaded cube if unset.
             cr_prof_after_w.value = out_path
@@ -13968,6 +14152,10 @@ def ard_cube_tools():
                 "first_scene_mode": first_scene_mode_for_json,
                 "composite_window_days": composite_window_for_json,
                 "cloud_mask": ((cr_cloud_mask_w.value or "").strip() or None),
+                # NetCDF-only; pinned to False for a Zarr output so a copied
+                # config reproduces what the GUI would actually do.
+                "compress": bool(cr_compress_w.value) and not is_zarr_path(out_path),
+                "vrt": bool(cr_vrt_w.value) and not is_zarr_path(out_path),
             }
         }
 
@@ -14347,7 +14535,13 @@ def ard_cube_tools():
             cr_filter_acc,
             cr_adv_acc,
             widgets.HTML("<div style='height:10px;'></div>"),
-            _stacked_field(cr_out_box, "Output NetCDF"),
+            # Co-registration picks the container from the extension (a .zarr
+            # path writes a Zarr store), so the label must not say NetCDF only.
+            _stacked_field(cr_out_box, "Output cube (NetCDF/Zarr)"),
+            cr_compress_w,
+            cr_compress_warn_html,
+            cr_vrt_w,
+            cr_vrt_note_html,
             widgets.HTML("<div style='height:10px;'></div>"),
             widgets.HBox(
                 [cr_run_btn, cr_copy_json_btn],
@@ -14484,31 +14678,51 @@ def ard_cube_tools():
     )
     sr_zarr_note_html.layout.display = "none"
 
+    sr_vrt_w = widgets.Checkbox(
+        value=False,
+        description="Export Band Mapping for GIS Tools",
+        indent=False,
+        layout=widgets.Layout(width="auto"),
+    )
+    sr_vrt_note_html = widgets.HTML(
+        "<div style='font-size:12px; color:#555; margin-left:2px;'>"
+        "&#8505;&#65039; Open the <b>.vrt</b> file in QGIS, not the .nc, "
+        "and keep both files in the same folder.</div>"
+    )
+    sr_vrt_note_html.layout.display = "none"
+
     def _on_sr_compress_change(change):
         if change.get("name") != "value":
             return
-        # Never show the warning while the checkbox is disabled (Zarr case).
-        show = bool(sr_compress_w.value) and not sr_compress_w.disabled
-        sr_compress_warn_html.layout.display = "" if show else "none"
+        _sync_sr_compress_for_format()
 
     sr_compress_w.observe(_on_sr_compress_change, names="value")
+    sr_vrt_w.observe(_on_sr_compress_change, names="value")
 
     def _sync_sr_compress_for_format():
-        """zlib is NetCDF-only. When a Zarr cube is loaded, force the checkbox
-        off, disable it, hide its warning and show the Zarr note instead. For a
-        NetCDF cube (or none loaded) restore the normal checkbox behavior."""
+        """Both options are NetCDF-only, so hide them for a Zarr cube.
+
+        zlib is a no-op on a Zarr store (always written with Zarr's own codec)
+        and a VRT cannot read a Zarr store's pixels back, so neither switch has
+        anything to offer there - showing them disabled only invites the
+        question of why. For a NetCDF cube they behave normally; with nothing
+        loaded yet they stay visible but disabled.
+        """
         lp = state.get("loaded_path")
-        if lp and is_zarr_path(lp):
+        zarr_loaded = bool(lp) and is_zarr_path(lp)
+        if zarr_loaded:
             sr_compress_w.value = False
-            sr_compress_w.disabled = True
-            sr_compress_warn_html.layout.display = "none"
-            sr_zarr_note_html.layout.display = ""
-        else:
-            sr_compress_w.disabled = lp is None
-            sr_zarr_note_html.layout.display = "none"
-            sr_compress_warn_html.layout.display = (
-                "" if (lp is not None and sr_compress_w.value) else "none"
-            )
+            sr_vrt_w.value = False
+        for w in (sr_compress_w, sr_vrt_w):
+            w.layout.display = "none" if zarr_loaded else ""
+            w.disabled = lp is None
+        sr_zarr_note_html.layout.display = "none"
+        sr_compress_warn_html.layout.display = (
+            "none" if zarr_loaded or lp is None or not sr_compress_w.value else ""
+        )
+        sr_vrt_note_html.layout.display = (
+            "none" if zarr_loaded or lp is None or not sr_vrt_w.value else ""
+        )
 
     sr_run_btn = widgets.Button(
         description="Super-resolve and Export",
@@ -14568,6 +14782,7 @@ def ard_cube_tools():
                     var_name=sr_var_name,
                     model_type=mode,  # "rgbn" | "full_spectral" | "20to10"
                     compress=bool(sr_compress_w.value),
+                    vrt=bool(sr_vrt_w.value),
                 )
 
             # --- Verify export actually happened (prevents false ✅) ---
@@ -14597,7 +14812,6 @@ def ard_cube_tools():
 
             # Success
             state["current_result_path"] = out_path
-            _show_result_from_path(out_path)
             _status(f"✅ Super-resolution finished and exported: {out_path}")
 
         except Exception as e:
@@ -14618,6 +14832,8 @@ def ard_cube_tools():
             _stacked_field(sr_out_box, "Output cube (NetCDF/Zarr)"),
             sr_compress_w,
             sr_compress_warn_html,
+            sr_vrt_w,
+            sr_vrt_note_html,
             sr_zarr_note_html,
             sr_run_btn,
         ],
@@ -14653,25 +14869,6 @@ def ard_cube_tools():
     )
     tools_card = widgets.VBox([tools_box], layout=widgets.Layout(width="100%"))
     tools_card.add_class("stac2cube-card")
-
-    # -----------------------------------------
-    # Result card (shows exported file result)
-    # -----------------------------------------
-    # Result accordion
-    result_box = widgets.VBox(
-        [
-            widgets.HTML("<div style='font-size:12px; color:#666;'>Shows the exported NetCDF result after a tool run.</div>"),
-            result_out,
-        ],
-        layout=widgets.Layout(width="100%", gap="6px"),
-    )
-
-    result_acc = widgets.Accordion(children=[result_box], selected_index=None)
-    result_acc.set_title(0, "Result")
-    result_acc.layout = widgets.Layout(width="99%")
-
-    result_card = widgets.VBox([result_acc], layout=widgets.Layout(width="100%"))
-    result_card.add_class("stac2cube-card")
 
     # -----------------------------------------
     # Status card
@@ -14758,9 +14955,11 @@ def ard_cube_tools():
         sr_out_w.disabled = not enabled
         browse_sr_out_btn.disabled = not enabled
 
-        # zlib checkbox: NetCDF-only, greyed out for a loaded Zarr cube (reads
+        # NetCDF-only switches on both tools: hidden for a Zarr target (reads
         # state['loaded_path'], which _finalize_load sets before calling this).
         _sync_sr_compress_for_format()
+        _sync_cr_output_options()
+        _sync_cm_output_options()
 
         # Colour the required-band list against the freshly loaded cube (and
         # reset it to neutral when a cube is unloaded).
@@ -14919,11 +15118,9 @@ def ard_cube_tools():
         if state["loaded_obj"] is None:
             _status("❌ No loaded cube to reset to.")
             return
-        # For this UI, reset just clears the result display pointer
+        # For this UI, reset just clears the last-exported-result pointer
+        # (used as the spectral profiler's default "after" cube).
         state["current_result_path"] = None
-        with result_out:
-            clear_output()
-            print("No exported result yet.")
         _status("✅ Reset done. (No exported result selected.)")
 
 
@@ -14978,9 +15175,6 @@ def ard_cube_tools():
             tools_card,
 
             spacer_med,
-            result_card,
-
-            spacer_med,
             status_card,
         ],
         layout=widgets.Layout(width="100%", max_width="980px", margin="0 auto", gap="8px"),
@@ -15013,7 +15207,6 @@ def ard_cube_tools():
         },
         "outputs": {
             "loaded_summary": loaded_summary_out,
-            "result": result_out,
             "status": status_out,
         },
     }

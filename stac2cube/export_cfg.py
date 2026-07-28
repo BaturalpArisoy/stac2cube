@@ -79,6 +79,41 @@ def is_zarr_path(path) -> bool:
     return str(path).lower().rstrip("/\\").endswith(".zarr")
 
 
+def is_vrt_path(path) -> bool:
+    """True when ``path`` names a QGIS band-mapping sidecar."""
+    return str(path).lower().rstrip("/\\").endswith(".vrt")
+
+
+def _reject_vrt(path, action, hint=None):
+    """Refuse a ``.vrt`` anywhere a cube is expected.
+
+    A VRT written by :func:`write_qgis_vrt` is a GIS view OF a cube, not a cube:
+    it flattens (time, band) into a numbered stack and holds no coordinates. It
+    is also a snapshot - the labels stop matching as soon as the cube's dates
+    change - so letting one into the pipeline can only produce confusing
+    results or silently wrong ones.
+
+    Left to itself the failure is unhelpful: reading a VRT half-succeeds
+    through rasterio and dies with "conflicting sizes for dimension 'time':
+    length 24 on the data but length 4 on coordinate 'time'", which says
+    nothing about what the user actually did.
+    """
+    if not is_vrt_path(path):
+        return
+    if hint is None:
+        sibling = Path(str(path)).with_suffix(".nc")
+        hint = (
+            f"Load {sibling.name!r} instead."
+            if sibling.exists()
+            else "Use the .nc cube it was made from."
+        )
+    hint = f" {hint}" if hint else ""
+    raise ValueError(
+        f"Cannot {action} {os.path.basename(str(path))!r}: a .vrt is a QGIS "
+        f"band-mapping sidecar, not a data cube.{hint}"
+    )
+
+
 def resolve_cube_path(path):
     """Normalize a user-picked cube path.
 
@@ -163,6 +198,8 @@ def open_cube(path, chunks=None):
     ``float(...)``).
     """
     import warnings
+
+    _reject_vrt(path, "open")
 
     if is_zarr_path(path):
         with warnings.catch_warnings():
@@ -340,14 +377,16 @@ def _write_zarr(ds, output, overwrite):
         # stable Zarr-v3 spec yet; (2) consolidated metadata is an xarray
         # convenience outside the v3 core spec.
         #
-        # (1) is worse than it looks for OTHER readers, though: xarray stores
-        # `band` with v3 data_type "string", and GDAL 3.12 cannot parse that -
-        # it refuses to open the whole store ("Invalid or unsupported format
-        # for data_type: string"), not merely the labels. Casting the coord to
-        # fixed-width bytes does not help (GDAL rejects "null_terminated_bytes"
-        # too). So a Zarr cube is currently xarray/zarr-python-only in practice,
-        # while the NetCDF export stays GDAL-readable. Independent of the codec
-        # choice - the arrays themselves read fine in GDAL.
+        # (1) costs OTHER readers the cube STRUCTURE, but not the data. The
+        # `band` coord goes out as v3 "fixed_length_utf32" (or "string"), which
+        # GDAL 3.12 cannot parse, so its MULTIDIMENSIONAL api - the one that
+        # would expose named time/band dims and their labels - fails on the
+        # whole group. Its CLASSIC raster path is unaffected: GDAL/QGIS open the
+        # store fine and show Time_Series as one flat stack of time x band
+        # numbered bands, correctly georeferenced (verified). The NetCDF export
+        # behaves the SAME way there (24 unlabelled bands, empty descriptions),
+        # so this is not a Zarr-vs-NetCDF difference - export COGs when band
+        # identity in a GIS matters. Independent of the codec choice.
         warnings.filterwarnings("ignore", message=".*does not have a Zarr V3 specification.*")
         warnings.filterwarnings("ignore", message=".*[Cc]onsolidated metadata.*")
         # Same progress bar the NetCDF path shows. The chunk() above always
@@ -410,6 +449,137 @@ def _stream_chunks(ds, budget_bytes=128 * 1024**2):
     return ds.chunk(spec)
 
 
+def write_qgis_vrt(cube_path, var_name=None, vrt_path=None):
+    """Write a small ``.vrt`` beside a NetCDF cube so QGIS shows named bands.
+
+    GDAL flattens the cube's non-spatial dims into one numbered band stack and
+    cannot recover their labels, so a 4-date x 6-band cube opens in QGIS as
+    "Band 1 ... Band 24" with no band names and time shown only as a raw CF
+    offset. A VRT is a tiny XML file that points AT the cube (no data is
+    copied) and carries a description per band, so the same stack opens as
+    "2024-04-01 blue", "2024-04-01 green", ...
+
+    The reference is written relative to the VRT, so moving the ``.nc`` and the
+    ``.vrt`` together keeps it working. The cube itself is not touched: open the
+    ``.vrt`` in a GIS, keep using the ``.nc`` everywhere else.
+
+    NetCDF only. The same trick applies cleanly to a Zarr store's *labels*, but
+    reading pixels back through the VRT fails on the string ``band`` coordinate
+    (GDAL: "Invalid or unsupported format for data_type: fixed_length_utf32"),
+    so it is refused rather than silently producing an unreadable file.
+
+    The XML is generated directly from the cube's own metadata rather than via
+    ``gdal.Translate``. That is deliberate: on conda, GDAL's netCDF driver is a
+    separate plugin (``gdal_netCDF.dll``) that a Python process started without
+    full environment activation cannot load - the same trap that costs the JP2
+    driver - and a writer that cannot open its own input is useless. Nothing
+    here needs to READ the cube through GDAL; QGIS supplies its own netCDF
+    driver when it opens the result.
+
+    Returns the path written.
+    """
+    if is_zarr_path(cube_path):
+        raise ValueError(
+            "write_qgis_vrt supports NetCDF cubes only - a VRT over a Zarr "
+            "store carries the band names but cannot read pixels back."
+        )
+
+    from xml.sax.saxutils import escape, quoteattr
+
+    # numpy -> GDAL type names. Anything not listed is not something the cube
+    # writer produces; fall back to Float32 rather than emitting a broken file.
+    GDAL_TYPES = {
+        "uint8": "Byte", "int8": "Int8", "uint16": "UInt16", "int16": "Int16",
+        "uint32": "UInt32", "int32": "Int32", "float32": "Float32",
+        "float64": "Float64",
+    }
+
+    cube_path = os.path.abspath(str(cube_path))
+    if vrt_path is None:
+        vrt_path = str(Path(cube_path).with_suffix(".vrt"))
+    vrt_path = os.path.abspath(str(vrt_path))
+
+    ds = open_cube(cube_path)
+    try:
+        if var_name is None:
+            var_name = STACK_VAR if STACK_VAR in ds.data_vars else next(
+                (n for n, v in ds.data_vars.items()
+                 if "y" in v.dims and "x" in v.dims), None
+            )
+        if var_name is None:
+            raise ValueError(f"No spatial data variable found in {cube_path}")
+        da = ds[var_name]
+
+        # GDAL flattens the non-spatial dims outer-first, i.e. the band index
+        # runs over the LAST dim fastest - verified against the data for
+        # (time, band). itertools.product below reproduces exactly that order.
+        stack_dims = [d for d in da.dims if d not in ("y", "x")]
+        per_dim = []
+        for dim in stack_dims:
+            if dim in ds.coords:
+                vals = np.asarray(ds[dim].values)
+                if np.issubdtype(vals.dtype, np.datetime64):
+                    labels = list(
+                        np.datetime_as_string(vals.astype("datetime64[ns]"),
+                                              unit="D")
+                    )
+                else:
+                    labels = [str(v) for v in vals]
+            else:
+                labels = [str(i) for i in range(da.sizes[dim])]
+            per_dim.append(labels)
+        names = [" ".join(combo) for combo in itertools.product(*per_dim)]
+
+        nx, ny = int(da.sizes["x"]), int(da.sizes["y"])
+        # On-disk dtype, which is what GDAL will see - not the decoded one. A
+        # packed cube stores int16 but decodes to float.
+        dtype = np.dtype(da.encoding.get("dtype", da.dtype))
+        gdal_type = GDAL_TYPES.get(dtype.name, "Float32")
+        nodata = da.encoding.get("_FillValue", da.attrs.get("_FillValue"))
+        if nodata is None and dtype.kind == "f":
+            nodata = float("nan")
+
+        wkt = CRS.from_user_input(ds.rio.crs or ds.attrs["crs"]).to_wkt("WKT1_GDAL")
+        gt = ds.rio.transform().to_gdal()
+    finally:
+        ds.close()
+
+    # The source is written RELATIVE to the VRT when the two sit in the same
+    # directory, so moving the pair together keeps it working.
+    same_dir = os.path.dirname(vrt_path) == os.path.dirname(cube_path)
+    ref = os.path.basename(cube_path) if same_dir else cube_path
+    src_name = f'NETCDF:"{ref}":{var_name}'
+
+    out = [
+        f'<VRTDataset rasterXSize="{nx}" rasterYSize="{ny}">',
+        f'  <SRS dataAxisToSRSAxisMapping="1,2">{escape(wkt)}</SRS>',
+        '  <GeoTransform>' + ', '.join(repr(float(v)) for v in gt)
+        + '</GeoTransform>',
+    ]
+    for i, name in enumerate(names, start=1):
+        out.append(f'  <VRTRasterBand dataType="{gdal_type}" band="{i}">')
+        out.append(f'    <Description>{escape(str(name))}</Description>')
+        if nodata is not None:
+            out.append(f'    <NoDataValue>{float(nodata)!r}</NoDataValue>')
+        out.append('    <SimpleSource>')
+        out.append('      <SourceFilename relativeToVRT='
+                   f'{quoteattr("1" if same_dir else "0")}>'
+                   f'{escape(src_name)}</SourceFilename>')
+        out.append(f'      <SourceBand>{i}</SourceBand>')
+        out.append(f'      <SourceProperties RasterXSize="{nx}" '
+                   f'RasterYSize="{ny}" DataType="{gdal_type}" '
+                   f'BlockXSize="{nx}" BlockYSize="1"/>')
+        out.append(f'      <SrcRect xOff="0" yOff="0" xSize="{nx}" ySize="{ny}"/>')
+        out.append(f'      <DstRect xOff="0" yOff="0" xSize="{nx}" ySize="{ny}"/>')
+        out.append('    </SimpleSource>')
+        out.append('  </VRTRasterBand>')
+    out.append('</VRTDataset>')
+
+    with open(vrt_path, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(out) + "\n")
+    return vrt_path
+
+
 def export_stac(
     stac,
     output,
@@ -418,6 +588,7 @@ def export_stac(
     var_name=None,
     overwrite=True,
     compress=False,
+    vrt=False,
 ):
     """Write a cube to disk. Output format is chosen by the file extension:
 
@@ -430,6 +601,11 @@ def export_stac(
     bit-identical on read-back; the write is slower. Shrinks cloud-masked
     cubes especially well (NaN runs compress strongly).
 
+    ``vrt=True`` -> also write a small ``<output>.vrt`` beside the NetCDF that
+    labels every band with its date and band name for QGIS (see
+    :func:`write_qgis_vrt`). NetCDF only; ignored for Zarr. The cube itself is
+    unchanged - the VRT is an extra ~40 KB pointer file.
+
     Both containers now STREAM a dask-backed cube to disk instead of
     materializing it first, so peak memory is a few chunks rather than the
     whole cube. One consequence: the returned object is whatever was passed in,
@@ -441,6 +617,14 @@ def export_stac(
         raise TypeError(
             f"export_stac expects xarray.DataArray or xarray.Dataset, got {type(stac)}"
         )
+    # Writing a cube to a .vrt would produce a file that is neither: the name
+    # promises a sidecar while the bytes are NetCDF, and the real sidecar would
+    # then overwrite it.
+    _reject_vrt(
+        output, "write a cube to",
+        hint="Use a .nc or .zarr path; tick the band-mapping option to get the "
+             "sidecar alongside it.",
+    )
 
     crs = crs or stac.crs
     transform = transform or stac.transform
@@ -499,6 +683,26 @@ def export_stac(
         ds.to_netcdf(output)
 
     print(f"Export is done: {output}")
+    # After the write, so the VRT describes the file that now exists.
+    #
+    # A sidecar that is already there is REFRESHED even when vrt=False. Its band
+    # labels are a snapshot of the cube's dates, so any write that changes the
+    # date list - a cloud filter, a time slice, an update, or the "Generate and
+    # Overwrite" buttons that add mask bands to the input file - leaves the old
+    # labels pointing at the wrong scenes, with no error anywhere. Rewriting is
+    # cheap and keeps the pair honest; the alternative is silently wrong dates
+    # in someone's GIS.
+    stale = None if vrt else Path(str(output)).with_suffix(".vrt")
+    if vrt or (stale is not None and stale.exists()):
+        try:
+            written = write_qgis_vrt(output)
+            print(
+                f"QGIS band-labelled VRT: {written}" if vrt
+                else f"Refreshed the existing QGIS VRT: {written}"
+            )
+        except Exception as exc:
+            # A failure here must not lose the cube that was just exported.
+            print(f"Note: could not write the QGIS VRT ({exc}). The NetCDF is fine.")
     return stac
 
 

@@ -89,7 +89,8 @@ def _validate_export_format(output, export_format):
 
 
 def _export_result(
-    stac, output, export_format, crs=None, transform=None, compress=False
+    stac, output, export_format, crs=None, transform=None, compress=False,
+    vrt=False,
 ):
     """Write the finished cube, dispatching on ``export_format``.
 
@@ -97,12 +98,15 @@ def _export_result(
     (export_to_cogs, which handles both a DataArray and a stats Dataset).
     Anything else -> export_stac, whose own extension dispatch picks NetCDF vs
     Zarr. Returns what was written / handed over, so callers can keep chaining.
+
+    ``vrt`` asks for the QGIS band-labelled sidecar; it only applies to the
+    NetCDF path (COGs already carry band names, Zarr cannot use a VRT).
     """
     if export_format == "cogs":
         os.makedirs(output, exist_ok=True)
         export_to_cogs(stac, output_dir=output, prefix="", dtype="float32")
         return stac
-    return export_stac(stac, output, crs, transform, compress=compress)
+    return export_stac(stac, output, crs, transform, compress=compress, vrt=vrt)
 
 
 def _drop_timeseries(stac, keep_timeseries):
@@ -249,6 +253,7 @@ def get_stac_layers(
     min_scene_coverage=0.9,
     q=None,
     compress=False,
+    vrt=False,
 ):
 
     # Reassign short names
@@ -587,6 +592,7 @@ def get_stac_layers(
                     min_scene_coverage=min_scene_coverage,
                     q=q,
                     compress=compress,
+                    vrt=vrt,
                 )
 
                 # When asked for the in-memory mask, each feature returns
@@ -610,7 +616,8 @@ def get_stac_layers(
                         stem, ext = os.path.splitext(output)
                         feature_output = f"{stem}_{idx}{ext}"
                     _export_result(
-                        res, feature_output, _export_format, compress=compress
+                        res, feature_output, _export_format, compress=compress,
+                        vrt=vrt,
                     )
 
                 # Report each cube's estimated (logical, pre-load) data size.
@@ -1524,7 +1531,8 @@ def get_stac_layers(
             print(stac, flush=True)
 
         img = _export_result(
-            stac, output, _export_format, crs, transform, compress=compress
+            stac, output, _export_format, crs, transform, compress=compress,
+            vrt=vrt,
         )
         if return_cloud_mask:
             return img, mask_cube

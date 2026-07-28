@@ -7,6 +7,8 @@ from .export_cfg import (
     open_cube,
     is_zarr_path,
     _write_zarr,
+    _set_compression,
+    write_qgis_vrt,
     normalize_stack_name,
     resolve_stack_var,
 )
@@ -195,16 +197,30 @@ def _auto_output_path(input_path_str, suffix="_coregistered"):
     return os.path.join(in_dir, out_name)
 
 
-def _write_coreg_output(out_ds, out_path):
+def _write_coreg_output(out_ds, out_path, compress=False, vrt=False):
     """Write the co-registered Dataset; the extension picks the format.
 
     ``*.zarr`` -> streamed Zarr store (export_cfg._write_zarr, same writer as
     export_stac); anything else -> the long-standing plain to_netcdf.
+
+    ``compress`` and ``vrt`` are NetCDF-only and mirror ``export_stac``: zlib
+    level 4 on the spatial variables, and the QGIS band-mapping sidecar. Zarr
+    always applies its own codec, and a VRT cannot read a Zarr store's pixels
+    back, so both are ignored on that path.
     """
     if is_zarr_path(out_path):
         _write_zarr(out_ds, out_path, overwrite=True)
-    else:
-        out_ds.to_netcdf(out_path)
+        return
+
+    _set_compression(out_ds, compress)
+    out_ds.to_netcdf(out_path)
+    if vrt:
+        # A sidecar failure must not lose the cube that was just written.
+        try:
+            print(f"QGIS band-labelled VRT: {write_qgis_vrt(out_path)}")
+        except Exception as exc:
+            print(f"Note: could not write the QGIS VRT ({exc}). "
+                  "The NetCDF is fine.")
 
 
 def _apply_time_and_cloud_filters(stack, max_cc=None, time_period=None):
@@ -898,6 +914,8 @@ def coregister_cube(
     min_win_px=64,
     cloud_mask=None,
     adaptive=True,
+    compress=False,
+    vrt=False,
     **deprecated,
 ):
     """Co-register a Sentinel-2 data cube scene-to-scene (AROSICS global).
@@ -1302,7 +1320,7 @@ def coregister_cube(
         final_out_path = _auto_output_path(input_path_str, suffix="_cr")
 
     if final_out_path is not None:
-        _write_coreg_output(out_ds, final_out_path)
+        _write_coreg_output(out_ds, final_out_path, compress=compress, vrt=vrt)
         print(f"\nCo-registered cube written to: {final_out_path}")
     else:
         print(

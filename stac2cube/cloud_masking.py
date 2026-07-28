@@ -204,6 +204,7 @@ def get_cloud_layers(
     input_cube=None,
     slurm_timer=None,
     compress=False,
+    vrt=False,
     missing_l1c="scl",
 ):
     # missing_l1c: what to do with a cube date that has NO Sentinel-2 L1C scene
@@ -615,7 +616,8 @@ def get_cloud_layers(
 
     # ---- export: do NOT hide behind `if not update` ----
     if output_clouds is not None:
-        export_stac(cloud_only_stack, output_clouds, crs, transform, compress=compress)
+        export_stac(cloud_only_stack, output_clouds, crs, transform,
+                    compress=compress, vrt=vrt)
 
 
     # ---- Masking (kept as before; typically not combined with update) ----
@@ -650,7 +652,8 @@ def get_cloud_layers(
 
 
 def mask_stac_clouds(stac, cloud, mask_layer, output=None, compress=False,
-                     cloud_status=None, shadow_attrs=None, extra_attrs=None):
+                     vrt=False, cloud_status=None, shadow_attrs=None,
+                     extra_attrs=None):
     # Track datasets we open here so we can close them before returning.
     # Leaving these handles open makes each repeated call stack another open
     # handle onto the same netCDF/HDF5 files, which on Windows can crash the
@@ -714,7 +717,7 @@ def mask_stac_clouds(stac, cloud, mask_layer, output=None, compress=False,
             # export_stac reads through the still-open source handles here,
             # then we close them below. Nothing is force-loaded into memory:
             # to_netcdf streams straight from the source file to the output.
-            export_stac(masked_stac, output, compress=compress)
+            export_stac(masked_stac, output, compress=compress, vrt=vrt)
             for _ds in _opened:
                 try:
                     _ds.close()
