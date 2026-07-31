@@ -47,6 +47,7 @@ from stac2cube import (
     mask_stac_clouds,
     super_resolve_cube,
     check_scene_availability,
+    preview_scene_footprints,
 )
 
 from .get_data import (
@@ -414,6 +415,32 @@ PARAM_HELP_HTML = {
     Can also be a WGS84 bbox list: <code>[xmin, ymin, xmax, ymax]</code> (not projected coords). Useful tool: <code>http://bboxfinder.com/</code><br>
     <b>3) Draw on a map</b><br>
     Tick <b>"Draw the area on a map instead"</b> below to open an interactive map. Use the draw tools at the top-left of the map to draw a rectangle or polygon over your area, then click <b>"Use drawn area"</b>. Your exact outline is saved as a GeoJSON file in the <code>polygons</code> folder and the box above is pointed at it (overwriting any path you typed). To change the background map, use the toolbar at the top-right of the map.<br>
+    """,
+    "footprint_prefilter": """
+    <b>Skip scenes that barely touch your area</b><br>
+    A satellite passes over your area on several different orbits. Some of them
+    only clip a corner of it. Those acquisitions still cost a <b>full-size time
+    step</b> in the cube - the whole rectangle is stored for every date, even
+    where there is no data - and they come back every revisit cycle, so on a
+    sprawling area they can easily be <b>half of the total size and build
+    time</b>.<br><br>
+    This box removes them <b>before anything is downloaded</b>, which is what
+    makes it fast: a skipped date is never loaded, never cloud-checked and never
+    given memory. Every other filter in stac2cube runs on the finished cube, so
+    it only trims the result.<br><br>
+    <b>How to choose a number:</b> click <b>Check area coverage</b> above. The
+    orbits at the bottom of that table are the ones this box removes. Type a
+    value just above them. <code>0</code> (default) keeps everything.<br><br>
+    <b>Keep it low.</b> This is measured from the scene outlines the catalogue
+    publishes, not from the pixels, so it is an estimate: on one test area
+    Planetary Computer and terrabyte agreed exactly while Element84 read about
+    3 points lower on partial scenes. It is meant for removing near-misses, not
+    for judging whether a scene is complete.<br><br>
+    <b>Not the same as "Remove partially missing scenes"</b> (Advanced &rarr;
+    Overlapping Tile Handling). That one measures real pixels after downloading,
+    and it is the only one that can catch a scene whose outline looks complete
+    but whose data is missing or broken. Use this box to avoid pointless
+    downloads, and that one to guarantee complete scenes.
     """,
     "clip_raster": """
     <b>Clip data cube to polygon boundaries</b><br>
@@ -935,18 +962,68 @@ def datacube_builder(missions_func=missions):
         mission_meta[row["name"]] = row.to_dict()
 
     ordered_names = df["name"].tolist()
-    mission_options = [(_pretty_mission_label(name), name) for name in ordered_names]
+
+    # Only the two Sentinel-2 collections are wired end-to-end today. The others
+    # stay listed - so it is visible which missions the table knows about - but
+    # they cannot be picked: ipywidgets offers no way to grey out a single
+    # Dropdown option, so the selection is snapped back by the guard below (same
+    # limitation that turned the index list into checkboxes).
+    _SELECTABLE_MISSIONS = ("sentinel_2_l2a", "sentinel_2_l1c")
+
+    def _mission_option_label(name: str):
+        label = _pretty_mission_label(name)
+        return label if name in _SELECTABLE_MISSIONS else f"{label} (not available yet)"
+
+    mission_options = [(_mission_option_label(name), name) for name in ordered_names]
 
     # -------------------------------------------------------------------------
     # Widgets (Basic)
     # -------------------------------------------------------------------------
+    _default_mission = next(
+        (n for n in ordered_names if n in _SELECTABLE_MISSIONS), ordered_names[0]
+    )
+
     mission_dd = widgets.Dropdown(
         options=mission_options,
-        value=mission_options[0][1],
+        value=_default_mission,
         description="Mission:",
         layout=widgets.Layout(width="100%"),
         style={"description_width": "120px"},
     )
+
+    # Reason shown when a listed-but-unavailable mission is clicked.
+    mission_note = widgets.HTML("")
+
+    _mission_reverting = {"busy": False}
+
+    def _guard_mission_choice(change):
+        """Snap the dropdown back when the picked mission is not available yet.
+
+        Registered before every other mission observer, and the revert is a
+        nested value change, so the rest of the form is re-synced against the
+        mission that is actually kept.
+        """
+        if _mission_reverting["busy"]:
+            return
+        if change["new"] in _SELECTABLE_MISSIONS:
+            mission_note.value = ""
+            return
+
+        keep = change["old"] if change["old"] in _SELECTABLE_MISSIONS else _default_mission
+        _mission_reverting["busy"] = True
+        try:
+            mission_dd.value = keep
+        finally:
+            _mission_reverting["busy"] = False
+
+        mission_note.value = (
+            "<div style='font-size:12px; color:#92400e; background:#fffbeb; "
+            "border:1px solid #fde68a; border-radius:6px; padding:6px 8px;'>"
+            f"<b>{_pretty_mission_label(change['new'])}</b> is not available yet - "
+            f"kept {_pretty_mission_label(keep)}.</div>"
+        )
+
+    mission_dd.observe(_guard_mission_choice, names="value")
 
     source_w = widgets.Dropdown(
         options=[
@@ -4546,6 +4623,14 @@ def datacube_builder(missions_func=missions):
             # Min share of the AOI a scene must image to be kept (percent box
             # -> fraction). Only used in remove mode.
             "min_scene_coverage": float(min_coverage_w.value) / 100.0,
+            # Pre-load footprint prefilter (percent box -> fraction). None when
+            # 0, so the build skips the whole step rather than running it as a
+            # no-op that would still reproject every footprint.
+            "min_footprint_coverage": (
+                (float(skip_footprint_w.value) / 100.0)
+                if float(skip_footprint_w.value) > 0
+                else None
+            ),
             "q": True,  # hidden in UI, keep output cleaner while progress bars still show where applicable
         }
 
@@ -4996,6 +5081,16 @@ def datacube_builder(missions_func=missions):
                 # see partial_handling_for_json above.
                 "partial_scene_handling": partial_handling_for_json,
                 "min_scene_coverage": min_cov_for_json,
+                # Pre-load footprint prefilter. Emitted straight from its own
+                # widget with no merging: unlike the two coverage filters above,
+                # nothing else in the GUI can ask for it, and it acts BEFORE the
+                # load - so on SLURM it is the one setting that makes the job
+                # cheaper rather than only making its output smaller.
+                "min_footprint_coverage": (
+                    (float(skip_footprint_w.value) / 100.0)
+                    if float(skip_footprint_w.value) > 0
+                    else None
+                ),
                 "aggregator": aggregator,
                 "stats": stats,
                 "keep_timeseries": keep_timeseries,
@@ -5206,6 +5301,14 @@ def datacube_builder(missions_func=missions):
                 f"Mission: '{params.get('mission')}' is unknown - kept "
                 f"'{mission_dd.value}'."
             )
+        elif m_name not in _SELECTABLE_MISSIONS:
+            # The dropdown would snap back anyway (see _guard_mission_choice);
+            # say so here instead of silently building another mission.
+            warnings.append(
+                f"Mission: '{m_name}' is not available yet - kept "
+                f"'{mission_dd.value}'."
+            )
+            _update_from_mission()
         elif m_name != mission_dd.value:
             mission_dd.value = m_name       # fires _update_from_mission
         else:
@@ -5291,6 +5394,18 @@ def datacube_builder(missions_func=missions):
             )
         if params.get("min_scene_coverage") is not None:
             min_coverage_w.value = int(round(float(params["min_scene_coverage"]) * 100))
+        # Footprint prefilter: absent / null means "off", which is 0 in the box.
+        # Restored unconditionally so loading a config that does NOT use it also
+        # clears a value left over from a previous load.
+        try:
+            _fp_cfg = params.get("min_footprint_coverage")
+            skip_footprint_w.value = (
+                round(float(_fp_cfg) * 100.0, 2) if _fp_cfg else 0.0
+            )
+        except (TypeError, ValueError):
+            warnings.append(
+                "min_footprint_coverage was not a number; left at 0 (off)."
+            )
 
         meta_values = _option_values(scene_metadata_w)
         wanted_meta = [str(m) for m in (params.get("scene_metadata") or [])]
@@ -6944,16 +7059,228 @@ def datacube_builder(missions_func=missions):
     draw_polygon_w.observe(lambda c: _update_draw_visibility(), names="value")
     use_drawn_btn.on_click(_on_use_drawn_clicked)
 
-    # Warning shown beside the opt-in clip control: bbox is the deliberate default.
+    # Two boxes beside the opt-in clip control, following the file's blue/amber
+    # split (see _INFO_BOX): blue states the default and always shows, amber
+    # appears only once the user has actually ticked the box - the cost of
+    # clipping is only worth spelling out to someone who chose it.
+    clip_info_html = widgets.HTML(
+        f"{_INFO_BOX}"
+        "ℹ️ By default the cube is returned as the polygon's <b>bounding box</b> for "
+        "more efficient <b>co-registration</b> and <b>super-resolution</b> results. "
+        "Raster processing of a clipped area is <b>not</b> recommended."
+        "</div>"
+    )
+
     clip_warning_html = widgets.HTML(
         "<div style='font-size:12px; color:#92400e; background:#fffbeb; "
         "border:1px solid #fde68a; border-radius:6px; padding:6px 8px;'>"
-        "⚠️ By default the cube is returned as the polygon's <b>bounding box</b> (a clean "
-        "rectangle). This is intentional: a rectangle gives the best results for "
-        "<b>co-registration</b> and <b>super-resolution</b>. Tick the box above only if you "
-        "want the cube clipped to the <b>exact polygon outline</b> (pixels outside the shape "
-        "become NaN and reduces the data size)."
-        "</div>"
+        "⚠️ <b>Warning:</b> Yes, pixels outside the shape become NaN, but this does not "
+        "reduce the data size significantly and it even increases the overall processing "
+        "time. Selecting compression when exporting NetCDF, or exporting as Zarr, gives "
+        "some size reduction.<br>"
+        "Therefore, clipping is recommended in 'Data Cube Editor' as the last step. For "
+        "wide elongated polygons, split your AOI and activate batch processing so later "
+        "you can mosaic them in 'Data Cube Editor'."
+        "</div>",
+        layout=widgets.Layout(display="none"),
+    )
+
+    def _update_clip_warning(*_):
+        clip_warning_html.layout.display = "" if clip_raster_w.value else "none"
+
+    clip_raster_w.observe(lambda change: _update_clip_warning(), names="value")
+    _update_clip_warning()
+
+    # -------------------------------------------------------------------------
+    # "Check area coverage": the last block of the Polygon group. Reads the STAC
+    # catalogue (metadata only, no pixels) over the chosen area and date range and
+    # shows which orbits see the area, how much of it each one covers per date, and
+    # the footprints on a map. Purely informational - it changes no parameter.
+    # -------------------------------------------------------------------------
+    coverage_btn = widgets.Button(
+        description="Check area coverage",
+        button_style="info",
+        icon="map",
+        layout=widgets.Layout(width="220px"),
+    )
+    coverage_out = widgets.Output()
+    # Hidden until the first run, then revealed and opened by the handler, so the
+    # tall map never stretches the Polygon group before it is asked for.
+    coverage_result_acc = widgets.Accordion(
+        children=[coverage_out], selected_index=None
+    )
+    coverage_result_acc.set_title(0, "Area Coverage Result")
+    coverage_result_acc.layout = widgets.Layout(width="99%", display="none")
+
+    def _on_check_coverage(_btn):
+        coverage_result_acc.layout.display = ""
+        coverage_result_acc.selected_index = 0
+        with coverage_out:
+            clear_output()
+            try:
+                polygon = _parse_polygon_input(polygon_w.value)
+                daterange = _resolve_daterange()
+            except Exception as e:
+                print("⚠️ " + _friendly_error(e, "Reading the parameters"))
+                return
+            if polygon is None:
+                print("✋ Please set a polygon file or a bounding box first.")
+                return
+
+            # Measure against whatever the cube will actually be: the bounding box
+            # by default, the exact outline when the user ticked clipping.
+            clipped = bool(clip_raster_w.value)
+            display(HTML(_busy_bear_html(
+                "Reading scene footprints for your area",
+                "(the whole date range is read, so a long range takes longer)",
+            )))
+            try:
+                m, df, info = preview_scene_footprints(
+                    mission_dd.value,
+                    polygon,
+                    source=source_w.value,
+                    daterange=daterange,
+                    coverage_geometry="polygon" if clipped else "bbox",
+                    q=True,
+                )
+            except Exception as e:
+                clear_output()
+                print("⚠️ " + _friendly_error(e, "Checking area coverage"))
+                return
+
+            clear_output()
+            if df.empty:
+                print(
+                    "No scenes found for this area and date range. Try a wider "
+                    "date range, or check the area."
+                )
+                return
+
+            span = info.get("window")
+            area_word = "exact outline" if clipped else "bounding box"
+            # The source is named because each catalogue publishes its OWN footprint
+            # outlines for the same acquisition: measured on a 6 km area sitting on a
+            # swath edge, Element84 read 4-8 points lower than Planetary Computer and
+            # CDSE (which agreed exactly). So these numbers describe the catalogue the
+            # cube will actually be built from, and only that one.
+            source_label = dict(
+                (v, k) for k, v in source_w.options
+            ).get(source_w.value, source_w.value)
+            display(HTML(
+                "<div style='font-size:12px; color:#374151; margin:0 0 6px 0;'>"
+                f"Dates read: <b>{span[0]}</b> to <b>{span[1]}</b> "
+                f"({info['n_dates']} dates, {info['n_scenes']} scenes) from "
+                f"<b>{source_label}</b>. "
+                f"Coverage is the share of your area's <b>{area_word}</b> that one "
+                "date holds.<br>"
+                "<span style='color:#6b7280;'>Estimated from scene outlines, so "
+                "values can differ by a few percent from the built cube and between "
+                "data sources.</span>"
+                "</div>"
+            ))
+            display(HTML(df.to_html(border=0, na_rep="NaN")))
+
+            # The one finding worth acting on, phrased against the threshold the
+            # user's own Across-track setting would apply.
+            threshold = int(min_coverage_w.value)
+            shares = [
+                v for v in info.get("per_date_coverage", {}).values() if v is not None
+            ]
+            n_partial = sum(1 for v in shares if 100.0 * v < threshold)
+            if not n_partial:
+                display(HTML(
+                    "<div style='font-size:12px; color:#166534; background:#f0fdf4; "
+                    "border:1px solid #bbf7d0; border-radius:6px; padding:6px 8px; "
+                    "margin:6px 0;'>"
+                    f"✅ Every date covers at least {threshold}% of your area."
+                    "</div>"
+                ))
+            elif partial_scene_w.value == "remove":
+                display(HTML(
+                    f"{_INFO_BOX}"
+                    f"ℹ️ <b>{n_partial} of {len(shares)} dates</b> cover less than "
+                    f"{threshold}% of your area. Your <b>Across-track</b> setting is "
+                    "already set to <b>Remove partially missing scenes</b>, so these "
+                    "will be dropped."
+                    "</div>"
+                ))
+            else:
+                display(HTML(
+                    "<div style='font-size:12px; color:#92400e; background:#fffbeb; "
+                    "border:1px solid #fde68a; border-radius:6px; padding:6px 8px; "
+                    "margin:6px 0;'>"
+                    f"⚠️ <b>{n_partial} of {len(shares)} dates</b> cover less than "
+                    f"{threshold}% of your area (swath-edge scenes).<br>"
+                    "To drop them, open <b>Advanced Parameters &rarr; Overlapping "
+                    "Tile Handling &rarr; Across-track</b> and set <b>Coverage</b> to "
+                    "<b>Remove partially missing scenes</b>."
+                    "</div>"
+                ))
+
+            # Near-misses are a different finding from "partial": these orbits
+            # bring nothing usable at all, yet each still costs a full-size time
+            # step. Reported separately, right where the box that removes them
+            # is, and only when there is something to act on.
+            n_graze = sum(1 for v in shares if 100.0 * v < 1.0)
+            if n_graze and skip_footprint_w.value <= 0:
+                display(HTML(
+                    f"{_INFO_BOX}"
+                    f"💡 <b>{n_graze} of {len(shares)} dates</b> cover less than "
+                    "<b>1%</b> of your area - they would be almost entirely "
+                    "empty, but each one still costs a full time step.<br>"
+                    "Set <b>Skip scenes that barely touch your area</b> (just "
+                    "below) to <b>1</b> to leave them out of the download."
+                    "</div>"
+                ))
+
+            if m is None:
+                print(
+                    "The map needs the leafmap package, which isn't available "
+                    "here. The table above still applies."
+                )
+            else:
+                display(m)
+
+    coverage_btn.on_click(_on_check_coverage)
+
+    # -------------------------------------------------------------------------
+    # Pre-load footprint prefilter. Sits under "Check area coverage" because that
+    # button is what shows the problem: the orbits at the bottom of its table are
+    # exactly the ones this box removes. The number the user types is the number
+    # they just read there.
+    #
+    # Worded as "barely touch" rather than as a second coverage percentage, on
+    # purpose. The Advanced across-track filter asks "is this scene complete?"
+    # and measures pixels; this one asks "is it worth downloading?" and reads
+    # only the published outlines. Users should never have to compare the two.
+    # -------------------------------------------------------------------------
+    skip_footprint_w = widgets.BoundedFloatText(
+        value=0.0,
+        min=0.0,
+        max=100.0,
+        step=0.5,
+        # No description: stacked_field_with_help clears it and renders the
+        # label above the box.
+        continuous_update=False,  # validate on blur, never per keystroke
+        layout=widgets.Layout(width="110px"),
+    )
+    skip_footprint_box = widgets.VBox(
+        [
+            widgets.HTML(
+                "<div style='font-size:13px; font-weight:600; color:#374151; "
+                "margin:0 0 2px 0;'>Skip scenes that barely touch your area</div>"
+                "<div style='font-size:12px; color:#6b7280; margin:0 0 4px 0;'>"
+                "Some orbits clip only the edge of your area. Skipping them "
+                "before downloading makes the cube smaller and much faster. "
+                "0 keeps everything.</div>"
+            ),
+            _with_help_left(
+                skip_footprint_w,
+                "footprint_prefilter",
+                "Skip scenes covering less than (% of your area)",
+            ),
+        ],
+        layout=widgets.Layout(width="100%", gap="2px"),
     )
 
     # Warning shown only when the terrabyte STAC API is the chosen Data Source.
@@ -7026,8 +7353,14 @@ def datacube_builder(missions_func=missions):
 
     basic_box = widgets.VBox(
         [
-            _field_group("Mission", [_boxed(mission_dd)],
+            _field_group("Mission", [_boxed(mission_dd), mission_note],
                          subtitle="Satellite mission to use."),
+            # Time Period sits BEFORE Polygon on purpose: the map tools in the
+            # Polygon group (footprint preview) and the availability check in Data
+            # Source both read the date range, so a user who meets them with no
+            # dates set would get a silent fallback window instead of their own.
+            # Nothing in Time Period reads the polygon, so there is no cycle.
+            date_section,
             # Resolution moved to Advanced Parameters, where it sits with the
             # other two controls that define the output grid (Resampling and
             # Output Projection). It is the group that opens by default there,
@@ -7078,17 +7411,24 @@ def datacube_builder(missions_func=missions):
                                 "margin:0 0 2px 0;'>Output shape</div>"
                             ),
                             clip_raster_w,
+                            clip_info_html,
                             clip_warning_html,
                         ],
                         accent="amber",
                     ),
+                    _line_divider(),
+                    # --- Optional coverage check: reads the catalogue, sets nothing ---
+                    widgets.HBox(
+                        [coverage_btn], layout=widgets.Layout(margin="2px 0")
+                    ),
+                    coverage_result_acc,
+                    skip_footprint_box,
                 ],
                 subtitle="The area to cover. Pick a polygon file or bounding box, or draw it on a map.",
                 help_html=PARAM_HELP_HTML.get("polygon", ""),
                 collapsible=True,
                 open=False,
             ),
-            date_section,
             bands_box,
             indices_box,
             _collapse_row(basic_collapse_btn),
@@ -8232,6 +8572,7 @@ def datacube_builder(missions_func=missions):
             "tile_handling": tile_handling_w,
             "partial_scene_handling": partial_scene_w,
             "min_scene_coverage": min_coverage_w,
+            "min_footprint_coverage": skip_footprint_w,
             "aggregator": aggregator_w,
             "export_mode": export_mode_w,
             "export_target": export_target_w,

@@ -251,6 +251,7 @@ def get_stac_layers(
     tile_handling="mosaic",
     partial_scene_handling="keep",
     min_scene_coverage=0.9,
+    min_footprint_coverage=None,
     q=None,
     compress=False,
     vrt=False,
@@ -515,6 +516,39 @@ def get_stac_layers(
                 "Build the filtered cube in one pass instead."
             )
 
+    # --- Footprint prefilter preconditions ------------------------------------
+    # min_footprint_coverage skips acquisitions whose PUBLISHED OUTLINES barely
+    # overlap the AOI, before anything is downloaded (see
+    # auxiliary.filter_items_by_footprint). It is the pre-load twin of
+    # partial_scene_handling, and deliberately a different tool:
+    #
+    #   * this one is a geometric estimate, cheap, and saves the download;
+    #   * partial_scene_handling measures real pixels, costs a read, and is the
+    #     only one that can see nodata INSIDE an outline (a failed or partial
+    #     granule reads as fully covering here).
+    #
+    # So it belongs at a LOW threshold - "don't bother with scenes that only
+    # graze the area" - and does not replace the completeness filter.
+    #
+    # Allowed in update mode, unlike partial_scene_handling: its denominator is
+    # the AOI itself, not the footprint of the scenes in hand, so it cannot
+    # shift meaning when the fresh query holds only the new dates. It simply
+    # narrows which NEW acquisitions are worth downloading.
+    _min_footprint_cov = None
+    if min_footprint_coverage:
+        try:
+            _min_footprint_cov = float(min_footprint_coverage)
+        except (TypeError, ValueError):
+            raise ValueError(
+                "min_footprint_coverage must be a fraction between 0 and 1."
+            )
+        if not (0.0 < _min_footprint_cov <= 1.0):
+            raise ValueError(
+                "min_footprint_coverage must be a fraction in (0, 1] (e.g. 0.01 = "
+                "skip acquisitions whose outlines cover less than 1% of the area; "
+                "0 or None disables the filter)."
+            )
+
     # --- Native multi-feature batching ---------------------------------------
     # When a polygon FILE containing more than one feature is supplied (i.e. not
     # a bbox list and not update mode), generate one data cube per feature
@@ -590,6 +624,10 @@ def get_stac_layers(
                     tile_handling=tile_handling,
                     partial_scene_handling=partial_scene_handling,
                     min_scene_coverage=min_scene_coverage,
+                    # Per-feature on purpose: each feature is prefiltered against
+                    # its OWN geometry, which is the whole point on a batch of
+                    # scattered polygons.
+                    min_footprint_coverage=min_footprint_coverage,
                     q=q,
                     compress=compress,
                     vrt=vrt,
@@ -881,6 +919,8 @@ def get_stac_layers(
         scene_metadata=scene_metadata,
         tile_handling=tile_handling,
         crs=_pinned_crs,
+        min_footprint_coverage=_min_footprint_cov,
+        clip_raster=clip_raster,
         q=bool(q),
     )
     # Separate-tile cubes keep full-precision, per-tile timestamps so two tiles
@@ -892,6 +932,9 @@ def get_stac_layers(
     # STAC item (tile overlap). Grabbed now because the Dataset attrs are lost
     # in the band concat below; re-attached in the metadata block.
     _meta_multiday = stac.attrs.get("scene_metadata_multiday")
+    # Same channel: what the pre-load footprint prefilter skipped, grabbed here
+    # because the band concat below drops Dataset attrs.
+    _fp_prefilter = stac.attrs.get("footprint_prefilter")
     # Target projection chosen in get_stac from the native CRSs of every matched
     # item. Stored as "EPSG:<code>" (see crs_attr_string): the cube's attrs used
     # to hold spatial_ref.projected_crs_name, a display NAME that only round-trips
@@ -1022,6 +1065,17 @@ def get_stac_layers(
         stac.attrs["partial_scene_handling"] = partial_scene_handling
         if _remove_partial:
             stac.attrs["min_scene_coverage"] = float(min_scene_coverage)
+        # Pre-load footprint prefilter. Flattened to scalars rather than stored
+        # as the info dict: NetCDF attrs take strings and numbers only. The
+        # catalogue is recorded alongside because the outlines differ between
+        # them (measured: PC and terrabyte identical, Element84 ~3.3 pp lower on
+        # partial scenes), so the threshold alone would not explain the result.
+        if _min_footprint_cov:
+            stac.attrs["min_footprint_coverage"] = float(_min_footprint_cov)
+            if isinstance(_fp_prefilter, dict):
+                stac.attrs["footprint_prefilter_skipped"] = int(
+                    _fp_prefilter.get("dropped", 0)
+                )
         if scene_metadata:
             # Recorded so update mode can rebuild the same coords on newly
             # added scenes (see get_stac_parameters and the restore above).

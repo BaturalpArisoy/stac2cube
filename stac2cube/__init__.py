@@ -2,6 +2,7 @@ from .vector_refiner import *
 from .main import *
 from .get_data import *
 from .data_availability import *
+from .auxiliary import *
 from .stac_processing import *
 from .get_spectral_indices import *
 from .export_cfg import *

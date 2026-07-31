@@ -905,6 +905,8 @@ def get_stac(
     scene_metadata: list = None,
     tile_handling: str = "mosaic",
     crs=None,
+    min_footprint_coverage=None,
+    clip_raster=None,
     q: bool = False,
 ):
     _source_aliases = {"e84": "element84", "tb": "terrabyte", "pc": "planetary_computer"}
@@ -1016,6 +1018,37 @@ def get_stac(
         items = all_items
         tiles = np.array(sorted(tiles_set)) if tiles_set else None
 
+    # --- Footprint prefilter (pre-load) ---------------------------------------
+    # Drop acquisitions that barely graze the AOI while they are still just STAC
+    # metadata. This is the ONLY scene filter that runs before stac_load, so it
+    # is the only one that saves work rather than trimming the result: a dropped
+    # acquisition is never loaded, never has its SCL read and never gets a
+    # full-grid slab. Runs before _choose_target_crs on purpose, so the target
+    # projection is chosen from the scenes the cube will actually hold.
+    #
+    # Imported here, not at module scope: auxiliary imports from this module, so
+    # a top-level import would be circular.
+    footprint_filter = None
+    if min_footprint_coverage:
+        from .auxiliary import filter_items_by_footprint
+
+        items, footprint_filter = filter_items_by_footprint(
+            items,
+            polygon,
+            min_footprint_coverage,
+            coverage_geometry="polygon" if clip_raster else "bbox",
+            tile_handling=tile_handling,
+            q=q,
+        )
+        # The tile list is rebuilt from the survivors: a whole MGRS tile can
+        # disappear with the acquisitions that only touched the AOI through it.
+        if footprint_filter and mission in ("sentinel_2_l2a", "sentinel_2_l1c"):
+            _kept_tiles = {_item_tile(it) for it in items}
+            _kept_tiles.discard(None)
+            if _kept_tiles:
+                tiles = np.array(sorted(_kept_tiles))
+            crs_counts = Counter(_item_crs(item) for item in items)
+
     # --- Target projection ----------------------------------------------------
     # ONE CRS for the whole cube (every tile is warped into it by odc-stac), now
     # chosen from the native CRSs of ALL matched items rather than from items[0].
@@ -1121,6 +1154,11 @@ def get_stac(
     # these do not survive main.py's band concat, so they are read there directly.
     if target_crs is not None:
         stac.attrs["target_crs"] = target_crs
+    # Provenance for the pre-load prefilter, picked up by main.py: a cube whose
+    # date list was trimmed before download must be able to say so, and by how
+    # much (the estimate is catalogue-dependent, so the source matters too).
+    if footprint_filter:
+        stac.attrs["footprint_prefilter"] = footprint_filter
     _natives = sorted(c for c in crs_counts if c)
     # Recorded whenever the scenes are NOT all native to the cube's own CRS, i.e.
     # whenever something had to be reprojected. That covers both a multi-projection
