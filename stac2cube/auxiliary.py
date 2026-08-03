@@ -56,7 +56,7 @@ import geopandas as gpd
 import pandas as pd
 from pystac_client import Client as pystacclient
 
-from .vector_refiner import polygon_2_bbox, polygon_2_gdf
+from .vector_refiner import polygon_2_bbox, polygon_2_features, polygon_2_gdf
 from .get_data import (
     _CATALOGUES,
     _EQUAL_AREA,
@@ -594,6 +594,120 @@ def _orbit_sort_key(orbit):
     if isinstance(orbit, str):
         return (1, orbit)
     return (0, f"{orbit:06d}")
+
+
+# Below this share of an area, an acquisition brings so little that it is worth
+# leaving out of the download entirely: the timestep costs the full grid either
+# way (see filter_items_by_footprint). Used both for the per-feature "grazing"
+# count and for the builder's suggestion under Check area coverage, so the two
+# can never drift apart.
+GRAZE_THRESHOLD = 0.10
+
+
+def summarize_per_feature_footprints(gdf, polygon, coverage_geometry="bbox"):
+    """Per-FEATURE coverage summary for a multi-feature (batch) polygon file.
+
+    A polygon file holding more than one feature is built as one cube PER
+    feature (see get_stac_layers' batching branch), each against that feature's
+    own bounding box. Measuring the preview against the combined extent of all
+    features would therefore describe a cube that is never built: on a file of
+    river reaches spread along a valley, the combined bbox is the whole valley,
+    and orbits that only clip its far end look relevant while reaching no reach
+    at all.
+
+    This measures each feature separately, against exactly the geometry its own
+    cube will use, reusing the footprints already fetched - so it costs shapely
+    intersections only, no extra catalogue query.
+
+    Returns
+    -------
+    (df, info)
+        df : one row per feature - dates, orbits that reach it, and the average
+             / best / worst share of it a single date holds.
+        info : dict with ``n_features``, ``orbits_reaching_none`` (orbits that
+               touch the combined extent but no individual feature - the exact
+               false-alarm case this function exists to catch),
+               ``features_with_grazing`` (areas holding at least one date under
+               ``GRAZE_THRESHOLD``), ``features_never_full`` (areas no single
+               date covers completely - not areas without data) and
+               ``features_with_no_dates``.
+    """
+    features = polygon_2_features(polygon)
+    n_features = len(features)
+
+    # One reprojection of every footprint for the whole loop, not one per
+    # feature: with 47 features that is the difference between ~1 s and a minute.
+    if len(gdf):
+        gdf = gdf.assign(_geom_eq=list(gdf.to_crs(_EQUAL_AREA).geometry))
+
+    records = []
+    orbits_reached = set()
+    for pos, feature in enumerate(features, start=1):
+        try:
+            _, _, feat_geom = _aoi_geometries(feature, coverage_geometry)
+            feat_eq = _eq_area(feat_geom)
+        except Exception:
+            feat_eq = None
+        if feat_eq is None or feat_eq.area <= 0 or not len(gdf):
+            records.append({"Area": pos, "Dates": 0, "Orbits": "-"})
+            continue
+
+        per_date, date_orbits = {}, {}
+        for date, rows in gdf.groupby("date"):
+            share = _share_eq(list(rows["_geom_eq"]), feat_eq)
+            # A footprint that misses this feature entirely contributes 0, not a
+            # date: only acquisitions that actually touch it become timesteps.
+            if share is not None and share > 0:
+                per_date[date] = share
+                date_orbits[date] = {o for o in rows["orbit"]}
+
+        shares = list(per_date.values())
+        feat_orbits = sorted(
+            {o for os_ in date_orbits.values() for o in os_}, key=_orbit_sort_key
+        )
+        orbits_reached.update(feat_orbits)
+        records.append(
+            {
+                "Area": pos,
+                "Dates": len(shares),
+                "Orbits": ", ".join(str(_orbit_label(o)) for o in feat_orbits) or "-",
+                "Average coverage %": _pct(_mean(shares)),
+                "Best date %": _pct(max(shares)) if shares else None,
+                "Worst date %": _pct(min(shares)) if shares else None,
+                # Not a column: the count drives the summary line above the
+                # table, where it is actionable, and a per-row copy of it only
+                # widened a table that is already 47 rows long.
+                "_grazing": sum(1 for s in shares if s < GRAZE_THRESHOLD),
+            }
+        )
+
+    df = pd.DataFrame(records)
+    n_grazing = 0
+    if not df.empty:
+        for col in ("Average coverage %", "Best date %", "Worst date %"):
+            if col in df:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+        if "_grazing" in df:
+            n_grazing = int((df["_grazing"] > 0).sum())
+            df = df.drop(columns=["_grazing"])
+        df = df.set_index("Area")
+
+    all_orbits = sorted({o for o in gdf["orbit"]} if len(gdf) else set(), key=_orbit_sort_key)
+    info = {
+        "n_features": n_features,
+        "graze_threshold": GRAZE_THRESHOLD,
+        "orbits_reaching_none": [o for o in all_orbits if o not in orbits_reached],
+        "features_with_grazing": n_grazing,
+        "features_never_full": (
+            int((df["Best date %"] < 99.5).sum())
+            if not df.empty and "Best date %" in df
+            else 0
+        ),
+        "features_with_no_dates": (
+            int((df["Dates"] == 0).sum()) if not df.empty else 0
+        ),
+    }
+    return df, info
 
 
 # --- pre-load footprint prefilter --------------------------------------------
@@ -1335,6 +1449,24 @@ def preview_scene_footprints(
     info["source"] = source
     info["static_mission"] = mission in _STATIC_MISSIONS
     info["footprints"] = gdf  # kept so a caller can build other views without re-querying
+    # A multi-feature file is built as one cube PER feature, each against its own
+    # bounding box, so the union numbers above describe a cube nobody ever gets:
+    # on a file of river reaches the union is the whole valley, and an orbit that
+    # only clips its far end looks relevant while reaching no reach at all.
+    # Measured here from the SAME footprints (no extra query) and handed over so
+    # the caller can show the per-feature view instead.
+    info["per_feature"], info["per_feature_info"] = None, None
+    if len(gdf) and not info["static_mission"]:
+        try:
+            _fdf, _finfo = summarize_per_feature_footprints(
+                gdf, polygon, coverage_geometry
+            )
+        except Exception:
+            # A per-feature failure must not take the whole preview down: the
+            # union view above is still valid and still worth showing.
+            _fdf = _finfo = None
+        if _finfo and _finfo.get("n_features", 1) > 1:
+            info["per_feature"], info["per_feature_info"] = _fdf, _finfo
     info["notes"] = _footprint_notes(info)  # re-run: static_mission is known only here
     # Drawn even with no footprints: the user still gets their area on the map,
     # which is the answer to "did I really select what I think I did?".

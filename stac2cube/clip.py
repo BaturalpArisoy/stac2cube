@@ -198,19 +198,21 @@ def compute_cloud_percentage(
     return pct
 
 
-def compute_scene_coverage(stac, cloud_mask=None, compute=True):
-    """Per-time fraction (0..1) of the observable AOI footprint a scene images.
+def compute_scene_coverage(stac, cloud_mask=None, compute=True, aoi_mask=None):
+    """Per-time fraction (0..1) of the AOI a scene images.
 
     Across-track / swath-edge scenes cover only part of the AOI; the missing
     part loads as NaN. This returns, per timestep, how much of the AOI that
     scene actually holds:
 
-      coverage(t) = (pixels imaged at t) / (pixels imaged in ANY scene)
+      coverage(t) = (pixels imaged at t) / (AOI pixels)
 
-    The denominator is the footprint - pixels imaged at least once - so pixels
-    that are NaN in *every* scene (outside a non-rectangular clip) are excluded
-    and a scene that fully covers the AOI reads ~1.0. This mirrors the footprint
-    logic of :func:`compute_cloud_percentage`.
+    ``aoi_mask`` (rasterized AOI polygon, y/x bool) restricts both sides, so
+    pixels outside a non-rectangular clip - NaN in every scene - are excluded
+    from the denominator and a scene covering the whole polygon reads 1.0. Omit
+    it for a plain bbox, where the AOI is the grid. See
+    :func:`_aoi_pixel_count` for why the denominator is the AOI rather than the
+    imaged union.
 
     "Imaged" is measured on a single representative band (``band=0``, a spectral
     band since the cube is built spectral-bands-first): a genuine swath/tile gap
@@ -248,28 +250,53 @@ def compute_scene_coverage(stac, cloud_mask=None, compute=True):
         cm = cloud_mask.sel(y=stac["y"], x=stac["x"]).astype(bool)
         cm = cm.assign_coords(time=stac["time"])
         observed = observed | cm
+    if aoi_mask is not None:
+        observed = observed & aoi_mask.astype(bool)
 
-    footprint = observed.any(dim="time")  # (y, x): imaged at least once
     per_time = observed.sum(dim=("y", "x")).astype("float64")
+    denom = _aoi_pixel_count(stac, aoi_mask)
 
     if not compute:
-        # Fully deferred: keep the denominator lazy too, so on a dask-backed
-        # cube nothing is read until the coord is actually used. This is what
-        # lets get_stac_layers attach scene_coverage to every cube without
-        # forcing an eager band read on an otherwise-lazy build. A degenerate
-        # all-empty footprint (denom==0) yields NaN here instead of the eager
-        # path's explicit zeros - acceptable, as such a cube carries no scene
-        # to judge.
-        return per_time / footprint.sum().astype("float64")
+        # Fully deferred: nothing is read until the coord is actually used. This
+        # is what lets get_stac_layers attach scene_coverage to every cube
+        # without forcing an eager band read on an otherwise-lazy build. Now
+        # that the denominator is the AOI, this reduces per timestep only, so
+        # the read also streams one scene at a time.
+        return per_time / denom
 
-    denom = int(footprint.sum())
-    if denom == 0:
+    if float(denom) == 0.0:
         return xr.zeros_like(stac["time"], dtype="float64")
 
     cov = per_time / denom
     if getattr(cov, "chunks", None) is not None:
         cov = cov.compute()
     return cov
+
+
+def _aoi_pixel_count(stac, aoi_mask=None):
+    """Denominator for scene coverage: how many pixels the AOI has.
+
+    ``aoi_mask`` given -> the rasterized polygon's pixel count, so a
+    non-rectangular AOI is respected. None (a plain bbox, where the AOI IS the
+    grid) -> the full grid.
+
+    This is deliberately NOT "pixels imaged in any scene", which is what the
+    coverage used to divide by. That denominator was defined by the cube's own
+    contents, which made the metric say different things about the same scene
+    depending on which dates sat next to it: on a range holding only partial
+    scenes it collapsed onto the partial footprint and every scene read 1.00 -
+    "covers the whole area" for a scene imaging a quarter of it (measured on a
+    2-day range: 1.0000 against a true 0.2529). It also made the number
+    incomparable between cubes and unstable under update and date filtering.
+
+    Measured against the old denominator on real AOIs over a normal date range
+    (aktal and test_clip, June 2024): the imaged union reached 100.0% of the AOI
+    in both cases, so every per-scene value is unchanged. The two only part
+    company where the old one was wrong.
+    """
+    if aoi_mask is not None:
+        return aoi_mask.astype(bool).sum().astype("float64")
+    return float(int(stac.sizes["y"]) * int(stac.sizes["x"]))
 
 
 def compute_scene_coverage_from_imaged(stac, imaged_mask, aoi_mask=None):
@@ -287,14 +314,23 @@ def compute_scene_coverage_from_imaged(stac, imaged_mask, aoi_mask=None):
     SCL/QA fetch as the cloud boolean, and returning a lazy result lets the
     caller compute it together with the cloud percentage in one pass (one read).
 
-      coverage(t) = (imaged AOI pixels at t) / (imaged AOI pixels in ANY scene)
+      coverage(t) = (imaged AOI pixels at t) / (AOI pixels)
 
-    ``aoi_mask`` (rasterized AOI polygon, y/x bool) intersects the footprint so a
+    ``aoi_mask`` (rasterized AOI polygon, y/x bool) restricts both sides so a
     non-rectangular clip is respected: without it, in-bbox-but-outside-polygon
-    pixels (imaged in the raw scene, clipped away in the cube) would inflate the
-    denominator. For a plain bbox the AOI is the whole grid, so it may be omitted.
+    pixels (imaged in the raw scene, clipped away in the cube) would count. For
+    a plain bbox the AOI is the whole grid, so it may be omitted.
+
+    The denominator is the AOI, not the imaged union - see
+    :func:`_aoi_pixel_count` for the measurements behind that. It makes the
+    value a property of the scene and the AOI alone, so it means the same thing
+    in every cube, does not move when dates are added, filtered or updated, and
+    can never report a partial scene as complete.
 
     Returns a LAZY float DataArray indexed by ``time`` (or None if no time dim).
+    Nothing here reduces over time, so dask streams one scene at a time instead
+    of having to hold the whole class-band series until a cross-time reduction
+    completes.
     """
     if "time" not in stac.dims:
         return None
@@ -307,9 +343,8 @@ def compute_scene_coverage_from_imaged(stac, imaged_mask, aoi_mask=None):
     if aoi_mask is not None:
         im = im & aoi_mask.astype(bool)
 
-    footprint = im.any(dim="time")                    # (y, x) imaged in any scene
     per_time = im.sum(dim=("y", "x")).astype("float64")
-    return per_time / footprint.sum().astype("float64")
+    return per_time / _aoi_pixel_count(stac, aoi_mask)
 
 
 def drop_partial_scenes(stac, min_coverage=0.9, cloud_mask=None, q=False, coverage=None):

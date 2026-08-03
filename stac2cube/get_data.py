@@ -1159,6 +1159,49 @@ def get_stac(
     # much (the estimate is catalogue-dependent, so the source matters too).
     if footprint_filter:
         stac.attrs["footprint_prefilter"] = footprint_filter
+
+    # --- Per-day mean solar azimuth, from the items already in hand ----------
+    # Shadow masking needs one azimuth per solar day and today runs a SECOND
+    # STAC search to get it (get_solar_geometry via solar_azimuths_for_days) -
+    # measured at ~25% of a lazy shadow build, and it grows with the item count.
+    # Every value it wants is already on the items matched above, so they are
+    # summarised here for main.py to reuse.
+    #
+    # Offered ONLY when this search cannot have seen a different item set than
+    # that one does, because the value is a per-day MEAN and a different set
+    # means a different mean. get_solar_geometry queries the same endpoint and
+    # bbox with NO cloud filter, so the sets match only when nothing narrowed
+    # ours either:
+    #   * no effective cloud query - measured on a 6-month, 2-tile AOI:
+    #     max_cc=None and max_cc=100 both give the same 144 items and azimuths
+    #     equal to 1e-10 deg, while max_cc=30 leaves 78 items and moves 8 of 43
+    #     days by up to 1.33 deg (a tile of a multi-tile day drops out);
+    #   * no footprint prefilter, which likewise drops whole acquisitions;
+    #   * not season mode, whose windows are not one contiguous range.
+    # L2A only: the L1C dedup below rewrites the item list for the same reason.
+    # When any of that applies the attr is simply absent and main.py falls back
+    # to the search, so the result is unchanged either way.
+    if (
+        mission == "sentinel_2_l2a"
+        and (max_cc is None or float(max_cc) >= 100)
+        and not footprint_filter
+        and season_spec is None
+    ):
+        _az_by_day = {}
+        for _it in items:
+            _p = _it.properties
+            _a = _p.get("view:sun_azimuth")
+            if _a is None:
+                _a = _p.get("s2:mean_solar_azimuth")
+            if _a is None:
+                continue
+            _az_by_day.setdefault(str(_p.get("datetime", ""))[:10], []).append(
+                float(_a)
+            )
+        if _az_by_day:
+            stac.attrs["solar_azimuth_by_day"] = {
+                _d: float(np.mean(_v)) for _d, _v in _az_by_day.items()
+            }
     _natives = sorted(c for c in crs_counts if c)
     # Recorded whenever the scenes are NOT all native to the cube's own CRS, i.e.
     # whenever something had to be reprojected. That covers both a multi-projection

@@ -896,6 +896,48 @@ def _zoom_frame_uint8(img: np.ndarray, max_px: int = _MAX_DISPLAY_PX):
     return np.ascontiguousarray(np.asarray(pil, dtype=np.uint8)), True
 
 
+def _scene_stat_labels(stac, n_time):
+    """Per-timestep " (cloud = X%, coverage = Y%)" label suffixes, or None.
+
+    Built from the cube's own ``cloud_percentage`` (0..100) and
+    ``scene_coverage`` (fraction 0..1) coordinates, using the same rounding as
+    the GUI's Dates table so a date reads the same in both places. Whichever
+    coordinate is missing is simply left out of the label; when neither is
+    present the function returns None and the caller labels dates as before.
+
+    A still-LAZY (dask-backed) coord counts as absent: materializing it would
+    re-read the cube just to write a label, which is exactly what the deferred
+    cloud-percentage path exists to avoid.
+    """
+    def _vals(name, scale=1.0):
+        c = getattr(stac, "coords", {}).get(name)
+        if c is None or "time" not in getattr(c, "dims", ()):
+            return None
+        if getattr(getattr(c, "data", None), "chunks", None) is not None:
+            return None
+        try:
+            v = np.asarray(c.values, dtype="float64").ravel() * scale
+        except Exception:
+            return None
+        return v if v.size == n_time else None
+
+    cloud = _vals("cloud_percentage")
+    coverage = _vals("scene_coverage", 100.0)
+    if cloud is None and coverage is None:
+        return None
+
+    labels = []
+    for i in range(n_time):
+        parts = []
+        if cloud is not None and np.isfinite(cloud[i]):
+            parts.append(f"cloud = {int(round(cloud[i]))}%")
+        if coverage is not None and np.isfinite(coverage[i]):
+            parts.append(f"coverage = {int(round(coverage[i]))}%")
+        labels.append(f" ({', '.join(parts)})" if parts else "")
+    # All-NaN coords carry no information; fall back to plain dates.
+    return labels if any(labels) else None
+
+
 def interactive_time_view(
     stac: xr.DataArray,
     widget_type: str = "slider",  # "slider" or "dropdown" (for time)
@@ -922,6 +964,13 @@ def interactive_time_view(
     A time slider or date dropdown is shared by all sections. Lazy
     (dask-backed) cubes stay lazy: only the currently displayed scene is
     computed.
+
+    Dates are annotated with the scene's cloud and coverage percentages when
+    the cube carries those coordinates, e.g.
+    ``22-05-2024 (cloud = 50%, coverage = 100%)`` - in the date dropdown and in
+    the frame title alike. A coordinate that is absent is left out of the
+    label, and one that is still lazy counts as absent (computing it would mean
+    re-reading the cube just to write a label).
 
     Also accepts a single image without a 'time' dimension (e.g. a temporal
     composite such as a median layer): the time control is hidden and the
@@ -1015,6 +1064,16 @@ def interactive_time_view(
     else:
         time_values = None
         n_time = 1
+
+    # Cloud / coverage annotation for every date, when the cube carries those
+    # coordinates: the two numbers that decide whether a scene is worth looking
+    # at belong next to the date that selects it.
+    scene_stats = _scene_stat_labels(stac_c, n_time) if has_time else None
+
+    def _date_label(i):
+        return time_values[i].strftime("%d-%m-%Y") + (
+            scene_stats[i] if scene_stats else ""
+        )
 
     # ------------------------------------------------------------------
     # Band inventory and section availability
@@ -1128,14 +1187,16 @@ def interactive_time_view(
         )
     elif widget_type == "dropdown":
         if has_time:
-            options = [(t.strftime("%d-%m-%Y"), i) for i, t in enumerate(time_values)]
+            options = [(_date_label(i), i) for i in range(n_time)]
         else:
             options = [(static_label, 0)]
         time_w = widgets.Dropdown(
             options=options,
             value=0,
             description="Date:",
-            layout=widgets.Layout(width="300px"),
+            # The annotated labels are ~3x longer than a bare date, so the box
+            # has to grow or they are cut off in the closed dropdown.
+            layout=widgets.Layout(width="440px" if scene_stats else "300px"),
         )
     else:
         raise ValueError("widget_type must be 'slider' or 'dropdown'")
@@ -1366,7 +1427,7 @@ def interactive_time_view(
 
     def _frame_title(idx, suffix):
         if has_time:
-            return time_values[idx].strftime("%d-%m-%Y") + suffix
+            return _date_label(idx) + suffix
         return str(static_label) + suffix
 
     def _plot_static():

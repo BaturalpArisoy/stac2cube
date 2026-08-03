@@ -1,3 +1,4 @@
+import contextlib
 import os
 import numpy as np
 import dask
@@ -422,7 +423,17 @@ def _set_zarr_fill_value(ds):
         )
 
 
-def _write_zarr(ds, output, overwrite):
+def _progress(q=False):
+    """The dask progress bar, or nothing at all when quiet.
+
+    The bar redraws several times a second. On a terminal that is a progress
+    indicator; in a SLURM log it is thousands of control-character writes that
+    bury the actual output, which is exactly where `q` is used.
+    """
+    return contextlib.nullcontext() if q else ProgressBar()
+
+
+def _write_zarr(ds, output, overwrite, q=False):
     """Write ``ds`` to a Zarr store, streaming chunks from dask.
 
     Unlike the NetCDF path this does NOT materialize the whole cube first: the
@@ -472,7 +483,7 @@ def _write_zarr(ds, output, overwrite):
         # Same progress bar the NetCDF path shows. The chunk() above always
         # leaves ds dask-backed, so to_zarr always drives the dask scheduler
         # ProgressBar hooks and the bar is never a no-op.
-        with ProgressBar():
+        with _progress(q):
             ds.to_zarr(output, mode="w")
 
 
@@ -669,6 +680,7 @@ def export_stac(
     overwrite=True,
     compress=False,
     vrt=False,
+    q=False,
 ):
     """Write a cube to disk. Output format is chosen by the file extension:
 
@@ -722,8 +734,9 @@ def export_stac(
         ds = stac
 
     if is_zarr:
-        _write_zarr(ds, output, overwrite)
-        print(f"Export is done: {output}")
+        _write_zarr(ds, output, overwrite, q=q)
+        if not q:
+            print(f"Export is done: {output}")
         return stac
 
     if overwrite and os.path.exists(output):
@@ -757,12 +770,13 @@ def export_stac(
     if _is_dask_backed(ds):
         # Keeps the familiar progress bar: the compute now happens inside
         # to_netcdf, on the same dask scheduler ProgressBar hooks.
-        with ProgressBar():
+        with _progress(q):
             ds.to_netcdf(output)
     else:
         ds.to_netcdf(output)
 
-    print(f"Export is done: {output}")
+    if not q:
+        print(f"Export is done: {output}")
     # After the write, so the VRT describes the file that now exists.
     #
     # A sidecar that is already there is REFRESHED even when vrt=False. Its band
@@ -776,10 +790,11 @@ def export_stac(
     if vrt or (stale is not None and stale.exists()):
         try:
             written = write_qgis_vrt(output)
-            print(
-                f"QGIS band-labelled VRT: {written}" if vrt
-                else f"Refreshed the existing QGIS VRT: {written}"
-            )
+            if not q:
+                print(
+                    f"QGIS band-labelled VRT: {written}" if vrt
+                    else f"Refreshed the existing QGIS VRT: {written}"
+                )
         except Exception as exc:
             # A failure here must not lose the cube that was just exported.
             print(f"Note: could not write the QGIS VRT ({exc}). The NetCDF is fine.")
@@ -792,7 +807,8 @@ def export_stac(
 
 
 def export_to_cogs(
-    stac: xr.DataArray | xr.Dataset, output_dir: str, prefix: str = "", dtype="float32"
+    stac: xr.DataArray | xr.Dataset, output_dir: str, prefix: str = "",
+    dtype="float32", q=False,
 ):
 
     outdir = Path(output_dir)
@@ -878,7 +894,8 @@ def export_to_cogs(
         Write a single xarray.DataArray slice as COG.
         Keeps 'band' as multiband if present.
         """
-        print(f"Writing {out_file.name}")
+        if not q:
+            print(f"Writing {out_file.name}")
 
         if "band" in da.dims:
             ds = da.to_dataset(dim="band")

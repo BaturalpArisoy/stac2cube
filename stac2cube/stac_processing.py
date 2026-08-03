@@ -67,6 +67,88 @@ def expand_season_windows(start_md: str, end_md: str, years):
     return windows
 
 
+def class_layer_name(mission):
+    """Name of the scene-classification band for a mission ('scl' / 'qa_pixel'),
+    or None when the mission has none (or is unknown - callers must not fail on
+    a lookup that ``cloud_mask`` will report properly a moment later)."""
+    try:
+        return _mission_cfg(mission)[0]
+    except KeyError:
+        return None
+
+
+def persist_vars(stac, names, budget_bytes=None, q=False):
+    """Hold the named source bands in memory so later steps stop re-reading them.
+
+    A band that several steps derive from is otherwise fetched, decoded and
+    warped once per ``compute()`` - dask keeps no cache between compute calls.
+    Measured on a shadow build before this existed: every SCL file opened 4x and
+    every nir file 2x. Persisting the source variable once turns every later
+    consumer into a RAM read.
+
+    Two bands are worth it, and only when they really have more than one
+    consumer (the caller decides - see get_stac_layers):
+
+      * the class layer (scl / qa_pixel), feeding the cloud boolean, the
+        "imaged" boolean, the cube's own masking, the binary mask file and the
+        shadow projection;
+      * ``nir`` on a shadow build, which the dark-pixel test reads eagerly and
+        the export then reads again.
+
+    They are persisted TOGETHER in one ``dask.persist`` so any work their graphs
+    share is done once. Persisting here - before scaling and clipping - holds the
+    RAW band (e.g. uint16 nir, half the size of the scaled float32), and the
+    scaling/clipping downstream is cheap CPU on data already in memory.
+
+    Skipped entirely when the total would not fit ``budget_bytes`` (default: the
+    job-aware budget of :func:`cloud_masking._memory_budget_bytes`, which reads
+    cgroup / SLURM limits). The estimate is the PRE-CLIP size, which is what
+    would actually be held: the masking is applied before the clip, so a
+    persisted array covers the whole search bbox even when the polygon fills
+    little of it.
+
+    Returns ``(stac, persisted_names)``. The Dataset is shallow-copied before the
+    bands are swapped, so the caller's object is untouched.
+    """
+    if not isinstance(stac, xr.Dataset):
+        return stac, []
+
+    want = [
+        n for n in dict.fromkeys(names)
+        if n and n in stac.data_vars
+        and getattr(stac[n].data, "chunks", None) is not None
+    ]
+    if not want:
+        return stac, []
+
+    if budget_bytes is None:
+        # Imported at call time: cloud_masking imports main, which imports this
+        # module, so a top-level import would be circular at package load.
+        from .cloud_masking import _memory_budget_bytes
+
+        budget_bytes = _memory_budget_bytes()
+
+    need = sum(int(stac[n].nbytes) for n in want)
+    if need > budget_bytes:
+        if not q:
+            print(
+                f"Note: {', '.join(want)} ({need / 1024**3:.2f} GB) does not fit "
+                f"the memory budget ({budget_bytes / 1024**3:.2f} GB), so these "
+                "bands are read again where needed instead of being kept in "
+                "memory.",
+                flush=True,
+            )
+        return stac, []
+
+    import dask
+
+    persisted = dask.persist(*[stac[n] for n in want])
+    stac = stac.copy()
+    for name, da in zip(want, persisted):
+        stac[name] = da
+    return stac, want
+
+
 def cloud_mask(stac, mission, keep_clouds=False, keep_layer=False):
     """Build the per-pixel cloud boolean from the scene-classification / QA layer
     and either remove the cloudy pixels (default) or leave the imagery untouched.
@@ -163,8 +245,13 @@ def build_scl_mask_cube(stac, cloud_bool):
     cm = cm.expand_dims(band=["cloud_mask_scl"]).transpose("time", "band", "y", "x")
     cm.name = "Cloud_Stack"
     if "cloud_percentage" in stac.coords:
+        # Pass the coord's data through AS IS. np.asarray() here would compute a
+        # still-lazy percentage on the spot (the build defers it when the run
+        # writes straight to disk - see get_stac_layers), forcing the very extra
+        # SCL read that deferring exists to avoid. A dask-backed coord is carried
+        # over untouched and materialized by whichever export writes this mask.
         cm = cm.assign_coords(
-            cloud_percentage=("time", np.asarray(stac["cloud_percentage"].data))
+            cloud_percentage=("time", stac["cloud_percentage"].data)
         )
     return cm
 

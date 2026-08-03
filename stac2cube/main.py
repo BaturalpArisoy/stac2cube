@@ -15,7 +15,13 @@ from .vector_refiner import (
     polygon_2_features,
     polygon_2_gdf,
 )
-from .stac_processing import scale_factor, cloud_mask, build_scl_mask_cube
+from .stac_processing import (
+    scale_factor,
+    cloud_mask,
+    build_scl_mask_cube,
+    class_layer_name,
+    persist_vars,
+)
 from .get_spectral_indices import calculate_spectral_index
 from .export_cfg import export_stac, export_to_cogs
 
@@ -90,7 +96,7 @@ def _validate_export_format(output, export_format):
 
 def _export_result(
     stac, output, export_format, crs=None, transform=None, compress=False,
-    vrt=False,
+    vrt=False, q=False,
 ):
     """Write the finished cube, dispatching on ``export_format``.
 
@@ -104,9 +110,11 @@ def _export_result(
     """
     if export_format == "cogs":
         os.makedirs(output, exist_ok=True)
-        export_to_cogs(stac, output_dir=output, prefix="", dtype="float32")
+        export_to_cogs(stac, output_dir=output, prefix="", dtype="float32", q=q)
         return stac
-    return export_stac(stac, output, crs, transform, compress=compress, vrt=vrt)
+    return export_stac(
+        stac, output, crs, transform, compress=compress, vrt=vrt, q=q,
+    )
 
 
 def _drop_timeseries(stac, keep_timeseries):
@@ -655,7 +663,7 @@ def get_stac_layers(
                         feature_output = f"{stem}_{idx}{ext}"
                     _export_result(
                         res, feature_output, _export_format, compress=compress,
-                        vrt=vrt,
+                        vrt=vrt, q=bool(q),
                     )
 
                 # Report each cube's estimated (logical, pre-load) data size.
@@ -928,25 +936,41 @@ def get_stac_layers(
     _separate_tiles = (tile_handling == "separate") and (
         "tile" in getattr(stac, "coords", {})
     )
+    # ---- Everything get_stac reported, captured before it is lost -----------
+    # The band concat further down turns this Dataset into a DataArray and its
+    # global attrs do NOT survive that. Anything get_stac wants to tell us has
+    # to be taken here or it vanishes silently - no error, nothing in the
+    # output. Taking the whole dict in one go (rather than one .get per field,
+    # scattered) means a field added to get_stac later is already in hand here,
+    # whatever it is.
+    #
+    # Deliberately NOT re-applied wholesale after the concat: several of these
+    # are dicts (footprint_prefilter, solar_azimuth_by_day), which no NetCDF
+    # attribute can hold - they are summarised into scalars in the metadata
+    # block instead. That is why this stays an explicit hand-off.
+    _ds_attrs = dict(getattr(stac, "attrs", {}) or {})
     # On how many solar days the scene-metadata values were reduced from >1
-    # STAC item (tile overlap). Grabbed now because the Dataset attrs are lost
-    # in the band concat below; re-attached in the metadata block.
-    _meta_multiday = stac.attrs.get("scene_metadata_multiday")
-    # Same channel: what the pre-load footprint prefilter skipped, grabbed here
-    # because the band concat below drops Dataset attrs.
-    _fp_prefilter = stac.attrs.get("footprint_prefilter")
+    # STAC item (tile overlap); re-attached in the metadata block.
+    _meta_multiday = _ds_attrs.get("scene_metadata_multiday")
+    # What the pre-load footprint prefilter skipped.
+    _fp_prefilter = _ds_attrs.get("footprint_prefilter")
+    # Per-day mean solar azimuth read off the items the query already matched,
+    # so the shadow pass does not have to run a second STAC search for it.
+    # Absent whenever the two searches could disagree - see get_stac - and the
+    # shadow block then falls back to that search.
+    _solar_az_by_day = _ds_attrs.get("solar_azimuth_by_day")
     # Target projection chosen in get_stac from the native CRSs of every matched
     # item. Stored as "EPSG:<code>" (see crs_attr_string): the cube's attrs used
     # to hold spatial_ref.projected_crs_name, a display NAME that only round-trips
     # for CRSs in the PROJ name database and does not exist at all for geographic
     # CRSs. Falling back to the loaded grid keeps cubes buildable if a source ever
     # publishes no proj:code.
-    crs = stac.attrs.get("target_crs") or crs_attr_string(stac.rio.crs)
+    crs = _ds_attrs.get("target_crs") or crs_attr_string(stac.rio.crs)
     # Native CRSs when something had to be reprojected, with the share of the AOI
     # each one natively covers (provenance for the finished cube; both absent on
     # the normal case of one native projection that the cube also uses).
-    _native_crs = stac.attrs.get("native_crs")
-    _native_crs_share = stac.attrs.get("native_crs_share")
+    _native_crs = _ds_attrs.get("native_crs")
+    _native_crs_share = _ds_attrs.get("native_crs_share")
     transform = stac.rio.transform()
 
     # In update mode, restrict the fresh query to the dates the existing cube
@@ -972,6 +996,80 @@ def get_stac_layers(
         if _has_new_dates and not _is_new.all():
             stac = stac.isel(time=np.nonzero(_is_new)[0])
 
+    # ---- Explicit date selection (headless "Date Selection") -----------------
+    # Same semantics as the GUI Result panel's date picker: keep only the listed
+    # acquisitions. Applied HERE, as early as the time axis exists, because it
+    # is the one scene filter that needs no measurement to decide - the caller
+    # already named the scenes. Everything downstream (the class layer held in
+    # memory below, the shadow projection, the cloud %, the scene coverage, the
+    # binary mask, the export) then works on the kept scenes alone instead of
+    # reading dates that are about to be discarded. Measured on an 8-date range
+    # with 3 dates kept: the class band went from 8 reads to 3, and with a Max
+    # cloud % in the same config from 11 to 3.
+    #
+    # Safe to run first: all three scene filters are commutative AND-selections
+    # on time, so the surviving set is identical whatever the order - the cloud
+    # filter further down simply has fewer scenes left to measure.
+    #
+    # Matching mirrors the picker exactly: on the day for a normal cube (whose
+    # time axis is floored to the day further down, which is what the picker
+    # shows), and on the full timestamp for separate-tile cubes, where two tiles
+    # of one solar day stay distinct and the picker lists both.
+    #
+    # Nothing measured downstream depends on WHICH dates survive: cloud % is
+    # per-timestep by construction, and scene coverage divides by the AOI (not
+    # by the footprint of the scenes in hand), so both mean the same thing
+    # whether or not a date list was given. That is what makes running this
+    # first free of side effects - see clip._aoi_pixel_count.
+    if _dates_keep is not None:
+        if "time" not in getattr(stac, "dims", ()):
+            raise ValueError(
+                "dates was requested but the built cube has no time dimension "
+                "to select from."
+            )
+        _tvals = np.asarray(stac["time"].values)
+        if _separate_tiles:
+            _match = [str(np.datetime64(t, "ns")) for t in _tvals]
+        else:
+            _match = [
+                str(np.datetime64(t, "ns").astype("datetime64[D]").astype("datetime64[ns]"))
+                for t in _tvals
+            ]
+        _keep_d = np.array([m in _dates_keep for m in _match])
+        if not _keep_d.any():
+            raise ValueError(
+                "dates keeps no scene: none of the requested timestamps is in "
+                f"the built cube. The cube carries {len(_tvals)} date(s) "
+                f"between {np.datetime_as_string(_tvals.min(), unit='D')} and "
+                f"{np.datetime_as_string(_tvals.max(), unit='D')}."
+            )
+        _missing = len(_dates_keep) - int(_keep_d.sum())
+        if not _keep_d.all():
+            stac = stac.isel(time=np.flatnonzero(_keep_d))
+        if not q:
+            print(
+                f"dates: kept {int(_keep_d.sum())}/{len(_tvals)} scenes"
+                + (
+                    f" ({_missing} requested date(s) not in this build)"
+                    if _missing > 0
+                    else ""
+                ),
+                flush=True,
+            )
+
+    # --- Who materializes the cloud% / coverage numbers? ----------------------
+    # Decided up front because it also tells the class-layer reuse below how
+    # many times the SCL/QA band will be read (a deferred percentage shares the
+    # export's read instead of adding one). Full reasoning at the cloud%
+    # block further down, where these two numbers are built.
+    _defer_pct = (
+        bool(output)
+        and _export_format != "cogs"
+        and scene_cloud_coverage is None
+        and not _remove_partial
+        and not update
+    )
+
     # Cloud masking
     cloud_bool = None
     imaged_bool = None  # per-pixel "was imaged" (SCL/QA != no-data); scene-coverage source
@@ -986,11 +1084,52 @@ def get_stac_layers(
         # intact here and cloud AND shadow are masked together right after the
         # shadow step (verified bit-identical to get_shadow_layers).
         _defer_cloud_removal = bool(shadow_masking) and not bool(keep_clouds)
+
+        # ---- Reuse the class layer instead of re-reading it ------------------
+        # Everything cloud-related is derived from this one band, and each
+        # consumer that runs in its own compute() re-reads every SCL/QA file.
+        # Count the consumers first: persisting is only a win when there are at
+        # least two, and on a single-pass write there is exactly one (the export
+        # computes the masking and the deferred percentage together), where
+        # holding the band would cost memory for nothing.
+        #
+        #   * the eager cloud% / coverage pass, unless it is deferred to the
+        #     writer (then it shares the export's read - see _defer_pct);
+        #   * the cube itself, when clouds are REMOVED (the masking `where` puts
+        #     the class layer in the cube's own graph; keep-clouds drops it);
+        #   * the binary mask cube, when written or handed back;
+        #   * the shadow projection, which reads it eagerly on its own.
+        _scl_consumers = (
+            (0 if _defer_pct else 1)
+            + (0 if keep_clouds else 1)
+            + (1 if (cloud_mask_output or return_cloud_mask) else 0)
+            + (1 if shadow_masking else 0)
+        )
+        _reuse_bands = []
+        if _scl_consumers >= 2:
+            _reuse_bands.append(class_layer_name(mission))
+        # nir has exactly two consumers on a shadow build: the dark-pixel test
+        # reads it eagerly here, and the export reads it again for the cube.
+        if shadow_masking:
+            _reuse_bands.append("nir")
+        if _reuse_bands:
+            stac, _ = persist_vars(stac, _reuse_bands, q=bool(q))
+
         stac, cloud_bool, imaged_bool = cloud_mask(
             stac, mission,
             keep_clouds=bool(keep_clouds) or _defer_cloud_removal,
             keep_layer=keep_class_layer,
         )
+    elif _remove_partial:
+        # No class layer to work from, so the scene coverage falls back to the
+        # FIRST band (compute_scene_coverage's band=0) and partial-scene removal
+        # has to materialize it to decide what to drop - then the export reads
+        # that same band again for the cube itself. Two consumers, so the same
+        # reuse applies (measured before this: that one band opened 2.00x per
+        # date while every other band opened once).
+        _first_var = next(iter(getattr(stac, "data_vars", {})), None)
+        if _first_var:
+            stac, _ = persist_vars(stac, [_first_var], q=bool(q))
 
     # Scale factor
     stac = scale_factor(stac, mission, baselines, source=source or "element84")
@@ -1144,6 +1283,20 @@ def get_stac_layers(
         if not _separate_tiles:
             stac["time"] = stac["time"].dt.floor("D")
 
+        # AOI mask so a non-rectangular polygon clip is respected by every
+        # metric below (a plain bbox needs none - the whole grid is the AOI).
+        # It keeps outside-polygon clouds out of the cloud-% footprint, and it
+        # is the DENOMINATOR of scene coverage, so both the SCL-based coverage
+        # and the band-0 fallback further down need it - hence it is built here,
+        # once, ahead of both instead of inside the cloud branch.
+        _aoi_mask = None
+        if not (isinstance(polygon, (list, tuple)) and len(polygon) == 4):
+            try:
+                _pproj = polygon_2_gdf(polygon).to_crs(stac.rio.crs)
+                _aoi_mask = _aoi_mask_from_geometries(stac, _pproj.geometry.values)
+            except Exception:
+                _aoi_mask = None
+
         # _has_new_dates guard: in update mode with nothing new to add, these
         # passes (shadow projection, cloud%) read pixels eagerly and would
         # re-download + re-process the stored dates only for update_stac to
@@ -1153,44 +1306,108 @@ def get_stac_layers(
             # Runs on the final (clipped, day-floored) grid: clouds are the SCL
             # cloud boolean, shadows are dark non-water pixels inside each
             # cloud's anti-solar projection (per-scene mean solar azimuth from
-            # the STAC metadata). Reads the nir + scl pixels eagerly - the one
-            # part of a lazy build that must compute now.
+            # the STAC metadata). Reads the nir + scl pixels - the one part of a
+            # lazy build that must compute now - but SCENE BY SCENE (see below).
             shadow_bool = None
             cb_aligned = None
             if shadow_masking and cloud_bool is not None:
                 # Imported at call time: shadow_masking imports cloud_masking,
                 # which imports this module - a top-level import would be
                 # circular at package load.
+                from .cloud_masking import _plan_scene_batches
                 from .shadow_masking import detect_shadow_stack, solar_azimuths_for_days
-
-                if not q:
-                    print("Detecting cloud shadows (reading nir + scl)...", flush=True)
 
                 cb_aligned = cloud_bool.sel(y=stac["y"], x=stac["x"]).assign_coords(
                     time=stac["time"]
                 )
-                nir_np = np.asarray(
-                    stac.sel(band="nir").transpose("time", "y", "x").values,
-                    dtype="float32",
-                )
-                scl_np = np.nan_to_num(
-                    stac.sel(band="scl").transpose("time", "y", "x").values, nan=0
-                ).astype(np.int16)
-                azimuths = solar_azimuths_for_days(
-                    polygon, stac["time"].values, source or "element84"
-                )
+                # Sun azimuth per scene. Prefer the values read off the items
+                # the build already matched (see get_stac): identical by
+                # construction whenever they are offered, and it saves a whole
+                # second STAC search - about a quarter of a lazy shadow build,
+                # more as the item count grows. Any day the summary does not
+                # cover sends us back to the search, which also keeps its
+                # "no azimuth metadata for these dates" error intact.
+                azimuths = None
+                if _solar_az_by_day:
+                    _days = [
+                        np.datetime_as_string(_t, unit="D")
+                        for _t in stac["time"].values
+                    ]
+                    if all(_d in _solar_az_by_day for _d in _days):
+                        azimuths = np.array(
+                            [_solar_az_by_day[_d] for _d in _days], dtype=float
+                        )
+                if azimuths is None:
+                    azimuths = solar_azimuths_for_days(
+                        polygon, stac["time"].values, source or "element84"
+                    )
                 res_m = float(abs(stac.y.values[1] - stac.y.values[0]))
-                shadow_np = detect_shadow_stack(
-                    cb_aligned.transpose("time", "y", "x").values,
-                    nir_np,
-                    scl_np,
-                    azimuths,
-                    res_m,
-                    nir_dark_threshold=nir_dark_threshold,
-                    proj_distance=shadow_proj_distance,
+
+                # ---- Batched over scenes -------------------------------------
+                # detect_shadow_stack is a per-scene loop: every timestep is
+                # computed from its own cloud / nir / scl slice and its own sun
+                # azimuth, with no cross-time state. It used to be handed the
+                # WHOLE time series at once, which made shadow the only step
+                # whose memory grew with the date range - measured on a
+                # 1001x1004 grid, the cost over a plain masked build went from
+                # 126 MB at 12 dates to 344 MB at 25, while the plain build
+                # stayed flat. That is ~11 bytes per pixel-date resident (nir
+                # float32 4 + scl float32 4 + its int16 copy 2 + cloud bool 1),
+                # extrapolating to several GB on a large AOI over a long range,
+                # and it stayed resident through the export because these are
+                # plain locals.
+                #
+                # Feeding it one batch of scenes at a time is exactly equivalent
+                # (verified bit-identical) and bounds that to one batch. The
+                # batch size comes from the same job-aware budget the s2cloudless
+                # loop uses; y*x per scene models ~12 B/pixel in flight, close to
+                # the ~11 actually held.
+                #
+                # What necessarily stays whole is the shadow boolean itself
+                # (1 byte per pixel-date): the masking below needs every date.
+                import dask
+
+                _nT = int(stac.sizes["time"])
+                _nir_da = stac.sel(band="nir").transpose("time", "y", "x")
+                _scl_da = stac.sel(band="scl").transpose("time", "y", "x")
+                _cb_da = cb_aligned.transpose("time", "y", "x")
+                shadow_all = np.zeros(
+                    (_nT, int(stac.sizes["y"]), int(stac.sizes["x"])), dtype=bool
                 )
+                _batch, _ = _plan_scene_batches(
+                    int(stac.sizes["y"]) * int(stac.sizes["x"])
+                )
+                for _i0 in range(0, _nT, _batch):
+                    _sl = slice(_i0, min(_i0 + _batch, _nT))
+                    # One compute per batch for all three, so the tasks they
+                    # share are still run once (and with the class layer and nir
+                    # persisted upstream, they come from memory).
+                    _n_c, _s_c, _c_c = dask.compute(
+                        _nir_da.isel(time=_sl),
+                        _scl_da.isel(time=_sl),
+                        _cb_da.isel(time=_sl),
+                    )
+                    shadow_all[_sl] = detect_shadow_stack(
+                        _c_c.values,
+                        np.asarray(_n_c.values, dtype="float32"),
+                        np.nan_to_num(_s_c.values, nan=0).astype(np.int16),
+                        azimuths[_sl],
+                        res_m,
+                        nir_dark_threshold=nir_dark_threshold,
+                        proj_distance=shadow_proj_distance,
+                    )
+                    del _n_c, _s_c, _c_c
+                    if not q:
+                        # Per batch, not per redraw: shadow used to print one
+                        # line and then look hung for minutes on a long range.
+                        print(
+                            f"Detecting cloud shadows: {min(_i0 + _batch, _nT)}"
+                            f"/{_nT} scenes",
+                            flush=True,
+                        )
+
                 shadow_bool = xr.DataArray(
-                    shadow_np.astype(bool),
+                    shadow_all,
                     dims=("time", "y", "x"),
                     coords={"time": stac["time"], "y": stac["y"], "x": stac["x"]},
                 )
@@ -1215,19 +1432,6 @@ def get_stac_layers(
             _pct_mask = cloud_bool
             if shadow_bool is not None:
                 _pct_mask = cb_aligned | shadow_bool
-
-            # AOI mask so a non-rectangular polygon clip is respected by both
-            # metrics (a plain bbox needs none - the whole grid is the AOI). It
-            # also keeps outside-polygon clouds out of the cloud-% footprint.
-            _aoi_mask = None
-            if not (isinstance(polygon, (list, tuple)) and len(polygon) == 4):
-                try:
-                    _pproj = polygon_2_gdf(polygon).to_crs(stac.rio.crs)
-                    _aoi_mask = _aoi_mask_from_geometries(
-                        stac, _pproj.geometry.values
-                    )
-                except Exception:
-                    _aoi_mask = None
 
             # Cloud % and scene coverage both reduce the SAME SCL/QA read, so
             # materialize them together: dask dedups the shared read and the SCL
@@ -1255,22 +1459,66 @@ def get_stac_layers(
                 if imaged_bool is not None
                 else None
             )
-            import dask
-            if cov_lazy is not None:
-                pct_c, cov_c = dask.compute(pct_lazy, cov_lazy)
+            # ---- Materialize now, or let the writer do it? ------------------
+            # Both numbers reduce the SAME SCL read the CUBE itself needs (a
+            # masked cube is `where(~cloud_bool)`), so computing them here means
+            # that read happens TWICE: once for these two small arrays, then
+            # again when the cube is written - dask keeps no cache between
+            # separate compute calls. Measured on a masked 8-date build: every
+            # SCL file opened 2.00x, against 1.00x for the spectral bands.
+            #
+            # When the run goes STRAIGHT TO DISK and nothing before the write
+            # consumes the numbers, they are attached lazily instead and the
+            # writer computes them in the same pass as the pixels: xarray hands
+            # every dask-backed variable AND coord to one dask.array.store call,
+            # so the shared SCL tasks run once and feed both the masking and the
+            # reductions. This is the pattern scene_coverage already uses on a
+            # no-cloud-detection build (measured there: coord written, source
+            # band still opened exactly 1.00x).
+            #
+            # Kept EAGER whenever the values are needed before the file exists:
+            #   * no output   - an in-memory/preview return has no write to
+            #                   share, and the GUI Result panel reads the numbers
+            #                   without being allowed to touch pixels;
+            #   * scene_cloud_coverage / partial removal - they DECIDE which
+            #                   scenes get written, so they must run first;
+            #   * update      - the coords are concatenated against the stored
+            #                   cube's plain numpy coords;
+            #   * cogs        - written per timestep by rio.to_raster, which
+            #                   drops non-dim coords, so nothing would ever
+            #                   compute them.
+            #
+            # (_defer_pct itself is decided before the cloud masking above,
+            # because the class-layer reuse needs to know whether this pass
+            # counts as a separate read of the SCL/QA band.)
+            if _defer_pct:
+                if pct_lazy is not None:
+                    stac = stac.assign_coords(
+                        cloud_percentage=("time", pct_lazy.data)
+                    )
+                # scene_coverage attached lazily too; the band-0 fallback below
+                # is skipped either way (the coord is present).
+                if cov_lazy is not None:
+                    stac = stac.assign_coords(
+                        scene_coverage=("time", cov_lazy.data)
+                    )
             else:
-                (pct_c,) = dask.compute(pct_lazy)
-                cov_c = None
-            if pct_c is not None:
-                stac = stac.assign_coords(
-                    cloud_percentage=("time", np.asarray(pct_c.data))
-                )
-            # scene_coverage attached here (eagerly, from SCL) when cloud
-            # detection ran; the lazy band-0 fallback below is skipped then.
-            if cov_c is not None:
-                stac = stac.assign_coords(
-                    scene_coverage=("time", np.asarray(cov_c.data, dtype="float64"))
-                )
+                import dask
+                if cov_lazy is not None:
+                    pct_c, cov_c = dask.compute(pct_lazy, cov_lazy)
+                else:
+                    (pct_c,) = dask.compute(pct_lazy)
+                    cov_c = None
+                if pct_c is not None:
+                    stac = stac.assign_coords(
+                        cloud_percentage=("time", np.asarray(pct_c.data))
+                    )
+                # scene_coverage attached here (eagerly, from SCL) when cloud
+                # detection ran; the lazy band-0 fallback below is skipped then.
+                if cov_c is not None:
+                    stac = stac.assign_coords(
+                        scene_coverage=("time", np.asarray(cov_c.data, dtype="float64"))
+                    )
 
             # Binary SCL cloud-mask time series (1=cloud, 0=clear). Built when
             # either a path is given (write it now - SLURM / NetCDF-during-build)
@@ -1310,7 +1558,7 @@ def get_stac_layers(
                     export_stac(
                         mask_cube, cloud_mask_output, crs=crs,
                         transform=stac.rio.transform(), var_name="Cloud_Stack",
-                        compress=compress,
+                        compress=compress, q=bool(q),
                     )
                     if not q:
                         print(f"Binary cloud mask exported: {cloud_mask_output}", flush=True)
@@ -1348,16 +1596,17 @@ def get_stac_layers(
         # Runs in UPDATE mode too: the newly built dates are concatenated onto an
         # existing cube that carries the coord, and a side that lacks it breaks
         # the concat (update_stac reconciles what is still missing, e.g. legacy
-        # cubes predating the coord). Caveat in update mode: the coverage
-        # denominator is the footprint of the scenes in hand, and the fresh query
-        # holds only the NEW dates - so if every new scene is partial in the same
-        # place, their coverage is measured against that smaller footprint and
-        # reads higher than it would in a full rebuild.
+        # cubes predating the coord). Safe there because the denominator is the
+        # AOI, which every build of this area shares - the newly added dates get
+        # values directly comparable with the stored ones. (It used to be the
+        # footprint of the scenes in hand, so new dates were measured against
+        # whatever the fresh query happened to hold; see _aoi_pixel_count.)
         _scene_cov = None
         if "scene_coverage" not in stac.coords:
             try:
                 _scene_cov = compute_scene_coverage(
-                    stac, cloud_mask=cloud_bool, compute=False
+                    stac, cloud_mask=cloud_bool, compute=False,
+                    aoi_mask=_aoi_mask,
                 )
             except Exception:
                 _scene_cov = None
@@ -1434,46 +1683,11 @@ def get_stac_layers(
                         flush=True,
                     )
 
-        # ---- Explicit date selection (headless "Date Selection") ------------
-        # Same semantics as the GUI Result panel's date picker: keep only the
-        # listed acquisition timestamps, by positional selection (isel) so
-        # nothing is computed and the cube stays lazy. Matching is on the full
-        # ISO timestamp string, exactly as the picker does, so it is
-        # unambiguous when two scenes share a calendar day (separate tiles) and
-        # survives the cloud filter's isel above. Runs AFTER both scene filters
-        # and BEFORE the deferred composite / stats, reproducing the GUI order
-        # build -> filter -> composite.
-        if _dates_keep is not None:
-            if "time" not in getattr(stac, "dims", ()):
-                raise ValueError(
-                    "dates was requested but the built cube has no time "
-                    "dimension to select from."
-                )
-            _tvals = np.asarray(stac["time"].values)
-            _keep_d = np.array(
-                [str(np.datetime64(t, "ns")) in _dates_keep for t in _tvals]
-            )
-            if not _keep_d.any():
-                raise ValueError(
-                    "dates keeps no scene: none of the requested timestamps is "
-                    "in the built cube. The cube carries "
-                    f"{len(_tvals)} date(s) between "
-                    f"{np.datetime_as_string(_tvals.min(), unit='D')} and "
-                    f"{np.datetime_as_string(_tvals.max(), unit='D')}."
-                )
-            _missing = len(_dates_keep) - int(_keep_d.sum())
-            if not _keep_d.all():
-                stac = stac.isel(time=np.flatnonzero(_keep_d))
-            if not q:
-                print(
-                    f"dates: kept {int(_keep_d.sum())}/{len(_tvals)} scenes"
-                    + (
-                        f" ({_missing} requested date(s) not in this build)"
-                        if _missing > 0
-                        else ""
-                    ),
-                    flush=True,
-                )
+        # (The explicit date selection used to run here, after both scene
+        # filters. It now runs BEFORE them - right after the day-floor above -
+        # so the measurements never touch scenes that are about to be dropped.
+        # The surviving set is the same either way: all three are commutative
+        # AND-selections on time.)
 
         # Deferred temporal composite: collapse the SURVIVING scenes (GUI
         # order build -> filter -> composite). keep_attrs preserves the cube
@@ -1586,7 +1800,7 @@ def get_stac_layers(
 
         img = _export_result(
             stac, output, _export_format, crs, transform, compress=compress,
-            vrt=vrt,
+            vrt=vrt, q=bool(q),
         )
         if return_cloud_mask:
             return img, mask_cube

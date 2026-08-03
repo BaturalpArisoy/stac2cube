@@ -49,6 +49,7 @@ from stac2cube import (
     check_scene_availability,
     preview_scene_footprints,
 )
+from .auxiliary import GRAZE_THRESHOLD as _GRAZE_THRESHOLD
 
 from .get_data import (
     SCENE_METADATA_AVAILABILITY,
@@ -430,7 +431,8 @@ PARAM_HELP_HTML = {
     it only trims the result.<br><br>
     <b>How to choose a number:</b> click <b>Check area coverage</b> above. The
     orbits at the bottom of that table are the ones this box removes. Type a
-    value just above them. <code>0</code> (default) keeps everything.<br><br>
+    value just above them - it will suggest <code>10</code> when it finds dates
+    that barely reach your area. <code>0</code> (default) keeps everything.<br><br>
     <b>Keep it low.</b> This is measured from the scene outlines the catalogue
     publishes, not from the pixels, so it is an estimate: on one test area
     Planetary Computer and terrabyte agreed exactly while Element84 read about
@@ -7178,10 +7180,92 @@ def datacube_builder(missions_func=missions):
                 "data sources.</span>"
                 "</div>"
             ))
-            display(HTML(df.to_html(border=0, na_rep="NaN")))
+            # --- Multi-feature (batch) files --------------------------------
+            # One cube is built PER feature, each against its own bounding box,
+            # so the union table above answers a question nobody asked. Show the
+            # verdict per feature instead and keep the 47-row detail collapsed.
+            fdf = info.get("per_feature")
+            finfo = info.get("per_feature_info") or {}
+            if fdf is not None and not fdf.empty:
+                n_feat = int(finfo.get("n_features", len(fdf)))
+                grazing = int(finfo.get("features_with_grazing", 0))
+                never_full = int(finfo.get("features_never_full", 0))
+                no_dates = int(finfo.get("features_with_no_dates", 0))
+                graze_pct = int(round(float(finfo.get("graze_threshold", 0.1)) * 100))
+
+                # Only findings worth acting on. A zero count is not news, and
+                # printing "0 of 47" for every check buried the one line that
+                # actually mattered.
+                lines = [
+                    f"This file holds <b>{n_feat} areas</b>, so it builds "
+                    f"<b>{n_feat} separate cubes</b>. Each is measured against "
+                    "its own area below."
+                ]
+                if grazing:
+                    lines.append(
+                        f"Areas with dates covering under {graze_pct}%: "
+                        f"<b>{grazing}</b> of {n_feat}."
+                    )
+                if never_full:
+                    # NOT "areas with no data": these are areas no SINGLE date
+                    # covers completely, so every timestep of those cubes is a
+                    # partial scene.
+                    lines.append(
+                        f"Areas that no single date covers completely: "
+                        f"<b>{never_full}</b> of {n_feat}."
+                    )
+                if no_dates:
+                    lines.append(
+                        f"⚠️ <b>{no_dates}</b> area(s) get no scenes at all in "
+                        "this date range."
+                    )
+                display(HTML(
+                    f"{_INFO_BOX}" + "<br>".join(lines) + "</div>"
+                ))
+
+                _feat_out = widgets.Output()
+                with _feat_out:
+                    display(HTML(fdf.to_html(border=0, na_rep="-")))
+                _feat_acc = widgets.Accordion(
+                    children=[_feat_out], selected_index=None
+                )
+                _feat_acc.set_title(0, f"Per-area details ({n_feat} rows)")
+                _feat_acc.layout = widgets.Layout(width="99%")
+                display(_feat_acc)
+
+                _union_out = widgets.Output()
+                with _union_out:
+                    display(HTML(
+                        "<div style='font-size:12px; color:#6b7280; margin:0 0 6px 0;'>"
+                        "Measured on the combined extent of all areas. Useful for "
+                        "seeing which orbits exist, but no cube is built on this "
+                        "geometry.</div>"
+                    ))
+                    display(HTML(df.to_html(border=0, na_rep="NaN")))
+                _union_acc = widgets.Accordion(
+                    children=[_union_out], selected_index=None
+                )
+                _union_acc.set_title(0, "Combined extent (all areas together)")
+                _union_acc.layout = widgets.Layout(width="99%")
+                display(_union_acc)
+            else:
+                display(HTML(df.to_html(border=0, na_rep="NaN")))
 
             # The one finding worth acting on, phrased against the threshold the
-            # user's own Across-track setting would apply.
+            # user's own Across-track setting would apply. On a batch file the
+            # per-date series is the union one, which is exactly what must NOT
+            # drive the advice here - so the partial/graze warnings below are
+            # skipped and the per-area verdict above stands in their place.
+            if fdf is not None and not fdf.empty:
+                if m is None:
+                    print(
+                        "The map needs the leafmap package, which isn't available "
+                        "here. The tables above still apply."
+                    )
+                else:
+                    display(m)
+                return
+
             threshold = int(min_coverage_w.value)
             shares = [
                 v for v in info.get("per_date_coverage", {}).values() if v is not None
@@ -7221,15 +7305,21 @@ def datacube_builder(missions_func=missions):
             # bring nothing usable at all, yet each still costs a full-size time
             # step. Reported separately, right where the box that removes them
             # is, and only when there is something to act on.
-            n_graze = sum(1 for v in shares if 100.0 * v < 1.0)
+            # Threshold shared with the per-feature summary (auxiliary.
+            # GRAZE_THRESHOLD), so the two views can never suggest different
+            # numbers for the same finding.
+            _graze_pct = int(round(_GRAZE_THRESHOLD * 100))
+            n_graze = sum(1 for v in shares if 100.0 * v < _graze_pct)
             if n_graze and skip_footprint_w.value <= 0:
                 display(HTML(
                     f"{_INFO_BOX}"
                     f"💡 <b>{n_graze} of {len(shares)} dates</b> cover less than "
-                    "<b>1%</b> of your area - they would be almost entirely "
-                    "empty, but each one still costs a full time step.<br>"
+                    f"<b>{_graze_pct}%</b> of your area - they would be almost "
+                    "entirely empty, but each one still costs a full time "
+                    "step.<br>"
                     "Set <b>Skip scenes that barely touch your area</b> (just "
-                    "below) to <b>1</b> to leave them out of the download."
+                    f"below) to <b>{_graze_pct}</b> to leave them out of the "
+                    "download."
                     "</div>"
                 ))
 
