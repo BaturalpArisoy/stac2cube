@@ -182,4 +182,7 @@ pyrightconfig.json
 .claude/
 CLAUDE.md
 
+# Development-only regression tests (not shipped to users)
+tests/
+
 # End of https://www.toptal.com/developers/gitignore/api/python
