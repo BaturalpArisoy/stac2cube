@@ -3282,9 +3282,9 @@ def datacube_builder(missions_func=missions):
             + "</table>"
             + "<div style='font-size:12px; color:#6b7280; margin-top:6px;'>"
             + "Each feature is a separate cube. On export, <b>NetCDF</b> writes one "
-            + "file per feature (<code>name_1.nc</code>, <code>name_2.nc</code>, …); "
-            + "<b>COGs</b> write one subfolder per feature (<code>1/</code>, "
-            + "<code>2/</code>, … each holding that feature's dated tiles)."
+            + "file per feature (<code>name_01.nc</code>, <code>name_02.nc</code>, …); "
+            + "<b>COGs</b> write one subfolder per feature (<code>01/</code>, "
+            + "<code>02/</code>, … each holding that feature's dated tiles)."
             + "</div></div>"
         )
         display(HTML(html))
@@ -10152,7 +10152,7 @@ def datacube_editor():
     # loaded cube and every other feature works on it unchanged.
     mosaic_path_w = widgets.Text(
         value="",
-        placeholder="./results/piece_1.nc  or  ./results/  (then Add whole folder)",
+        placeholder="./results/piece_01.nc  or  ./results/  (then Add whole folder)",
         # Mandatory now that `value` is what commits a typed path: with the
         # default, `value` fires on every keystroke, so "./a.nc" would be
         # submitted as "." then "./" then "./a" - each a miss, each an error
@@ -13238,6 +13238,10 @@ def datacube_editor():
             added.append(resolved)
 
         state["mosaic_paths"] = paths
+        if added:
+            # Where the browser should reopen next (see
+            # _sync_mosaic_filechooser_from_text).
+            state["mosaic_last_dir"] = str(Path(added[-1]).parent)
         _mosaic_refresh()
 
         msgs = []
@@ -13490,6 +13494,39 @@ def datacube_editor():
             f"<b>{canonical}</b>.{extra}</div>"
         )
 
+    def _sync_mosaic_filechooser_from_text():
+        """Open the browser wherever the path box points.
+
+        Without this the chooser always reopened at the folder it was
+        constructed with (the working directory), so pasting a path and then
+        clicking 📂 ignored what had just been typed - the one flow this tool
+        is built around. Every other browse button in the editor does the same
+        sync; this one was simply missing it.
+        """
+        if not filechooser_available or mosaic_fc is None:
+            return
+        current = (mosaic_path_w.value or "").strip()
+        if not current:
+            # The box empties itself once a cube path has been added, so falling
+            # back to the folder last used keeps the browser where the user was
+            # working instead of jumping back to the working directory.
+            current = state.get("mosaic_last_dir") or ""
+        if not current:
+            return
+        start_dir = _existing_dir_or_parent(current)
+        # A folder in the box IS the target, so no filename to preselect; a
+        # cube path preselects that file inside its folder.
+        p = Path(current)
+        suggested_name = "" if p.is_dir() and not is_zarr_path(current) else p.name
+        try:
+            mosaic_fc.reset(path=start_dir, filename=suggested_name)
+        except Exception:
+            try:
+                mosaic_fc.default_path = start_dir
+                mosaic_fc.default_filename = suggested_name
+            except Exception:
+                pass
+
     def _on_browse_mosaic_clicked(_):
         if not filechooser_available or mosaic_fc is None:
             with mosaic_out:
@@ -13499,6 +13536,7 @@ def datacube_editor():
                     "Type the cube paths instead (one per line)."
                 )
             return
+        _sync_mosaic_filechooser_from_text()
         _toggle_box_display(mosaic_fc_box)
 
     def _on_mosaic_fc_selected(chooser=None):

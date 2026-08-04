@@ -1091,6 +1091,46 @@ def get_stac(
     if mission == "sentinel_2_l1c":
         items = _dedup_s2_l1c_items(items, bbox, q=q)
 
+    # --- Pin the output grid to the AOI itself --------------------------------
+    # Passing bbox= (lon/lat) together with crs= makes odc-stac project that
+    # lon/lat box into the target CRS, take the ENCLOSING rectangle, and snap it
+    # to a resolution-aligned grid. Both steps only ever grow the cube - measured
+    # 50-140 m per side at 41 N - so AOIs that were deliberately built disjoint
+    # come back as overlapping cubes. Building the GeoBox straight from the AOI's
+    # bounds in the target CRS with tight=True removes both effects, and the cube
+    # then matches the polygon exactly.
+    #
+    # Only for real geometries. A bbox list is already lon/lat, so there is no
+    # projected rectangle to preserve - and update mode feeds the stored lon/lat
+    # bbox back in, so leaving that path untouched keeps updates grid-compatible
+    # with the cubes they extend.
+    _exact_geobox = None
+    if target_crs is not None and not isinstance(polygon, (list, tuple)):
+        try:
+            from odc.geo.geobox import GeoBox
+
+            _g = polygon if isinstance(polygon, gpd.GeoDataFrame) else None
+            if _g is None:
+                from .vector_refiner import read_polygon_file
+
+                _g = read_polygon_file(polygon)
+            _b = _g.to_crs(target_crs).total_bounds
+            _exact_geobox = GeoBox.from_bbox(
+                (float(_b[0]), float(_b[1]), float(_b[2]), float(_b[3])),
+                crs=target_crs, resolution=resolution, tight=True,
+            )
+            if not q:
+                print(
+                    "Grid pinned to the AOI: %d x %d px at %g m in %s"
+                    % (_exact_geobox.width, _exact_geobox.height, resolution, target_crs),
+                    flush=True,
+                )
+        except Exception as exc:      # never block a build over grid pinning
+            if not q:
+                print("Could not pin the grid to the AOI (%s); "
+                      "falling back to the bbox grid." % exc, flush=True)
+            _exact_geobox = None
+
     _load_kwargs = dict(
         bands=bands,
         crs=target_crs,
@@ -1109,6 +1149,13 @@ def get_stac(
         # being out of sync with the physical .jp2 files on DSS.
         fail_on_error=False,
     )
+
+    # geobox fully specifies CRS, resolution and extent - odc-stac rejects it
+    # alongside the parameters it would otherwise derive them from.
+    if _exact_geobox is not None:
+        for _k in ("crs", "resolution", "bbox"):
+            _load_kwargs.pop(_k, None)
+        _load_kwargs["geobox"] = _exact_geobox
 
     # --- Tile handling --------------------------------------------------------
     # "mosaic" (default): the original behaviour - groupby="solar_day" merges
