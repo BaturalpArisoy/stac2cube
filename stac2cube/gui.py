@@ -33,6 +33,7 @@ from stac2cube import (
     calculate_statistics,
     calculate_spectral_index,
     clip_stac,
+    reproject_stac,
     cloud_filter,
     get_stac_layers,
     get_cloud_layers,
@@ -50,6 +51,7 @@ from stac2cube import (
     preview_scene_footprints,
 )
 from .auxiliary import GRAZE_THRESHOLD as _GRAZE_THRESHOLD
+from .mosaic import mosaic_cubes, mosaic_layers
 
 from .get_data import (
     SCENE_METADATA_AVAILABILITY,
@@ -3231,6 +3233,21 @@ def datacube_builder(missions_func=missions):
                 "<b>time</b> column; counts can match while the actual dates differ).</div>"
             )
 
+        # Batch mode always ends with SEPARATE cubes, which is exactly the input
+        # the mosaic tool exists for - so point at it here, where the user is
+        # looking at the list of pieces. Shown only with at least two successful
+        # cubes: with one there is nothing to join and the note would be noise.
+        mosaic_hint = ""
+        if n_ok >= 2:
+            _red = "color:#b91c1c; font-weight:600;"
+            mosaic_hint = (
+                f"{_INFO_BOX.replace('margin:0;', 'margin-top:6px;')}"
+                "ℹ️ You can mosaic these cubes into one with "
+                f"<span style='{_red}'>Data Cube Editor</span> &rarr; "
+                f"<span style='{_red}'>Mosaic Data Cubes</span>."
+                "</div>"
+            )
+
         fail_note = ""
         if failed:
             failed_nums = ", ".join(f"#{getattr(m, 'feature', '?')}" for m in failed)
@@ -3252,6 +3269,7 @@ def datacube_builder(missions_func=missions):
                 if common else ""
             )
             + warn
+            + mosaic_hint
             + fail_note
             + "<table style='border-collapse:collapse; margin-top:8px; font-size:12px;'>"
             + "<tr style='background:#f3f4f6;'>"
@@ -4670,13 +4688,17 @@ def datacube_builder(missions_func=missions):
     def _export_feature_list(cubes, export_mode, export_target):
         """Export a multi-feature batch (list of cubes), one output per feature.
         Each cube is written then released, so RAM stays ~one feature:
-          - NetCDF: <stem>_<i>.nc   (polygons_1.nc, polygons_2.nc, ...)
+          - NetCDF: <stem>_<i>.nc   (polygons_01.nc, polygons_02.nc, ...)
           - COGs:   <folder>/<i>/<date>.tif   (one subfolder per feature)
+
+        The index is zero-padded to the batch size, so the files sort in build
+        order; unpadded they run _1, _10, _11, ... _9.
         """
         cubes = [c for c in cubes if isinstance(c, (xr.DataArray, xr.Dataset))]
         n = len(cubes)
         if n == 0:
             raise ValueError("No exportable cubes in the result.")
+        pad = max(2, len(str(n)))
 
         def _ref(c):
             da = c
@@ -4698,7 +4720,7 @@ def datacube_builder(missions_func=missions):
             compress = bool(export_compress_w.value)
             want_vrt = bool(export_vrt_w.value) and export_mode == "netcdf"
             for i, c in enumerate(cubes, 1):
-                out_i = f"{stem}_{i}{ext}"
+                out_i = f"{stem}_{i:0{pad}d}{ext}"
                 Path(out_i).parent.mkdir(parents=True, exist_ok=True)
                 if isinstance(c, xr.DataArray):
                     export_stac(c, out_i, var_name=(c.name or "Time_Series"),
@@ -4713,7 +4735,7 @@ def datacube_builder(missions_func=missions):
         if export_mode == "cogs":
             base = Path(export_target)
             for i, c in enumerate(cubes, 1):
-                sub = base / str(i)
+                sub = base / f"{i:0{pad}d}"
                 sub.mkdir(parents=True, exist_ok=True)
                 export_to_cogs(stac=c, output_dir=str(sub), prefix="", dtype="float32")
                 written.append(str(sub))
@@ -4746,11 +4768,12 @@ def datacube_builder(missions_func=missions):
             stem, ext = os.path.splitext(path)
             written = []
             i = 0
+            pad = max(2, len(str(len(mask))))
             for m in mask:
                 if not isinstance(m, (xr.DataArray, xr.Dataset)):
                     continue
                 i += 1
-                out_i = f"{stem}_{i}{ext}"
+                out_i = f"{stem}_{i:0{pad}d}{ext}"
                 Path(out_i).parent.mkdir(parents=True, exist_ok=True)
                 export_stac(m, out_i, var_name="Cloud_Stack",
                             compress=bool(export_compress_w.value))
@@ -4800,13 +4823,14 @@ def datacube_builder(missions_func=missions):
         if isinstance(obj, list):
             written = []
             i = 0
+            pad = max(2, len(str(len(obj))))
             for c in obj:
                 da = _main_da(c)
                 if da is None:
                     continue
                 i += 1
-                export_granule_metadata(da, f"{base_dir}_{i}", q=True)
-                written.append(f"{base_dir}_{i}")
+                export_granule_metadata(da, f"{base_dir}_{i:0{pad}d}", q=True)
+                written.append(f"{base_dir}_{i:0{pad}d}")
             return written or None
 
         da = _main_da(obj)
@@ -8710,6 +8734,7 @@ def datacube_editor():
     - Slice by time and band (chained)
     - Filter by cloud coverage using existing cloud_percentage coord (chained)
     - Clip raster (vector file or bbox list; applied via Edit button)
+    - Reproject to another CRS via stac2cube.reproject_stac (applied via Edit button)
     - Temporal composites (stats) via stac2cube.calculate_statistics (applied via Edit button)
     - Visualize (interactive dropdown + GIF generation)
     - Export current result (NetCDF / Zarr / COGs)
@@ -8746,6 +8771,29 @@ def datacube_editor():
         Polygons can be geographic (WGS84) or projected (e.g., UTM).<br>
         <b>2) List of BBOX</b><br>
         Can also be a WGS84 bbox list: <code>[xmin, ymin, xmax, ymax]</code> (not projected coords). Useful tool: <code>http://bboxfinder.com/</code>
+        """,
+        "reproject": """
+        <b>reproject data cube</b><br>
+        Warps the cube into another projection with
+        <code>reproject_stac()</code>.<br><br>
+        <b>Target CRS</b>: an EPSG code (e.g. <code>EPSG:3035</code>), a WKT or a
+        PROJ string. It must be a projected, metre-based CRS - the same rule the
+        Data Cube Builder applies, because pixel sizes here are metres.<br><br>
+        <b>Pixel size</b>: leave empty to keep roughly the current pixel size, or
+        type a number in metres (e.g. <code>20</code>).<br><br>
+        <b>Resampling</b>: <code>nearest</code> copies pixel values unchanged and
+        is the safe default. <code>bilinear</code> / <code>cubic</code> /
+        <code>average</code> compute new values and give a smoother image.
+        Class layers (<code>scl</code>, QA, <code>cloud_mask_*</code>) always use
+        <code>nearest</code>, whatever is selected - averaging class codes would
+        produce classes that do not exist.<br><br>
+        <b>What it costs</b>: reprojection resamples, so pixel values and the
+        pixel grid both change and the step cannot be undone exactly. Reproject
+        once, from the cube in its original projection. The result is the
+        upright bounding box of the rotated cube, so the corners are empty
+        (NaN). <code>cloud_percentage</code> and <code>scene_coverage</code> are
+        kept as they were measured before the warp; they are not recalculated on
+        the new grid. The whole cube is read into memory for this step.
         """,
         "spectral_indices": """
         <b>calculate spectral indices</b><br>
@@ -8826,6 +8874,79 @@ def datacube_editor():
         new bands are masked (or kept) exactly like the stored data.<br><br>
         <b>Important:</b> This replaces the current working result with the updated cube.<br>
         Use it first (or by itself), then continue with other editing features (slice, clip, stats, export).
+        """,
+        "mosaic": """
+        <b>mosaic data cubes</b><br>
+        Joins several cubes side by side into one covering their combined area -
+        for putting back together an area that was built in parts.<br><br>
+        No new data is downloaded and nothing is recalculated: the result holds
+        the pixels your cubes already have, placed on one grid.<br><br>
+        The cubes need not overlap. Where none reaches, the mosaic is empty.
+        Where more than one does, <b>Where cubes overlap</b> decides.
+        """,
+        "mosaic_overlap": """
+        <b>where cubes overlap</b><br>
+        What to keep for a pixel more than one cube holds.<br><br>
+        <b>First cube in the list</b> (default) keeps that cube's value - the
+        only option that never creates a number none of your cubes held.<br><br>
+        <b>Average / Middle / Lowest / Highest</b> combine the cubes covering the
+        pixel. Smoother seams, but a new number.<br><br>
+        Often the choice makes no difference: cubes built from the same scenes
+        hold identical pixels where they meet. The result box reports how much
+        yours actually disagree.
+        """,
+        "mosaic_crs": """
+        <b>output projection</b><br>
+        A mosaic is one grid, so it has one projection. Cubes in another one are
+        warped into it, which resamples them.<br><br>
+        <b>Automatic</b> picks the projection covering the largest area, so the
+        fewest pixels are warped. The dropdown lists the projections your cubes
+        are in.<br><br>
+        <b>User-defined</b> takes any projected, metre-based CRS (e.g.
+        <code>EPSG:3035</code>). One that none of your cubes uses means every
+        cube is warped, so it needs <b>Allow resampling</b> under Advanced.
+        """,
+        "mosaic_time": """
+        <b>dates</b><br>
+        Neighbouring areas do not always share acquisition dates - a scene can
+        cover one and miss the other.<br><br>
+        <b>Keep every date</b> (default) keeps the dates from all cubes; on a
+        date a cube lacks, that cube's area is empty.<br><br>
+        <b>Only dates all cubes have</b> keeps a date only if every cube has it -
+        complete everywhere, but fewer dates.
+        """,
+        "mosaic_bands": """
+        <b>bands</b><br>
+        <b>Only bands all cubes have</b> (default) keeps the bands common to
+        every cube.<br><br>
+        <b>All bands</b> keeps every band in any cube; a cube lacking one is
+        empty for that band.
+        """,
+        "mosaic_layers": """
+        <b>layers to merge</b><br>
+        The layers found in <u>every</u> selected cube - the time series and any
+        temporal composites saved with it. All are selected by default; a layer
+        only some cubes have cannot be merged and is not listed.<br><br>
+        <b>On composites:</b> merging saved composites is not the same as
+        computing one from the merged cube, because each piece's median was
+        taken over its own dates. If your cubes still hold their time series,
+        merge that and compute the composite afterwards.
+        """,
+        "mosaic_resampling": """
+        <b>resampling method</b><br>
+        How pixel values are recalculated for a cube that has to be warped onto
+        the mosaic grid. Only used when <b>Allow resampling</b> is ticked.<br><br>
+        <code>nearest</code> copies each value unchanged and is the safe
+        default. <code>bilinear</code>, <code>cubic</code> and
+        <code>average</code> compute new values from the neighbours: smoother
+        to look at, but the numbers are no longer the ones the cube held.
+        """,
+        "mosaic_pixel_size": """
+        <b>pixel size</b><br>
+        The ground size of one pixel in the mosaic, in metres.<br><br>
+        Leave it empty to use the finest pixel size among your cubes - nothing
+        is lost, and any coarser cube is enlarged to match. A larger number
+        makes a smaller, coarser result and needs <b>Allow resampling</b>.
         """,
     }
 
@@ -9114,6 +9235,12 @@ def datacube_editor():
         clip_geom_w.disabled = not enabled
         browse_clip_btn.disabled = (not enabled) or (not filechooser_available)
 
+        # Reproject widgets
+        enable_reproject_w.disabled = not enabled
+        reproject_crs_w.disabled = not enabled
+        reproject_res_w.disabled = not enabled
+        reproject_resampling_w.disabled = not enabled
+
         # Mask clouds with binary file
         enable_mask_clouds_w.disabled = not enabled
         mask_file_w.disabled = not enabled
@@ -9123,6 +9250,14 @@ def datacube_editor():
         build_mask_out_w.disabled = not enabled
         build_mask_btn.disabled = not enabled
         browse_build_mask_btn.disabled = (not enabled) or (not filechooser_available)
+
+        # Mosaic Data Cubes is deliberately NOT gated here. Every other feature
+        # edits the loaded cube, so it needs one; this one PRODUCES a cube from
+        # files on disk, and is the natural starting point when the pieces of an
+        # area have to be joined before anything can be edited. Disabling it
+        # until a cube is loaded would mean loading a cube just to be allowed to
+        # replace it. Its own Run button is enabled by the list length instead
+        # (see _sync_mosaic_controls).
 
         # Spectral indices widgets
         indices_select_w.disabled = not enabled
@@ -9732,9 +9867,25 @@ def datacube_editor():
                 pass
             build_mask_fc_box = widgets.VBox([build_mask_fc], layout=widgets.Layout(display="none", width="100%"))
 
+            mosaic_fc = _CubeFileChooser(
+                path=str(Path(".").resolve()),
+                filename="",
+                title="Select a cube to add (.nc file or .zarr store)",
+                show_only_dirs=False,
+                select_default=False,
+            )
+            mosaic_fc.use_dir_icons = True
+            try:
+                mosaic_fc.filter_pattern = ["*.nc", "*.zarr", "*"]
+            except Exception:
+                pass
+            mosaic_fc_box = widgets.VBox([mosaic_fc], layout=widgets.Layout(display="none", width="100%"))
+
         except Exception:
             filechooser_available = False
             load_fc = export_fc = gif_fc = clip_fc = mask_file_fc = build_mask_fc = None
+            mosaic_fc = None
+            mosaic_fc_box = widgets.VBox([], layout=widgets.Layout(display="none", width="100%"))
             load_fc_box = widgets.VBox([], layout=widgets.Layout(display="none", width="100%"))
             export_fc_box = widgets.VBox([], layout=widgets.Layout(display="none", width="100%"))
             gif_fc_box = widgets.VBox([], layout=widgets.Layout(display="none", width="100%"))
@@ -9894,6 +10045,47 @@ def datacube_editor():
     )
     browse_clip_btn.style.button_color = "#f3f4f6"
 
+    # Reproject feature (applied via Edit button). Warps the working cube into
+    # another CRS via stac2cube.reproject_stac. Text (not FloatText) for the
+    # pixel size so "empty" is expressible - that is what keeps the current
+    # resolution. Validation happens on commit (continuous_update=False), never
+    # per keystroke.
+    enable_reproject_w = widgets.Checkbox(
+        value=False,
+        description="Enable reprojection",
+        indent=False,
+        layout=widgets.Layout(width="180px"),
+        disabled=True,
+    )
+
+    reproject_crs_w = widgets.Text(
+        value="",
+        description="",
+        placeholder="EPSG:3035",
+        continuous_update=False,
+        layout=widgets.Layout(width="80%"),
+        disabled=True,
+    )
+
+    reproject_crs_status_w = widgets.HTML(value="")
+
+    reproject_res_w = widgets.Text(
+        value="",
+        description="",
+        placeholder="empty = keep current pixel size",
+        continuous_update=False,
+        layout=widgets.Layout(width="80%"),
+        disabled=True,
+    )
+
+    reproject_resampling_w = widgets.Dropdown(
+        options=["nearest", "bilinear", "cubic", "average", "mode"],
+        value="nearest",
+        description="",
+        layout=widgets.Layout(width="40%"),
+        disabled=True,
+    )
+
     # Mask clouds with a binary masking file (applied via Edit button). Masks the
     # already-loaded cube out with a Cloud_Stack (1=cloud, 0=clear) NetCDF, e.g.
     # one produced by 'Export Mask as Binary File' or the ARD cloud tools.
@@ -9949,6 +10141,152 @@ def datacube_editor():
         disabled=True,
     )
     build_mask_out = widgets.Output(layout=widgets.Layout(width="99%", overflow="auto"))
+
+    # ------------------------------------------------------------------
+    # Mosaic Data Cubes
+    # ------------------------------------------------------------------
+    # The one feature that does NOT start from a loaded cube: it takes several
+    # cubes and produces one, so its widgets stay live while the editor is
+    # otherwise disabled (see _set_editor_enabled). When it succeeds it hands
+    # the result to the ordinary load path, so from that point the mosaic IS the
+    # loaded cube and every other feature works on it unchanged.
+    mosaic_path_w = widgets.Text(
+        value="",
+        placeholder="./results/piece_1.nc  or  ./results/  (then Add whole folder)",
+        # Mandatory now that `value` is what commits a typed path: with the
+        # default, `value` fires on every keystroke, so "./a.nc" would be
+        # submitted as "." then "./" then "./a" - each a miss, each an error
+        # line. Commits on Enter / focus loss instead.
+        continuous_update=False,
+        # Flex, not width:100% - see mosaic_input_row for why the 100% version
+        # brings the horizontal scrollbar back.
+        layout=widgets.Layout(flex="1 1 auto", width="auto", min_width="0"),
+    )
+    browse_mosaic_btn = widgets.Button(
+        description="",
+        icon="folder-open",
+        tooltip="Browse for a data cube to add",
+        layout=widgets.Layout(width="34px", min_width="34px", height="32px", padding="0px"),
+    )
+    browse_mosaic_btn.style.button_color = "#f3f4f6"
+    mosaic_add_folder_btn = widgets.Button(
+        description="Add whole folder",
+        icon="folder-plus",
+        tooltip=(
+            "Add every .nc / .zarr cube in a folder at once. Uses the folder in "
+            "the box above, or the one currently open in the browser."
+        ),
+        layout=widgets.Layout(width="170px"),
+    )
+    mosaic_clear_btn = widgets.Button(
+        description="Clear list",
+        icon="trash",
+        layout=widgets.Layout(width="120px"),
+    )
+    # The queued cubes, rebuilt as rows so each can be removed or moved. Order
+    # is the priority order for overlap="first", which is why it is editable at
+    # all rather than just a text dump.
+    mosaic_list_box = widgets.VBox(
+        [],
+        layout=widgets.Layout(
+            width="100%", gap="2px", overflow="hidden", min_width="0",
+        ),
+    )
+    mosaic_count_w = widgets.HTML("")
+
+    mosaic_overlap_w = widgets.Dropdown(
+        options=[
+            ("First cube in the list (keeps original values)", "first"),
+            ("Average of the cubes that cover it", "mean"),
+            ("Middle value of the cubes that cover it", "median"),
+            ("Lowest value", "min"),
+            ("Highest value", "max"),
+        ],
+        value="first",
+        layout=widgets.Layout(width="100%"),
+    )
+
+    _MOSAIC_CRS_AUTO = "auto"
+    _MOSAIC_CRS_AUTO_LABEL = "Automatic (largest area, fewest pixels warped)"
+    mosaic_crs_detected_w = widgets.Dropdown(
+        options=[(_MOSAIC_CRS_AUTO_LABEL, _MOSAIC_CRS_AUTO)],
+        value=_MOSAIC_CRS_AUTO,
+        layout=widgets.Layout(width="100%"),
+    )
+    mosaic_crs_user_w = widgets.Text(
+        value="",
+        placeholder="EPSG:3035",
+        # Same reason as the builder's CRS box: with continuous_update the value
+        # fires per keystroke, so "3035" is validated as "3", "30", "303" - each
+        # an incomplete code that fails. Commit on Enter / focus loss instead.
+        continuous_update=False,
+        layout=widgets.Layout(width="100%"),
+    )
+    mosaic_crs_status_w = widgets.HTML("")
+
+    mosaic_time_join_w = widgets.Dropdown(
+        options=[
+            ("Keep every date", "outer"),
+            ("Only dates all cubes have", "inner"),
+        ],
+        value="outer",
+        layout=widgets.Layout(width="100%"),
+    )
+    mosaic_band_join_w = widgets.Dropdown(
+        options=[
+            ("Only bands all cubes have", "inner"),
+            ("All bands", "union"),
+        ],
+        value="inner",
+        layout=widgets.Layout(width="100%"),
+    )
+    # Filled from mosaic_layers() whenever the list changes - the layers every
+    # selected cube has, all selected. A picker that cannot be populated before
+    # the run would have to provoke an error to learn its own options.
+    mosaic_layers_w = widgets.SelectMultiple(
+        options=[],
+        value=(),
+        rows=4,
+        layout=widgets.Layout(width="100%"),
+    )
+    mosaic_layers_note_w = widgets.HTML("")
+
+    mosaic_allow_resample_w = widgets.Checkbox(
+        value=False,
+        description="Allow resampling for cubes not on the same grid",
+        indent=False,
+        layout=widgets.Layout(width="100%"),
+    )
+    mosaic_resampling_w = widgets.Dropdown(
+        options=["nearest", "bilinear", "cubic", "average"],
+        value="nearest",
+        layout=widgets.Layout(width="100%"),
+        disabled=True,
+    )
+    mosaic_resolution_w = widgets.Text(
+        value="",
+        placeholder="finest of the selected cubes",
+        continuous_update=False,
+        layout=widgets.Layout(width="100%"),
+    )
+    mosaic_strict_w = widgets.Checkbox(
+        value=False,
+        description="Merge cubes built differently (different mission / masking)",
+        indent=False,
+        layout=widgets.Layout(width="100%"),
+    )
+    mosaic_check_btn = widgets.Button(
+        description="Check cubes",
+        icon="search",
+        layout=widgets.Layout(width="150px"),
+    )
+    mosaic_run_btn = widgets.Button(
+        description="Mosaic Data Cubes",
+        button_style="primary",
+        icon="th-large",
+        layout=widgets.Layout(width="210px"),
+    )
+    mosaic_out = widgets.Output(layout=widgets.Layout(width="99%", overflow="auto"))
 
     # Update Data Cube is a standalone feature too, so it gets its own output
     # group (instead of printing into the shared Status section).
@@ -11267,6 +11605,116 @@ def datacube_editor():
 
         raise TypeError(f"Unsupported object type for clipping: {type(obj)}")
 
+    def _parse_reproject_resolution():
+        """Pixel size box -> float metres, or None for "keep the current one"."""
+        text = (reproject_res_w.value or "").strip().replace(",", ".")
+        if not text:
+            return None
+        try:
+            value = float(text)
+        except ValueError:
+            raise ValueError(
+                f"Pixel size '{reproject_res_w.value}' is not a number. Type a "
+                "size in metres (e.g. 20), or leave the box empty to keep the "
+                "current pixel size."
+            )
+        if value <= 0:
+            raise ValueError("Pixel size must be greater than 0.")
+        return value
+
+    def _sync_reproject_crs_status(*_):
+        """Check the typed CRS when the box is committed (Enter / focus loss),
+        so a bad code is reported here instead of failing mid-edit.
+
+        Catches Exception, not just ValueError: this runs inside an ipywidgets
+        message handler, where anything escaping is dumped as a raw traceback
+        under the GUI.
+        """
+        text = (reproject_crs_w.value or "").strip()
+        if not text:
+            reproject_crs_status_w.value = ""
+            return
+        try:
+            canonical = validate_target_crs(text)
+        except Exception as exc:
+            reproject_crs_status_w.value = (
+                "<div style='font-size:12px; color:#991b1b; background:#fef2f2; "
+                "border:1px solid #fecaca; border-radius:6px; padding:6px 8px;'>"
+                f"✗ {exc}</div>"
+            )
+            return
+        reproject_crs_status_w.value = (
+            "<div style='font-size:12px; color:#166534;'>✓ reprojecting to "
+            f"<b>{canonical}</b>.</div>"
+        )
+
+    reproject_crs_w.observe(_sync_reproject_crs_status, names="value")
+
+    def _apply_reproject_feature(obj):
+        """Reproject the working cube into another CRS via reproject_stac().
+
+        A Dataset input is reprojected on Time_Series and the stats layers are
+        dropped, exactly like clipping: a temporal composite computed on the old
+        grid cannot be carried onto the new one. reproject_stac prints its own
+        progress into Status (the warp is eager and can take a while), so only
+        the summary lines are returned here.
+        """
+        if not enable_reproject_w.value:
+            return obj, False, []
+
+        crs_text = (reproject_crs_w.value or "").strip()
+        if not crs_text:
+            raise ValueError(
+                "Reprojection is enabled, but no target CRS was given "
+                "(e.g. EPSG:3035)."
+            )
+        resolution = _parse_reproject_resolution()
+        method = reproject_resampling_w.value
+
+        stats_dropped = isinstance(obj, xr.Dataset)
+        if isinstance(obj, xr.Dataset):
+            if "Time_Series" not in obj.data_vars:
+                raise ValueError(
+                    "Current Dataset does not contain 'Time_Series' for "
+                    "reprojection."
+                )
+            da = obj["Time_Series"]
+        elif isinstance(obj, xr.DataArray):
+            da = obj
+        else:
+            raise TypeError(
+                f"Unsupported object type for reprojection: {type(obj)}"
+            )
+
+        src_crs = da.attrs.get("crs") or da.rio.crs
+        out = reproject_stac(
+            da, crs_text, resolution=resolution, resampling=method
+        )
+
+        msgs = [
+            "reprojection applied",
+            f"CRS: {src_crs} -> {out.attrs.get('crs')}  ({method})",
+            f"Grid: {int(out.sizes['y'])} x {int(out.sizes['x'])} pixels at "
+            f"{abs(out.attrs['transform'].a):g} m",
+        ]
+        if resolution is None:
+            msgs.append("Pixel size: kept (approximately) as it was.")
+        if "cloud_percentage" in out.coords or "scene_coverage" in out.coords:
+            msgs.append(
+                "cloud_percentage / scene_coverage were kept as measured before "
+                "the reprojection; they are not recalculated on the new grid."
+            )
+        msgs.append(
+            "Reprojection resamples: pixel values and the pixel grid changed, "
+            "and the empty corners are the rotated cube's bounding box."
+        )
+        if stats_dropped:
+            msgs.append(
+                "Previous stats were removed because reprojection changes the "
+                "raster grid."
+            )
+        return out, True, msgs
+
     def _pick_mask_band(cloud):
         """Choose the binary cloud-mask band from a loaded Cloud_Stack: prefer the
         SCL mask, then any 'cloud_mask_*' band. None when there is no band dim."""
@@ -11717,6 +12165,7 @@ def datacube_editor():
         enable_coverage_filter_w.value = False
         enable_mask_clouds_w.value = False
         enable_clip_w.value = False
+        enable_reproject_w.value = False
 
     def _on_edit_clicked(_):
         if state["current"] is None:
@@ -11756,6 +12205,12 @@ def datacube_editor():
                 current_obj, changed_clip, clip_msgs = _apply_clip_feature(current_obj)
                 changed_any = changed_any or changed_clip
                 messages.extend(clip_msgs)
+
+                # 4b) Reproject (after clipping: the polygon is cut in the
+                # cube's own projection, then the smaller result is warped)
+                current_obj, changed_reproj, reproj_msgs = _apply_reproject_feature(current_obj)
+                changed_any = changed_any or changed_reproj
+                messages.extend(reproj_msgs)
 
                 # 5) Calculate Spectral Indices
                 current_obj, changed_idx, idx_msgs = _apply_indices_feature(current_obj)
@@ -12415,6 +12870,43 @@ def datacube_editor():
     clip_acc.set_title(0, "Clip Raster")
     clip_acc.layout = widgets.Layout(width="99%")
 
+    # Reproject feature
+    reproject_crs_box = widgets.VBox(
+        [reproject_crs_w, reproject_crs_status_w],
+        layout=widgets.Layout(width="100%", gap="4px"),
+    )
+
+    reproject_controls_box = widgets.VBox(
+        [
+            enable_reproject_w,
+            _stacked_field_with_help(reproject_crs_box, "Target CRS", "reproject"),
+            _stacked_field(reproject_res_w, "Pixel size (m)"),
+            _stacked_field(reproject_resampling_w, "Resampling"),
+        ],
+        layout=widgets.Layout(width="100%", gap="6px"),
+    )
+
+    reproject_feature_box = widgets.VBox(
+        [
+            _chainable_badge(True),
+            widgets.HTML(
+                "<div style='font-size:12px; color:#666;'>"
+                "Put the data cube into another projection, for example "
+                "<code>EPSG:3035</code>. Reprojection resamples the pixels, so "
+                "do it once and keep the original cube."
+                "</div>"
+            ),
+            reproject_controls_box,
+        ],
+        layout=widgets.Layout(width="100%", gap="8px"),
+    )
+
+    reproject_acc = widgets.Accordion(
+        children=[reproject_feature_box], selected_index=None
+    )
+    reproject_acc.set_title(0, "Reproject Data Cube")
+    reproject_acc.layout = widgets.Layout(width="99%")
+
     # Spectral indices feature
     indices_inner_widget = widgets.VBox(
         [
@@ -12686,6 +13178,679 @@ def datacube_editor():
     export_acc.layout = widgets.Layout(width="99%")
 
     # Features group
+    # ------------------------------------------------------------------
+    # Mosaic Data Cubes - behaviour
+    # ------------------------------------------------------------------
+    def _mosaic_paths():
+        return list(state.get("mosaic_paths") or [])
+
+    def _mosaic_move(idx, delta):
+        paths = _mosaic_paths()
+        j = idx + delta
+        if 0 <= idx < len(paths) and 0 <= j < len(paths):
+            paths[idx], paths[j] = paths[j], paths[idx]
+            state["mosaic_paths"] = paths
+            _mosaic_refresh()
+
+    def _mosaic_remove(idx):
+        paths = _mosaic_paths()
+        if 0 <= idx < len(paths):
+            paths.pop(idx)
+            state["mosaic_paths"] = paths
+            _mosaic_refresh()
+
+    def _mosaic_add_text(raw):
+        """Add one or many cubes. Several paths can be pasted at once.
+
+        Split on newlines and semicolons but NOT commas: a Windows path cannot
+        contain either of the first two, while a comma is legal in a folder
+        name and splitting on it would quietly break such a path in half.
+        """
+        if not raw:
+            return
+        candidates = []
+        for chunk in str(raw).replace(";", "\n").splitlines():
+            chunk = chunk.strip().strip('"').strip("'")
+            if chunk:
+                candidates.append(chunk)
+
+        added, skipped, bad = [], [], []
+        paths = _mosaic_paths()
+        for cand in candidates:
+            resolved = resolve_cube_path(cand)
+            # A plain FOLDER is not a mistake here - it is how "Add whole
+            # folder" is aimed, and it is what the file browser hands back when
+            # a directory is selected. Passing silently instead of reporting it
+            # as a bad cube: complaining about a path the user was told to pick
+            # reads as an error when nothing is wrong.
+            if Path(resolved).is_dir() and not is_zarr_path(resolved):
+                continue
+            if not (resolved.lower().endswith(".nc") or is_zarr_path(resolved)):
+                bad.append(f"{cand} (not a .nc file or .zarr store)")
+                continue
+            if not Path(resolved).exists():
+                bad.append(f"{cand} (not found)")
+                continue
+            if resolved in paths:
+                skipped.append(resolved)
+                continue
+            paths.append(resolved)
+            added.append(resolved)
+
+        state["mosaic_paths"] = paths
+        _mosaic_refresh()
+
+        msgs = []
+        if added:
+            msgs.append(f"✅ Added {len(added)} cube(s).")
+        if skipped:
+            msgs.append(f"ℹ️ Already in the list: {len(skipped)}.")
+        for b in bad:
+            msgs.append(f"❌ {b}")
+        if msgs:
+            with mosaic_out:
+                clear_output()
+                for m in msgs:
+                    print(m)
+
+    def _on_mosaic_path_submitted(change=None):
+        """Enter in the path box adds that cube.
+
+        The Add button is gone (the browser is the normal way in), so the box
+        needs its own commit or a typed path would have no way to reach the
+        list. A folder is left in the box instead - that is what "Add whole
+        folder" reads.
+        """
+        raw = (mosaic_path_w.value or "").strip()
+        if not raw:
+            return
+        resolved = resolve_cube_path(raw)
+        if Path(resolved).is_dir() and not is_zarr_path(resolved):
+            return
+        _mosaic_add_text(raw)
+        mosaic_path_w.value = ""
+
+    def _on_mosaic_add_folder_clicked(_):
+        """Add every cube in the folder of whatever is in the box.
+
+        The reason this button exists: an area split into pieces is a folder of
+        dozens of cubes, and adding them one at a time is not a workflow.
+        """
+        raw = (mosaic_path_w.value or "").strip()
+        if not raw:
+            # Fall back to whatever folder the browser is showing, so the button
+            # works after browsing instead of demanding the path be typed too.
+            try:
+                raw = (mosaic_fc.selected_path or "") if mosaic_fc else ""
+            except Exception:
+                raw = ""
+        if not raw:
+            with mosaic_out:
+                clear_output()
+                print(
+                    "ℹ️ Type a folder path above (or open one with 📂) first, "
+                    "then press this to add every cube in it."
+                )
+            return
+        p = Path(resolve_cube_path(raw))
+        folder = p if p.is_dir() and not is_zarr_path(str(p)) else p.parent
+        if not folder.exists():
+            with mosaic_out:
+                clear_output()
+                print(f"❌ Folder not found: {folder}")
+            return
+        found = sorted(
+            [str(f) for f in folder.glob("*.nc")]
+            + [str(f) for f in folder.glob("*.zarr")]
+        )
+        if not found:
+            with mosaic_out:
+                clear_output()
+                print(f"ℹ️ No .nc or .zarr cubes in {folder}")
+            return
+        _mosaic_add_text("\n".join(found))
+        mosaic_path_w.value = ""
+
+    def _on_mosaic_clear_clicked(_):
+        state["mosaic_paths"] = []
+        _mosaic_refresh()
+        with mosaic_out:
+            clear_output()
+
+    def _mosaic_refresh_list():
+        """Rebuild the queued-cube rows.
+
+        Each row carries its own position, and the arrows change it, because the
+        order IS the priority order for the default overlap setting - a list the
+        user cannot reorder would make that setting unusable.
+        """
+        paths = _mosaic_paths()
+        rows = []
+        for i, p in enumerate(paths):
+            up = widgets.Button(
+                icon="arrow-up", tooltip="Move up (higher priority)",
+                layout=widgets.Layout(width="32px", height="26px", padding="0px"),
+                disabled=(i == 0),
+            )
+            down = widgets.Button(
+                icon="arrow-down", tooltip="Move down",
+                layout=widgets.Layout(width="32px", height="26px", padding="0px"),
+                disabled=(i == len(paths) - 1),
+            )
+            rm = widgets.Button(
+                icon="times", tooltip="Remove from the list",
+                layout=widgets.Layout(width="32px", height="26px", padding="0px"),
+            )
+            for btn in (up, down, rm):
+                btn.style.button_color = "#f3f4f6"
+            # idx bound as a default argument: without it every handler would
+            # close over the LAST i of the loop and every row would edit the
+            # same entry.
+            up.on_click(lambda _b, idx=i: _mosaic_move(idx, -1))
+            down.on_click(lambda _b, idx=i: _mosaic_move(idx, +1))
+            rm.on_click(lambda _b, idx=i: _mosaic_remove(idx))
+            label = widgets.HTML(
+                f"<div style='font-size:12px; color:#334155; overflow:hidden; "
+                f"text-overflow:ellipsis; white-space:nowrap;' title='{p}'>"
+                f"<b>{i + 1}.</b> {Path(p).name}</div>",
+                # min_width:0 lets a long file name be ellipsised instead of
+                # forcing the row - and the whole card - wider than the panel.
+                layout=widgets.Layout(
+                    flex="1 1 auto", width="auto", overflow="hidden",
+                    min_width="0",
+                ),
+            )
+            rows.append(widgets.HBox(
+                [label, up, down, rm],
+                layout=widgets.Layout(
+                    width="100%", gap="4px", align_items="center",
+                    overflow="hidden", min_width="0",
+                ),
+            ))
+        mosaic_list_box.children = rows
+        if not paths:
+            mosaic_count_w.value = (
+                "<div style='font-size:12px; color:#64748b;'>Add at least two "
+                "cubes.</div>"
+            )
+        else:
+            mosaic_count_w.value = (
+                f"<div style='font-size:12px; color:#334155;'><b>{len(paths)}</b> "
+                "cubes - the first wins where they overlap.</div>"
+            )
+
+    def _mosaic_refresh_metadata():
+        """Fill the layer and projection pickers from the selected cubes.
+
+        Metadata only - mosaic_layers opens each cube lazily and closes it - so
+        this can run on every list change without touching a pixel.
+        """
+        paths = _mosaic_paths()
+        if len(paths) < 2:
+            mosaic_layers_w.options = []
+            mosaic_layers_w.value = ()
+            mosaic_layers_note_w.value = ""
+            mosaic_crs_detected_w.options = [(_MOSAIC_CRS_AUTO_LABEL, _MOSAIC_CRS_AUTO)]
+            mosaic_crs_detected_w.value = _MOSAIC_CRS_AUTO
+            return
+        try:
+            info = mosaic_layers(paths)
+        except Exception as exc:
+            mosaic_layers_w.options = []
+            mosaic_layers_w.value = ()
+            mosaic_layers_note_w.value = (
+                "<div style='font-size:12px; color:#991b1b;'>Could not read the "
+                f"selected cubes: {exc}</div>"
+            )
+            return
+        # Kept for _sync_mosaic_controls, which uses the projections actually
+        # present to tell a typed CRS apart from one nothing uses. Stored HERE,
+        # on every list change, rather than only in the Check handler - reading
+        # it there alone meant a user who typed a CRS without pressing Check
+        # first got no warning and no automatic resampling.
+        state["mosaic_scan"] = info
+
+        common = info["common"]
+        previous = set(mosaic_layers_w.value or ())
+        mosaic_layers_w.options = [
+            (_layer_display_name(name), name) for name in common
+        ]
+        # All selected by default; a selection already made is kept so a user
+        # who unticked a layer does not get it back when another cube is added.
+        keep = tuple(n for n in common if n in previous) if previous else tuple(common)
+        mosaic_layers_w.value = keep or tuple(common)
+
+        notes = []
+        if info["only_some"]:
+            notes.append(
+                "Not in every cube, so not available to merge: "
+                + ", ".join(info["only_some"]) + "."
+            )
+        if not common:
+            notes.append("These cubes share no layer, so they cannot be merged.")
+        mosaic_layers_note_w.value = (
+            "<div style='font-size:12px; color:#92400e;'>" + " ".join(notes) + "</div>"
+            if notes else ""
+        )
+
+        opts = [(_MOSAIC_CRS_AUTO_LABEL, _MOSAIC_CRS_AUTO)]
+        for crs_name, n in (info["crs_counts"] or {}).items():
+            opts.append((f"{crs_name} - {n} of {len(paths)} cube(s)", crs_name))
+        previous_crs = mosaic_crs_detected_w.value
+        mosaic_crs_detected_w.options = opts
+        if previous_crs in [o[1] for o in opts]:
+            mosaic_crs_detected_w.value = previous_crs
+
+    def _mosaic_refresh():
+        _mosaic_refresh_list()
+        _mosaic_refresh_metadata()
+        _sync_mosaic_controls()
+
+    def _sync_mosaic_controls(*_):
+        """Grey out what cannot apply, and say what a typed CRS would do.
+
+        A user-defined CRS overrides the dropdown, and one that none of the
+        cubes uses means every cube must be warped - which the default refusal
+        would reject. Saying so here (and ticking the box) is the difference
+        between a setting that works and an error the user cannot act on.
+        """
+        text = (mosaic_crs_user_w.value or "").strip()
+        mosaic_crs_detected_w.disabled = bool(text)
+        mosaic_resampling_w.disabled = not bool(mosaic_allow_resample_w.value)
+        mosaic_run_btn.disabled = len(_mosaic_paths()) < 2
+
+        if not text:
+            mosaic_crs_status_w.value = ""
+            return
+        try:
+            canonical = validate_target_crs(text)
+        except Exception as exc:
+            mosaic_crs_status_w.value = (
+                "<div style='font-size:12px; color:#991b1b; background:#fef2f2; "
+                "border:1px solid #fecaca; border-radius:6px; padding:6px 8px;'>"
+                f"✗ {exc}</div>"
+            )
+            return
+        in_use = set()
+        try:
+            info = state.get("mosaic_scan") or {}
+            in_use = set((info.get("crs_counts") or {}).keys())
+        except Exception:
+            pass
+        extra = ""
+        if in_use and canonical not in in_use:
+            extra = (
+                " None of your cubes uses it, so every cube will be resampled - "
+                "<b>Allow resampling</b> has been switched on under Advanced."
+            )
+            if not mosaic_allow_resample_w.value:
+                mosaic_allow_resample_w.value = True
+        mosaic_crs_status_w.value = (
+            "<div style='font-size:12px; color:#166534;'>✓ mosaicking into "
+            f"<b>{canonical}</b>.{extra}</div>"
+        )
+
+    def _on_browse_mosaic_clicked(_):
+        if not filechooser_available or mosaic_fc is None:
+            with mosaic_out:
+                clear_output()
+                print(
+                    "ℹ️ Optional dependency 'ipyfilechooser' is not available. "
+                    "Type the cube paths instead (one per line)."
+                )
+            return
+        _toggle_box_display(mosaic_fc_box)
+
+    def _on_mosaic_fc_selected(chooser=None):
+        """A picked CUBE goes straight into the list; a picked FOLDER goes into
+        the box, ready for "Add whole folder".
+
+        Two selections, two meanings, and the browser is the only way in now
+        that the Add button is gone - so it has to handle both rather than
+        rejecting one of them.
+        """
+        try:
+            selected = (mosaic_fc.selected or "").strip()
+        except Exception:
+            selected = ""
+        if selected:
+            resolved = resolve_cube_path(selected)
+            if Path(resolved).is_dir() and not is_zarr_path(resolved):
+                mosaic_path_w.value = resolved
+                with mosaic_out:
+                    clear_output()
+                    print(
+                        f"📂 {resolved}\n"
+                        "Press 'Add whole folder' to add every cube in it."
+                    )
+            else:
+                _mosaic_add_text(selected)
+        mosaic_fc_box.layout.display = "none"
+
+    def _mosaic_effective_crs():
+        text = (mosaic_crs_user_w.value or "").strip()
+        if text:
+            return validate_target_crs(text)
+        chosen = mosaic_crs_detected_w.value
+        return None if chosen in (None, _MOSAIC_CRS_AUTO) else chosen
+
+    def _on_mosaic_check_clicked(_):
+        """Report what the cubes are, before anything is merged.
+
+        Metadata only. It exists because the union grid is rectangular while
+        the cubes usually are not, so mosaicking pieces that were split to stay
+        small can rebuild a very large, mostly empty cube - and that is worth
+        seeing as a number before starting, not after.
+        """
+        paths = _mosaic_paths()
+        with mosaic_out:
+            clear_output()
+            if len(paths) < 2:
+                print("ℹ️ Add at least two cubes first.")
+                return
+            try:
+                info = mosaic_layers(paths)
+                state["mosaic_scan"] = info
+                print(f"{len(paths)} cube(s) selected.\n")
+
+                print("Layers that can be merged: "
+                      + (", ".join(info["common"]) or "(none)"))
+                if info["only_some"]:
+                    print("Not in every cube (cannot be merged): "
+                          + ", ".join(info["only_some"]))
+
+                counts = info["crs_counts"] or {}
+                if len(counts) <= 1:
+                    print("\nProjection: "
+                          + (next(iter(counts), "unknown"))
+                          + " (all cubes)")
+                else:
+                    print("\nProjections (a mosaic uses one; the others are "
+                          "resampled into it):")
+                    for crs_name, n in counts.items():
+                        print(f"   {crs_name}: {n} cube(s)")
+
+                # Grid + size estimate, read from the coordinates only.
+                import numpy as _np
+
+                target = _mosaic_effective_crs() or next(iter(counts), None)
+                xmin = ymin = _np.inf
+                xmax = ymax = -_np.inf
+                res = None
+                same_grid = 0
+                px_sum = 0
+                # Per-LAYER shape of the non-spatial dimensions, and the longest
+                # time axis any cube has. Sized per layer rather than once for
+                # all of them because a cube can hold a time series AND a
+                # composite: multiplying the composite by the number of dates
+                # too would overstate the result substantially.
+                layer_extra = {}
+                n_time = 1
+                for p in paths:
+                    ds = open_cube(p, chunks="frames")
+                    try:
+                        x = _np.asarray(ds["x"].values, dtype="float64")
+                        y = _np.asarray(ds["y"].values, dtype="float64")
+                        rx = abs(float(x[1] - x[0]))
+                        res = rx if res is None else min(res, rx)
+                        px_sum += x.size * y.size
+                        if "time" in ds.dims:
+                            n_time = max(n_time, int(ds.sizes["time"]))
+                        for name in info["common"]:
+                            da = ds.get(name)
+                            if da is None:
+                                continue
+                            extra = 1
+                            for d in da.dims:
+                                if d not in ("y", "x", "time"):
+                                    extra *= int(da.sizes[d])
+                            layer_extra[name] = (
+                                extra, "time" in da.dims
+                            )
+                        cube_crs = info["crs"].get(Path(p).name or p, None)
+                        if target is None or cube_crs == target:
+                            same_grid += 1
+                            xmin, xmax = min(xmin, x.min()), max(xmax, x.max())
+                            ymin, ymax = min(ymin, y.min()), max(ymax, y.max())
+                    finally:
+                        try:
+                            ds.close()
+                        except Exception:
+                            pass
+
+                print(f"\nCubes already on the target projection: "
+                      f"{same_grid} of {len(paths)}")
+                if same_grid < len(paths):
+                    print("   The rest need 'Allow resampling' under Advanced.")
+
+                if res and _np.isfinite(xmin):
+                    nx = int(round((xmax - xmin) / res)) + 1
+                    ny = int(round((ymax - ymin) / res)) + 1
+                    wanted = list(mosaic_layers_w.value or info["common"])
+                    total = 0
+                    for name in wanted:
+                        extra, has_time = layer_extra.get(name, (1, False))
+                        total += (
+                            nx * ny * extra * (n_time if has_time else 1) * 4
+                        )
+                    fill = 100.0 * px_sum / max(nx * ny, 1)
+                    print(f"\nMosaic grid: {ny} x {nx} pixels "
+                          f"({nx * ny / 1e6:.1f} megapixels)")
+                    print(f"Estimated size: {_human_readable_bytes(total)}")
+                    print(f"Your cubes fill about {fill:.0f}% of it - the rest "
+                          "is empty area between them.")
+                    if fill < 40:
+                        print("   ⚠️ Mostly empty. Pieces spread over a wide "
+                              "area rebuild a large, sparse cube.")
+                print("\nℹ️ Nothing is mosaicked, this is only a check.")
+            except Exception as e:
+                print(_friendly_error(e, "Check cubes"))
+
+    def _on_mosaic_run_clicked(_):
+        paths = _mosaic_paths()
+        with mosaic_out:
+            clear_output()
+            if len(paths) < 2:
+                print("ℹ️ Add at least two cubes to mosaic.")
+                return
+            try:
+                chosen_layers = list(mosaic_layers_w.value or ())
+                res_text = (mosaic_resolution_w.value or "").strip()
+                resolution = float(res_text) if res_text else None
+
+                print(f"Mosaicking {len(paths)} cubes...\n", flush=True)
+                merged = mosaic_cubes(
+                    paths,
+                    overlap=mosaic_overlap_w.value,
+                    time_join=mosaic_time_join_w.value,
+                    band_join=mosaic_band_join_w.value,
+                    layers=chosen_layers or None,
+                    crs=_mosaic_effective_crs(),
+                    resolution=resolution,
+                    resampling=mosaic_resampling_w.value,
+                    on_grid_mismatch=(
+                        "resample" if mosaic_allow_resample_w.value else "raise"
+                    ),
+                    # source_map is deliberately NOT offered here. Its two extra
+                    # rasters turn every mosaic into a multi-layer cube, which
+                    # forces the result through the Layer-dropdown handoff
+                    # instead of loading straight into the editor - a second
+                    # loading step for a diagnostic most runs do not need. The
+                    # headless mosaic_cubes(source_map=True) still provides it.
+                    strict=not bool(mosaic_strict_w.value),
+                    report=True,
+                )
+
+                # Hand the result to the ORDINARY load path. The editor works on
+                # one layer at a time (state["current"] is a DataArray), so a
+                # multi-layer mosaic goes through the same Layer dropdown a
+                # multi-layer file does. From here on the mosaic simply IS the
+                # loaded cube and every other feature applies to it.
+                _prev = state.get("loaded_ds")
+                if _prev is not None:
+                    try:
+                        _prev.close()
+                    except Exception:
+                        pass
+                state["loaded_ds"] = merged
+                # The mosaic is lazy and still reads from the input files, so
+                # their handles must stay open for as long as it is in use.
+                state["mosaic_inputs"] = list(paths)
+
+                layers_found = _raster_layer_names(merged)
+                pseudo_path = f"<mosaic of {len(paths)} cubes>"
+                if len(layers_found) == 1:
+                    layer_select_w.options = []
+                    layer_select_box.layout.display = "none"
+                    _finalize_load(pseudo_path, merged, layers_found[0])
+                    print(f"\n✅ Mosaic ready: {layers_found[0]}. "
+                          "It is now the result you can export below.")
+                else:
+                    layer_select_w.options = _layer_dropdown_options(
+                        merged, layers_found
+                    )
+                    layer_select_w.value = (
+                        "Time_Series" if "Time_Series" in layers_found
+                        else layers_found[0]
+                    )
+                    layer_select_box.layout.display = ""
+                    # The names 'Load selected layer' actually reads. Setting
+                    # loaded_ds/loaded_path instead left that button reporting
+                    # "Load a cube first" on a mosaic that was sitting right
+                    # there, with no way to reach any of its layers.
+                    state["pending_ds"] = merged
+                    state["pending_path"] = pseudo_path
+                    state["current"] = None
+                    print(
+                        f"\n✅ Mosaic ready with {len(layers_found)} layers: "
+                        + ", ".join(layers_found)
+                        + "\nPick one in the 'Layer' dropdown under Loading and "
+                        "click 'Load selected layer' to start editing it."
+                    )
+            except Exception as e:
+                print(_friendly_error(e, "Mosaic data cubes"))
+
+    browse_mosaic_btn.on_click(_on_browse_mosaic_clicked)
+    mosaic_add_folder_btn.on_click(_on_mosaic_add_folder_clicked)
+    mosaic_path_w.observe(_on_mosaic_path_submitted, names="value")
+    mosaic_clear_btn.on_click(_on_mosaic_clear_clicked)
+    mosaic_check_btn.on_click(_on_mosaic_check_clicked)
+    mosaic_run_btn.on_click(_on_mosaic_run_clicked)
+    mosaic_crs_user_w.observe(_sync_mosaic_controls, names="value")
+    mosaic_allow_resample_w.observe(_sync_mosaic_controls, names="value")
+    if filechooser_available and mosaic_fc is not None:
+        try:
+            mosaic_fc.register_callback(_on_mosaic_fc_selected)
+        except Exception:
+            pass
+
+    # The text box FLEXES instead of claiming width:100%. With three children in
+    # the row - browse, box, Add - a 100%-wide middle child plus two fixed
+    # buttons adds up to more than the row, and the overflow is what puts the
+    # horizontal scrollbar back under the card. min_width:0 is the other half:
+    # without it a flex item refuses to shrink below its content width, so a
+    # long path re-introduces the same overflow.
+    mosaic_input_row = widgets.HBox(
+        [browse_mosaic_btn, mosaic_path_w],
+        layout=widgets.Layout(
+            width="100%", gap="6px", align_items="center",
+            overflow="hidden", min_width="0",
+        ),
+    )
+    mosaic_input_box = widgets.VBox(
+        [
+            widgets.HTML(
+                "<div style='font-size:12px; color:#666;'>"
+                "📂 pick a cube either one by one, or select a folder and click "
+                "<b>Add whole folder</b>."
+                "</div>"
+            ),
+            mosaic_input_row,
+            mosaic_fc_box,
+            widgets.HBox(
+                [mosaic_add_folder_btn, mosaic_clear_btn],
+                layout=widgets.Layout(
+                    gap="6px", flex_flow="row wrap", width="100%",
+                    overflow="hidden", min_width="0",
+                ),
+            ),
+        ],
+        layout=widgets.Layout(
+            width="100%", gap="4px", overflow="hidden", min_width="0",
+        ),
+    )
+
+    mosaic_advanced_box = widgets.VBox(
+        [
+            mosaic_allow_resample_w,
+            _stacked_field_with_help(
+                mosaic_resampling_w, "Resampling method", "mosaic_resampling"
+            ),
+            _stacked_field_with_help(
+                mosaic_resolution_w, "Pixel size (m)", "mosaic_pixel_size"
+            ),
+            mosaic_strict_w,
+        ],
+        layout=widgets.Layout(
+            width="100%", gap="6px", overflow="hidden", min_width="0",
+        ),
+    )
+    mosaic_advanced_acc = widgets.Accordion(
+        children=[mosaic_advanced_box], selected_index=None
+    )
+    mosaic_advanced_acc.set_title(0, "Advanced")
+    mosaic_advanced_acc.layout = widgets.Layout(width="100%", overflow="hidden")
+
+    mosaic_feature_box = widgets.VBox(
+        [
+            _chainable_badge(False, "no loaded cube needed"),
+            widgets.HTML(
+                "<div style='font-size:12px; color:#666;'>"
+                "Join several cubes into one. The result becomes the cube you "
+                "are editing."
+                "</div>"
+            ),
+            # No help icon: "Data cubes to join" needs no explaining, and the
+            # tool's own '?' would only repeat the line above it.
+            _stacked_field(mosaic_input_box, "Data cubes to join"),
+            mosaic_count_w,
+            mosaic_list_box,
+            _stacked_field_with_help(
+                mosaic_overlap_w, "Where cubes overlap", "mosaic_overlap"
+            ),
+            _stacked_field_with_help(
+                mosaic_layers_w, "Layers to merge", "mosaic_layers"
+            ),
+            mosaic_layers_note_w,
+            _stacked_field_with_help(
+                mosaic_time_join_w, "Dates", "mosaic_time"
+            ),
+            _stacked_field_with_help(
+                mosaic_band_join_w, "Bands", "mosaic_bands"
+            ),
+            _stacked_field_with_help(
+                mosaic_crs_detected_w, "Output projection", "mosaic_crs"
+            ),
+            _stacked_field(mosaic_crs_user_w, "User-defined projection"),
+            mosaic_crs_status_w,
+            mosaic_advanced_acc,
+            widgets.HBox(
+                [mosaic_check_btn, mosaic_run_btn],
+                layout=widgets.Layout(
+                    gap="8px", flex_flow="row wrap", width="100%",
+                    overflow="hidden", min_width="0",
+                ),
+            ),
+            mosaic_out,
+        ],
+        layout=widgets.Layout(
+            width="100%", gap="8px", overflow="hidden", min_width="0",
+        ),
+    )
+    mosaic_acc = widgets.Accordion(children=[mosaic_feature_box], selected_index=None)
+    mosaic_acc.set_title(0, "Mosaic Data Cubes")
+    mosaic_acc.layout = widgets.Layout(width="99%")
+
     features_box = widgets.VBox(
         [
             widgets.HTML("<b>Features</b>"),
@@ -12697,6 +13862,8 @@ def datacube_editor():
             build_mask_acc,
             mask_clouds_acc,
             clip_acc,
+            mosaic_acc,
+            reproject_acc,
             indices_acc,
             stats_acc,
             update_acc,
@@ -12862,9 +14029,14 @@ def datacube_editor():
     outer = widgets.HBox([ui], layout=widgets.Layout(width="100%", justify_content="center"))
 
     _set_editor_enabled(False)
-    _show_status("ℹ️ Load a NetCDF cube to start editing.")
+    _show_status(
+        "ℹ️ Load a NetCDF or Zarr cube to start editing - or use "
+        "'Mosaic Data Cubes' to join several into one first."
+    )
     _update_gif_output_suggestion(force=True)
     _update_update_daterange_example(force=True)
+    # Renders the empty-list hint and disables Run until two cubes are queued.
+    _mosaic_refresh()
 
     display(outer)
 
@@ -12888,6 +14060,10 @@ def datacube_editor():
             "mask_file": mask_file_w,
             "enable_clip": enable_clip_w,
             "clip_geom": clip_geom_w,
+            "enable_reproject": enable_reproject_w,
+            "reproject_crs": reproject_crs_w,
+            "reproject_resolution": reproject_res_w,
+            "reproject_resampling": reproject_resampling_w,
             "indices_select": indices_select_w,
             # Temporal Composites: the two promoted checkboxes, the "More
             # Composites" list ("stats_select") and the keep-or-drop choice.

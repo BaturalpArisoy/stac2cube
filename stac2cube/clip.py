@@ -401,6 +401,268 @@ def drop_partial_scenes(stac, min_coverage=0.9, cloud_mask=None, q=False, covera
     return stac
 
 
+def _reproject_grid(stac, src_crs, target_crs, resolution=None):
+    """Destination grid (transform, width, height) for a whole-cube warp.
+
+    Computed ONCE from the cube's own extent so every timestep lands on the
+    same grid. Letting ``rio.reproject`` pick a grid per timestep would give
+    each date a slightly different transform (it derives one from that slice's
+    bounds), and the dates could then not be concatenated back into one cube.
+
+    ``resolution=None`` keeps rasterio's default output pixel size, which is
+    chosen so the warped raster has roughly the same pixel count as the source -
+    i.e. approximately the input resolution, NOT exactly. Pass a number (CRS
+    units, metres here) to pin it.
+    """
+    from rasterio.warp import calculate_default_transform
+
+    left, bottom, right, top = stac.rio.bounds()
+    kwargs = {}
+    if resolution is not None:
+        res = float(resolution)
+        if res <= 0:
+            raise ValueError(f"resolution={resolution!r} must be a positive number.")
+        kwargs["resolution"] = (res, res)
+
+    return calculate_default_transform(
+        src_crs,
+        target_crs,
+        int(stac.sizes["x"]),
+        int(stac.sizes["y"]),
+        left,
+        bottom,
+        right,
+        top,
+        **kwargs,
+    )
+
+
+def _reproject_band_groups(stac, resampling):
+    """Split the band axis into (bands, resampling) groups.
+
+    Categorical layers (SCL, QA) are pinned to "nearest" for the same reason
+    the loader pins them (see ``get_data._CATEGORICAL_BANDS``): interpolating
+    class codes or bit-packed words produces meaningless values. Binary cloud
+    masks (``cloud_mask_*``) are categorical too. Everything else uses the
+    requested method.
+    """
+    from .get_data import _CATEGORICAL_BANDS
+
+    if "band" not in stac.dims:
+        return [(None, resampling)]
+
+    names = [str(b) for b in stac["band"].values]
+    categorical = [
+        n for n in names
+        if n.lower() in _CATEGORICAL_BANDS or n.lower().startswith("cloud_mask")
+    ]
+    if not categorical or resampling == "nearest":
+        return [(None, resampling)]
+
+    spectral = [n for n in names if n not in categorical]
+    groups = []
+    if spectral:
+        groups.append((spectral, resampling))
+    groups.append((categorical, "nearest"))
+    return groups
+
+
+def reproject_stac(stac, crs, resolution=None, resampling="nearest", q=False):
+    """Warp a data cube into another CRS.
+
+    :param stac: cube to reproject (``xarray.DataArray`` with y/x dims; a time
+        and/or band dimension is optional).
+    :param crs: target CRS - EPSG code, WKT or PROJ string. Validated with
+        :func:`stac2cube.get_data.validate_target_crs`, so it must be a
+        projected, metre-based CRS (the same rule the builder applies).
+    :param resolution: output pixel size in target-CRS units (metres). ``None``
+        (default) lets rasterio keep approximately the input resolution.
+    :param resampling: rasterio resampling method. Default ``"nearest"``, which
+        is the only method that invents no new values; categorical bands (SCL /
+        QA / ``cloud_mask_*``) stay on "nearest" whatever is chosen here.
+    :param q: quiet - suppress the progress lines.
+
+    Time series are warped ONE DATE AT A TIME onto a single pre-computed grid
+    (see :func:`_reproject_grid`), because rioxarray warps the last two
+    dimensions and treats one leading dimension as bands - a
+    ``(time, band, y, x)`` cube has one dimension too many. This path is EAGER:
+    rasterio needs the pixels in memory, so a lazy cube is materialized here.
+
+    Caveats worth stating rather than hiding:
+
+    * Reprojection RESAMPLES: pixel values and the pixel grid both change, and
+      the operation is not losslessly reversible. Reproject once, from the
+      cube in its native projection, rather than chaining warps.
+    * The warped cube is the axis-aligned bounding box of the rotated source
+      footprint, so the corners outside that footprint become NaN.
+    * ``cloud_percentage`` and ``scene_coverage`` coords are CARRIED OVER
+      unchanged, not recomputed. They were measured on the source grid; the new
+      corner NaNs are not clouds and not missing scene data, so recomputing them
+      here would report wrong numbers.
+
+    Returns the reprojected DataArray with ``attrs["crs"]``, ``["transform"]``
+    and ``["pixel_resolution"]`` updated to the new grid, and the source
+    projection recorded in ``attrs["reprojected_from"]``.
+    """
+    from .get_data import crs_attr_string, validate_target_crs
+    from rasterio.enums import Resampling
+
+    if not isinstance(stac, xr.DataArray):
+        raise TypeError(
+            f"reproject_stac expects a DataArray, got {type(stac).__name__}. "
+            "Pass the cube's data variable (e.g. ds['Time_Series'])."
+        )
+    if "x" not in stac.dims or "y" not in stac.dims:
+        raise ValueError(
+            "reproject_stac needs a cube with 'y' and 'x' dimensions; got dims "
+            f"{tuple(stac.dims)}."
+        )
+
+    target = validate_target_crs(crs)
+
+    method = str(resampling).lower()
+    if method not in Resampling.__members__:
+        raise ValueError(
+            f"Unknown resampling method '{resampling}'. Valid options: "
+            f"{sorted(Resampling.__members__)}."
+        )
+
+    # Source CRS: the written spatial_ref first, then the cube's own attr (which
+    # is what an exported/loaded stac2cube cube always carries).
+    src_crs = stac.rio.crs
+    if src_crs is None:
+        crs_attr = stac.attrs.get("crs")
+        if crs_attr is None:
+            raise ValueError(
+                "The cube declares no CRS (no spatial_ref coordinate and no "
+                "attrs['crs']), so it cannot be reprojected. Its current "
+                "projection has to be known before it can be warped."
+            )
+        stac = stac.rio.write_crs(crs_attr_string(crs_attr))
+        src_crs = stac.rio.crs
+
+    src_name = crs_attr_string(src_crs)
+    if src_name == target and resolution is None:
+        if not q:
+            print(f"Cube is already in {target}; nothing to reproject.", flush=True)
+        return stac
+
+    # rioxarray's reproject fills everything outside the source footprint with
+    # the nodata value. On a float cube that is NaN; an integer cube cannot hold
+    # NaN, so it needs a declared fill - guessing one (0, 255, ...) would be
+    # indistinguishable from a real class value in a mask cube.
+    if np.issubdtype(stac.dtype, np.floating):
+        nodata = np.nan
+    else:
+        nodata = stac.rio.nodata
+        if nodata is None:
+            nodata = stac.attrs.get("_FillValue", stac.attrs.get("nodata"))
+        if nodata is None:
+            raise ValueError(
+                f"This cube is {stac.dtype} (integer) and declares no no-data "
+                "value. Warping adds pixels outside the source footprint, and "
+                "there is no honest value to fill them with: an integer cube "
+                "cannot hold NaN, and picking 0 or 255 would be "
+                "indistinguishable from a real class code. Convert it to float "
+                "first, or set a no-data value on it."
+            )
+
+    dst_transform, width, height = _reproject_grid(
+        stac, src_crs, target, resolution=resolution
+    )
+    shape = (int(height), int(width))
+    groups = _reproject_band_groups(stac, method)
+
+    attrs_ref = dict(getattr(stac, "attrs", {}) or {})
+    band_order = (
+        [str(b) for b in stac["band"].values] if "band" in stac.dims else None
+    )
+
+    def _warp(arr, how):
+        out = arr.rio.write_nodata(nodata).rio.reproject(
+            target,
+            transform=dst_transform,
+            shape=shape,
+            resampling=Resampling[how],
+            nodata=nodata,
+        )
+        return out
+
+    def _warp_slice(arr):
+        """Warp one (band, y, x) - or (y, x) - slice, per band group."""
+        if len(groups) == 1:
+            return _warp(arr, groups[0][1])
+        parts = [_warp(arr.sel(band=names), how) for names, how in groups]
+        return xr.concat(parts, dim="band").sel(band=band_order)
+
+    if "time" in stac.dims:
+        n = int(stac.sizes["time"])
+        if not q:
+            print(
+                f"Reprojecting {n} date(s) from {src_name} to {target} "
+                f"({method})...",
+                flush=True,
+            )
+        frames = []
+        for i in range(n):
+            frames.append(_warp_slice(stac.isel(time=[i]).squeeze("time", drop=False)))
+            if not q and (i + 1) % 10 == 0:
+                print(f"  reprojected: {i + 1}/{n} dates", flush=True)
+        # coords/compat are xarray's current defaults, pinned explicitly: the
+        # per-date coords (cloud_percentage, scene_coverage, ...) are scalars on
+        # each frame and have to be compared and stacked back into (time,)
+        # coords. Pinning them also silences xarray's pending default-change
+        # warning, whose future defaults would reject this combination outright.
+        out = xr.concat(frames, dim="time", coords="different", compat="equals")
+    else:
+        if not q:
+            print(f"Reprojecting from {src_name} to {target} ({method})...", flush=True)
+        out = _warp_slice(stac)
+
+    # Per-time coords (cloud_percentage, scene_coverage, tile, scene metadata)
+    # ride along as scalar coords through the per-date warp and are rebuilt by
+    # the concat, but re-attach anything that got lost so the cube stays
+    # self-describing. Values are carried over, NOT recomputed - see the
+    # docstring for why.
+    #
+    # A per-date coord whose value is the SAME on every date (e.g. scene_coverage
+    # 1.0 throughout) is collapsed back to a SCALAR coord by concat's
+    # coords="different" comparison, which silently makes the cube one-sided: it
+    # no longer lines up with the time axis, and a later concat/update would trip
+    # over the mismatch. Restore anything that is not a (time,) coord again.
+    if "time" in stac.dims:
+        for name, coord in stac.coords.items():
+            if coord.dims != ("time",):
+                continue
+            existing = out.coords.get(name)
+            if existing is None or existing.dims != ("time",):
+                out = out.assign_coords({name: ("time", np.asarray(coord.values))})
+
+    out.attrs.update(attrs_ref)
+    # On a float cube NaN is the only honest no-data; a stale numeric nodata
+    # attr makes a later rio.clip fill the outside-polygon area AND every NaN
+    # hole with that value (see clip_stac).
+    if np.issubdtype(out.dtype, np.floating):
+        for _k in ("_FillValue", "missing_value", "fill_value", "nodata"):
+            out.attrs.pop(_k, None)
+
+    out.attrs["crs"] = target
+    out.attrs["transform"] = dst_transform
+    # The warp puts the cube on a new grid, so the inherited pixel_resolution
+    # would be stale; overwrite it with the grid actually written.
+    out.attrs["pixel_resolution"] = float(abs(dst_transform.a))
+    out.attrs["reprojected_from"] = src_name
+    out.attrs["reprojection_resampling"] = method
+
+    if not q:
+        print(
+            f"Reprojected grid: {shape[0]} x {shape[1]} pixels at "
+            f"{abs(dst_transform.a):g} m in {target}.",
+            flush=True,
+        )
+    return out
+
+
 def clip_stac(stac, polygon, crs=None, bbox_crs="EPSG:4326"):
     """
     polygon:

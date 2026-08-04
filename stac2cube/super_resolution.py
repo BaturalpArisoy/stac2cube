@@ -539,6 +539,13 @@ def super_resolve_cube(
       float32 scale_factor, so readers decode the packed values to float64 -
       equal to the NetCDF float32 decode within float32 rounding, not
       bit-identical.
+
+    Attributes written:
+      ``super_resolution`` records which model produced the cube ("rgbn",
+      "full_spectral" or "20to10"), and ``pixel_resolution`` is refreshed to
+      the output grid's pixel size in metres (2.5 for the two 4x modes, and
+      unchanged from the input - 10 on a standard cube - for "20to10"). Every
+      other attribute is inherited from the input cube.
     """
 
     # ---------------------------
@@ -878,6 +885,12 @@ def super_resolve_cube(
     da_super_all.name = var_name
     #da_super_all.attrs["status"] = f"super_resolved_{model_type_used}"
 
+    # Which of the three models produced this cube ("rgbn", "full_spectral" or
+    # "20to10"). The input cube's attrs are carried through the model (see
+    # superresolve_single_time), so without this a super-resolved cube is
+    # indistinguishable from its source in metadata.
+    da_super_all.attrs["super_resolution"] = model_type_used
+
     ds_out = da_super_all.to_dataset(name=var_name)
     tf_out_final = da_super_all.rio.transform()
     ds_out.rio.set_spatial_dims("x", "y", inplace=True)
@@ -915,6 +928,17 @@ def super_resolve_cube(
     ]
     ds_out.attrs["transform"] = transform9
     ds_out[var_name].attrs["transform"] = transform9
+
+    # The source cube's pixel_resolution came along with the rest of its attrs
+    # and would now be stale, so overwrite it from the grid actually written:
+    # the 2.5-m models upscale it 4x (10 -> 2.5), while "20to10" sharpens the
+    # 20-m bands onto the existing grid and leaves the spacing unchanged.
+    # Taken from the output transform, not from the nominal new_res, so it
+    # cannot disagree with the transform attr written just above.
+    _px_res = float(abs(tf_out.a))
+    ds_out.attrs["pixel_resolution"] = _px_res
+    ds_out[var_name].attrs["pixel_resolution"] = _px_res
+    ds_out.attrs["super_resolution"] = model_type_used
 
     # ---------------------------
     # output encoding (compression / int16 packing)

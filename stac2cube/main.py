@@ -578,8 +578,13 @@ def get_stac_layers(
                 )
             results = []
             masks = []  # per-feature in-memory binary masks (return_cloud_mask)
+            # Zero-pad the per-feature suffix so the files sort the same way a
+            # human reads them: an unpadded run gives _1, _10, _11, ... _9, which
+            # puts feature 10 second. Width follows the batch size, so a 40-piece
+            # run is _01.._40 and a 120-piece run is _001.._120.
+            _pad = max(2, len(str(n)))
             for pos, feature_gdf in enumerate(features):
-                idx = pos + 1  # human-friendly: count features from 1, not 0
+                idx = f"{pos + 1:0{_pad}d}"  # human-friendly: count from 1, not 0
                 if not q:
                     print(f"\n=== Feature {idx}/{n} ===", flush=True)
 
@@ -654,10 +659,10 @@ def get_stac_layers(
                 if output and isinstance(res, (xr.DataArray, xr.Dataset)):
                     if _export_format == "cogs":
                         # COGs are a FOLDER of per-date GeoTIFFs, so each
-                        # feature gets its own subfolder (<folder>/1, /2, ...)
+                        # feature gets its own subfolder (<folder>/01, /02, ...)
                         # instead of a <stem>_<idx> filename - matching the
                         # GUI's multi-feature COG export.
-                        feature_output = os.path.join(output, str(idx))
+                        feature_output = os.path.join(output, idx)
                     else:
                         stem, ext = os.path.splitext(output)
                         feature_output = f"{stem}_{idx}{ext}"
@@ -1551,6 +1556,9 @@ def get_stac_layers(
                 # Self-contained georeferencing so it can be exported later.
                 mask_cube.attrs["crs"] = crs
                 mask_cube.attrs["transform"] = stac.rio.transform()
+                mask_cube.attrs["pixel_resolution"] = float(
+                    abs(stac.rio.transform()[0])
+                )
                 if cloud_mask_output:
                     _cmo_dir = os.path.dirname(cloud_mask_output)
                     if _cmo_dir:
@@ -1704,6 +1712,13 @@ def get_stac_layers(
 
     stac.attrs["crs"] = crs
     stac.attrs["transform"] = transform
+    # Ground sample distance of the FINISHED grid, in the cube's CRS units
+    # (metres - the builder only targets projected, metre-based CRSs). Read off
+    # the transform rather than echoing the resolution= argument, so it stays
+    # truthful whatever set the grid (update mode restores the resolution from
+    # the stored cube, and a super-resolved cube overwrites this with its own,
+    # finer spacing - see super_resolve_cube).
+    stac.attrs["pixel_resolution"] = float(abs(transform[0]))
 
     # stac = stac.copy()
     stac.attrs.pop("nodata", None)
@@ -1740,6 +1755,7 @@ def get_stac_layers(
         # Re-attach CRS/transform metadata explicitly (safe after concat/update)
         stac.attrs["crs"] = crs
         stac.attrs["transform"] = transform
+        stac.attrs["pixel_resolution"] = float(abs(transform[0]))
         try:
             stac = stac.rio.write_crs(crs, inplace=True)
             stac = stac.rio.write_transform(transform, inplace=True)

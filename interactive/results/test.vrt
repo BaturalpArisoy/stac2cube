@@ -1,0 +1,268 @@
+<VRTDataset rasterXSize="523" rasterYSize="281">
+  <SRS dataAxisToSRSAxisMapping="1,2">PROJCS["WGS 84 / UTM zone 35N",GEOGCS["WGS 84",DATUM["WGS_1984",SPHEROID["WGS 84",6378137,298.257223563,AUTHORITY["EPSG","7030"]],AUTHORITY["EPSG","6326"]],PRIMEM["Greenwich",0,AUTHORITY["EPSG","8901"]],UNIT["degree",0.0174532925199433,AUTHORITY["EPSG","9122"]],AUTHORITY["EPSG","4326"]],PROJECTION["Transverse_Mercator"],PARAMETER["latitude_of_origin",0],PARAMETER["central_meridian",27],PARAMETER["scale_factor",0.9996],PARAMETER["false_easting",500000],PARAMETER["false_northing",0],UNIT["metre",1,AUTHORITY["EPSG","9001"]],AXIS["Easting",EAST],AXIS["Northing",NORTH],AUTHORITY["EPSG","32635"]]</SRS>
+  <GeoTransform>666960.0, 10.0, 0.0, 4546790.0, 0.0, -10.0</GeoTransform>
+  <VRTRasterBand dataType="Float32" band="1">
+    <Description>2024-04-01 blue</Description>
+    <NoDataValue>nan</NoDataValue>
+    <SimpleSource>
+      <SourceFilename relativeToVRT="1">NETCDF:"test.nc":Time_Series</SourceFilename>
+      <SourceBand>1</SourceBand>
+      <SourceProperties RasterXSize="523" RasterYSize="281" DataType="Float32" BlockXSize="523" BlockYSize="1"/>
+      <SrcRect xOff="0" yOff="0" xSize="523" ySize="281"/>
+      <DstRect xOff="0" yOff="0" xSize="523" ySize="281"/>
+    </SimpleSource>
+  </VRTRasterBand>
+  <VRTRasterBand dataType="Float32" band="2">
+    <Description>2024-04-01 green</Description>
+    <NoDataValue>nan</NoDataValue>
+    <SimpleSource>
+      <SourceFilename relativeToVRT="1">NETCDF:"test.nc":Time_Series</SourceFilename>
+      <SourceBand>2</SourceBand>
+      <SourceProperties RasterXSize="523" RasterYSize="281" DataType="Float32" BlockXSize="523" BlockYSize="1"/>
+      <SrcRect xOff="0" yOff="0" xSize="523" ySize="281"/>
+      <DstRect xOff="0" yOff="0" xSize="523" ySize="281"/>
+    </SimpleSource>
+  </VRTRasterBand>
+  <VRTRasterBand dataType="Float32" band="3">
+    <Description>2024-04-01 red</Description>
+    <NoDataValue>nan</NoDataValue>
+    <SimpleSource>
+      <SourceFilename relativeToVRT="1">NETCDF:"test.nc":Time_Series</SourceFilename>
+      <SourceBand>3</SourceBand>
+      <SourceProperties RasterXSize="523" RasterYSize="281" DataType="Float32" BlockXSize="523" BlockYSize="1"/>
+      <SrcRect xOff="0" yOff="0" xSize="523" ySize="281"/>
+      <DstRect xOff="0" yOff="0" xSize="523" ySize="281"/>
+    </SimpleSource>
+  </VRTRasterBand>
+  <VRTRasterBand dataType="Float32" band="4">
+    <Description>2024-04-01 nir</Description>
+    <NoDataValue>nan</NoDataValue>
+    <SimpleSource>
+      <SourceFilename relativeToVRT="1">NETCDF:"test.nc":Time_Series</SourceFilename>
+      <SourceBand>4</SourceBand>
+      <SourceProperties RasterXSize="523" RasterYSize="281" DataType="Float32" BlockXSize="523" BlockYSize="1"/>
+      <SrcRect xOff="0" yOff="0" xSize="523" ySize="281"/>
+      <DstRect xOff="0" yOff="0" xSize="523" ySize="281"/>
+    </SimpleSource>
+  </VRTRasterBand>
+  <VRTRasterBand dataType="Float32" band="5">
+    <Description>2024-04-01 ndvi</Description>
+    <NoDataValue>nan</NoDataValue>
+    <SimpleSource>
+      <SourceFilename relativeToVRT="1">NETCDF:"test.nc":Time_Series</SourceFilename>
+      <SourceBand>5</SourceBand>
+      <SourceProperties RasterXSize="523" RasterYSize="281" DataType="Float32" BlockXSize="523" BlockYSize="1"/>
+      <SrcRect xOff="0" yOff="0" xSize="523" ySize="281"/>
+      <DstRect xOff="0" yOff="0" xSize="523" ySize="281"/>
+    </SimpleSource>
+  </VRTRasterBand>
+  <VRTRasterBand dataType="Float32" band="6">
+    <Description>2024-04-01 ndwi</Description>
+    <NoDataValue>nan</NoDataValue>
+    <SimpleSource>
+      <SourceFilename relativeToVRT="1">NETCDF:"test.nc":Time_Series</SourceFilename>
+      <SourceBand>6</SourceBand>
+      <SourceProperties RasterXSize="523" RasterYSize="281" DataType="Float32" BlockXSize="523" BlockYSize="1"/>
+      <SrcRect xOff="0" yOff="0" xSize="523" ySize="281"/>
+      <DstRect xOff="0" yOff="0" xSize="523" ySize="281"/>
+    </SimpleSource>
+  </VRTRasterBand>
+  <VRTRasterBand dataType="Float32" band="7">
+    <Description>2024-04-03 blue</Description>
+    <NoDataValue>nan</NoDataValue>
+    <SimpleSource>
+      <SourceFilename relativeToVRT="1">NETCDF:"test.nc":Time_Series</SourceFilename>
+      <SourceBand>7</SourceBand>
+      <SourceProperties RasterXSize="523" RasterYSize="281" DataType="Float32" BlockXSize="523" BlockYSize="1"/>
+      <SrcRect xOff="0" yOff="0" xSize="523" ySize="281"/>
+      <DstRect xOff="0" yOff="0" xSize="523" ySize="281"/>
+    </SimpleSource>
+  </VRTRasterBand>
+  <VRTRasterBand dataType="Float32" band="8">
+    <Description>2024-04-03 green</Description>
+    <NoDataValue>nan</NoDataValue>
+    <SimpleSource>
+      <SourceFilename relativeToVRT="1">NETCDF:"test.nc":Time_Series</SourceFilename>
+      <SourceBand>8</SourceBand>
+      <SourceProperties RasterXSize="523" RasterYSize="281" DataType="Float32" BlockXSize="523" BlockYSize="1"/>
+      <SrcRect xOff="0" yOff="0" xSize="523" ySize="281"/>
+      <DstRect xOff="0" yOff="0" xSize="523" ySize="281"/>
+    </SimpleSource>
+  </VRTRasterBand>
+  <VRTRasterBand dataType="Float32" band="9">
+    <Description>2024-04-03 red</Description>
+    <NoDataValue>nan</NoDataValue>
+    <SimpleSource>
+      <SourceFilename relativeToVRT="1">NETCDF:"test.nc":Time_Series</SourceFilename>
+      <SourceBand>9</SourceBand>
+      <SourceProperties RasterXSize="523" RasterYSize="281" DataType="Float32" BlockXSize="523" BlockYSize="1"/>
+      <SrcRect xOff="0" yOff="0" xSize="523" ySize="281"/>
+      <DstRect xOff="0" yOff="0" xSize="523" ySize="281"/>
+    </SimpleSource>
+  </VRTRasterBand>
+  <VRTRasterBand dataType="Float32" band="10">
+    <Description>2024-04-03 nir</Description>
+    <NoDataValue>nan</NoDataValue>
+    <SimpleSource>
+      <SourceFilename relativeToVRT="1">NETCDF:"test.nc":Time_Series</SourceFilename>
+      <SourceBand>10</SourceBand>
+      <SourceProperties RasterXSize="523" RasterYSize="281" DataType="Float32" BlockXSize="523" BlockYSize="1"/>
+      <SrcRect xOff="0" yOff="0" xSize="523" ySize="281"/>
+      <DstRect xOff="0" yOff="0" xSize="523" ySize="281"/>
+    </SimpleSource>
+  </VRTRasterBand>
+  <VRTRasterBand dataType="Float32" band="11">
+    <Description>2024-04-03 ndvi</Description>
+    <NoDataValue>nan</NoDataValue>
+    <SimpleSource>
+      <SourceFilename relativeToVRT="1">NETCDF:"test.nc":Time_Series</SourceFilename>
+      <SourceBand>11</SourceBand>
+      <SourceProperties RasterXSize="523" RasterYSize="281" DataType="Float32" BlockXSize="523" BlockYSize="1"/>
+      <SrcRect xOff="0" yOff="0" xSize="523" ySize="281"/>
+      <DstRect xOff="0" yOff="0" xSize="523" ySize="281"/>
+    </SimpleSource>
+  </VRTRasterBand>
+  <VRTRasterBand dataType="Float32" band="12">
+    <Description>2024-04-03 ndwi</Description>
+    <NoDataValue>nan</NoDataValue>
+    <SimpleSource>
+      <SourceFilename relativeToVRT="1">NETCDF:"test.nc":Time_Series</SourceFilename>
+      <SourceBand>12</SourceBand>
+      <SourceProperties RasterXSize="523" RasterYSize="281" DataType="Float32" BlockXSize="523" BlockYSize="1"/>
+      <SrcRect xOff="0" yOff="0" xSize="523" ySize="281"/>
+      <DstRect xOff="0" yOff="0" xSize="523" ySize="281"/>
+    </SimpleSource>
+  </VRTRasterBand>
+  <VRTRasterBand dataType="Float32" band="13">
+    <Description>2024-04-06 blue</Description>
+    <NoDataValue>nan</NoDataValue>
+    <SimpleSource>
+      <SourceFilename relativeToVRT="1">NETCDF:"test.nc":Time_Series</SourceFilename>
+      <SourceBand>13</SourceBand>
+      <SourceProperties RasterXSize="523" RasterYSize="281" DataType="Float32" BlockXSize="523" BlockYSize="1"/>
+      <SrcRect xOff="0" yOff="0" xSize="523" ySize="281"/>
+      <DstRect xOff="0" yOff="0" xSize="523" ySize="281"/>
+    </SimpleSource>
+  </VRTRasterBand>
+  <VRTRasterBand dataType="Float32" band="14">
+    <Description>2024-04-06 green</Description>
+    <NoDataValue>nan</NoDataValue>
+    <SimpleSource>
+      <SourceFilename relativeToVRT="1">NETCDF:"test.nc":Time_Series</SourceFilename>
+      <SourceBand>14</SourceBand>
+      <SourceProperties RasterXSize="523" RasterYSize="281" DataType="Float32" BlockXSize="523" BlockYSize="1"/>
+      <SrcRect xOff="0" yOff="0" xSize="523" ySize="281"/>
+      <DstRect xOff="0" yOff="0" xSize="523" ySize="281"/>
+    </SimpleSource>
+  </VRTRasterBand>
+  <VRTRasterBand dataType="Float32" band="15">
+    <Description>2024-04-06 red</Description>
+    <NoDataValue>nan</NoDataValue>
+    <SimpleSource>
+      <SourceFilename relativeToVRT="1">NETCDF:"test.nc":Time_Series</SourceFilename>
+      <SourceBand>15</SourceBand>
+      <SourceProperties RasterXSize="523" RasterYSize="281" DataType="Float32" BlockXSize="523" BlockYSize="1"/>
+      <SrcRect xOff="0" yOff="0" xSize="523" ySize="281"/>
+      <DstRect xOff="0" yOff="0" xSize="523" ySize="281"/>
+    </SimpleSource>
+  </VRTRasterBand>
+  <VRTRasterBand dataType="Float32" band="16">
+    <Description>2024-04-06 nir</Description>
+    <NoDataValue>nan</NoDataValue>
+    <SimpleSource>
+      <SourceFilename relativeToVRT="1">NETCDF:"test.nc":Time_Series</SourceFilename>
+      <SourceBand>16</SourceBand>
+      <SourceProperties RasterXSize="523" RasterYSize="281" DataType="Float32" BlockXSize="523" BlockYSize="1"/>
+      <SrcRect xOff="0" yOff="0" xSize="523" ySize="281"/>
+      <DstRect xOff="0" yOff="0" xSize="523" ySize="281"/>
+    </SimpleSource>
+  </VRTRasterBand>
+  <VRTRasterBand dataType="Float32" band="17">
+    <Description>2024-04-06 ndvi</Description>
+    <NoDataValue>nan</NoDataValue>
+    <SimpleSource>
+      <SourceFilename relativeToVRT="1">NETCDF:"test.nc":Time_Series</SourceFilename>
+      <SourceBand>17</SourceBand>
+      <SourceProperties RasterXSize="523" RasterYSize="281" DataType="Float32" BlockXSize="523" BlockYSize="1"/>
+      <SrcRect xOff="0" yOff="0" xSize="523" ySize="281"/>
+      <DstRect xOff="0" yOff="0" xSize="523" ySize="281"/>
+    </SimpleSource>
+  </VRTRasterBand>
+  <VRTRasterBand dataType="Float32" band="18">
+    <Description>2024-04-06 ndwi</Description>
+    <NoDataValue>nan</NoDataValue>
+    <SimpleSource>
+      <SourceFilename relativeToVRT="1">NETCDF:"test.nc":Time_Series</SourceFilename>
+      <SourceBand>18</SourceBand>
+      <SourceProperties RasterXSize="523" RasterYSize="281" DataType="Float32" BlockXSize="523" BlockYSize="1"/>
+      <SrcRect xOff="0" yOff="0" xSize="523" ySize="281"/>
+      <DstRect xOff="0" yOff="0" xSize="523" ySize="281"/>
+    </SimpleSource>
+  </VRTRasterBand>
+  <VRTRasterBand dataType="Float32" band="19">
+    <Description>2024-04-08 blue</Description>
+    <NoDataValue>nan</NoDataValue>
+    <SimpleSource>
+      <SourceFilename relativeToVRT="1">NETCDF:"test.nc":Time_Series</SourceFilename>
+      <SourceBand>19</SourceBand>
+      <SourceProperties RasterXSize="523" RasterYSize="281" DataType="Float32" BlockXSize="523" BlockYSize="1"/>
+      <SrcRect xOff="0" yOff="0" xSize="523" ySize="281"/>
+      <DstRect xOff="0" yOff="0" xSize="523" ySize="281"/>
+    </SimpleSource>
+  </VRTRasterBand>
+  <VRTRasterBand dataType="Float32" band="20">
+    <Description>2024-04-08 green</Description>
+    <NoDataValue>nan</NoDataValue>
+    <SimpleSource>
+      <SourceFilename relativeToVRT="1">NETCDF:"test.nc":Time_Series</SourceFilename>
+      <SourceBand>20</SourceBand>
+      <SourceProperties RasterXSize="523" RasterYSize="281" DataType="Float32" BlockXSize="523" BlockYSize="1"/>
+      <SrcRect xOff="0" yOff="0" xSize="523" ySize="281"/>
+      <DstRect xOff="0" yOff="0" xSize="523" ySize="281"/>
+    </SimpleSource>
+  </VRTRasterBand>
+  <VRTRasterBand dataType="Float32" band="21">
+    <Description>2024-04-08 red</Description>
+    <NoDataValue>nan</NoDataValue>
+    <SimpleSource>
+      <SourceFilename relativeToVRT="1">NETCDF:"test.nc":Time_Series</SourceFilename>
+      <SourceBand>21</SourceBand>
+      <SourceProperties RasterXSize="523" RasterYSize="281" DataType="Float32" BlockXSize="523" BlockYSize="1"/>
+      <SrcRect xOff="0" yOff="0" xSize="523" ySize="281"/>
+      <DstRect xOff="0" yOff="0" xSize="523" ySize="281"/>
+    </SimpleSource>
+  </VRTRasterBand>
+  <VRTRasterBand dataType="Float32" band="22">
+    <Description>2024-04-08 nir</Description>
+    <NoDataValue>nan</NoDataValue>
+    <SimpleSource>
+      <SourceFilename relativeToVRT="1">NETCDF:"test.nc":Time_Series</SourceFilename>
+      <SourceBand>22</SourceBand>
+      <SourceProperties RasterXSize="523" RasterYSize="281" DataType="Float32" BlockXSize="523" BlockYSize="1"/>
+      <SrcRect xOff="0" yOff="0" xSize="523" ySize="281"/>
+      <DstRect xOff="0" yOff="0" xSize="523" ySize="281"/>
+    </SimpleSource>
+  </VRTRasterBand>
+  <VRTRasterBand dataType="Float32" band="23">
+    <Description>2024-04-08 ndvi</Description>
+    <NoDataValue>nan</NoDataValue>
+    <SimpleSource>
+      <SourceFilename relativeToVRT="1">NETCDF:"test.nc":Time_Series</SourceFilename>
+      <SourceBand>23</SourceBand>
+      <SourceProperties RasterXSize="523" RasterYSize="281" DataType="Float32" BlockXSize="523" BlockYSize="1"/>
+      <SrcRect xOff="0" yOff="0" xSize="523" ySize="281"/>
+      <DstRect xOff="0" yOff="0" xSize="523" ySize="281"/>
+    </SimpleSource>
+  </VRTRasterBand>
+  <VRTRasterBand dataType="Float32" band="24">
+    <Description>2024-04-08 ndwi</Description>
+    <NoDataValue>nan</NoDataValue>
+    <SimpleSource>
+      <SourceFilename relativeToVRT="1">NETCDF:"test.nc":Time_Series</SourceFilename>
+      <SourceBand>24</SourceBand>
+      <SourceProperties RasterXSize="523" RasterYSize="281" DataType="Float32" BlockXSize="523" BlockYSize="1"/>
+      <SrcRect xOff="0" yOff="0" xSize="523" ySize="281"/>
+      <DstRect xOff="0" yOff="0" xSize="523" ySize="281"/>
+    </SimpleSource>
+  </VRTRasterBand>
+</VRTDataset>
