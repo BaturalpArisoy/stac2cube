@@ -34,11 +34,11 @@ Caveats (please keep them in any user-facing text)
   geometric estimates, accurate to the polygon, not to the pixel.
 * They therefore PREDICT, but do not equal, the ``scene_coverage`` coordinate
   stac2cube attaches to a built cube (:func:`stac2cube.clip.compute_scene_coverage`),
-  which is measured on real pixels. Note also the different denominator: this
-  module reports coverage as a share of the AOI, while ``scene_coverage``
-  normalises by the imaged footprint (the union of all scenes). The two agree
-  when the union covers the whole AOI, and differ by that factor when it does not
-  (``union_coverage`` in the returned info dict).
+  which is measured on real pixels. Both are shares of the SAME denominator, the
+  AOI, so the two numbers are directly comparable and the gap between them is
+  polygon-versus-pixel alone. (``scene_coverage`` divided by the imaged union of
+  all scenes until that was changed in favour of the AOI; a cube built before
+  the change carries the old meaning and nothing in the file says so.)
 * No cloud filter is applied, deliberately: this is about acquisition geometry,
   which does not change with cloudiness. A cube built with a Max cloud % below
   100 will have fewer dates than the preview reports.
@@ -49,13 +49,19 @@ Caveats (please keep them in any user-facing text)
 
 import datetime
 import math
+import os
 import re
+import warnings
+from pathlib import Path
 from types import SimpleNamespace
 
 import geopandas as gpd
+import numpy as np
 import pandas as pd
+import xarray as xr
 from pystac_client import Client as pystacclient
 
+from .export_cfg import open_cube
 from .vector_refiner import polygon_2_bbox, polygon_2_features, polygon_2_gdf
 from .get_data import (
     _CATALOGUES,
@@ -72,6 +78,7 @@ __all__ = [
     "summarize_scene_footprints",
     "footprint_map",
     "satellite_map",
+    "export_cube_statistics",
 ]
 
 
@@ -1390,6 +1397,358 @@ def _box_geom(bbox):
     from shapely.geometry import box as _box
 
     return _box(*[float(v) for v in bbox])
+
+
+# ---------------------------------------------------------------------------
+# Statistics table of a built cube (CSV)
+# ---------------------------------------------------------------------------
+#
+# One long table with a `period` column: every row is one band over one period
+# (a single date, a year, or a month), and the five statistic columns always
+# mean the same thing. Everything is computed from the cube's OWN time series,
+# never from stored composite layers and never from the per-date rows of the
+# table itself - see the note in _row_statistics for why that distinction is
+# not cosmetic.
+
+_STAT_OPS = ("mean", "median", "min", "max", "std")
+
+# Written out rather than taken from `calendar`, whose month names follow the
+# process locale: a CSV must not change its labels with the machine it ran on.
+_MONTH_NAMES = (
+    "January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December",
+)
+
+# Coordinates copied into the table when the cube carries them. Both are
+# per-scene (time,) values: reported as stored for a date row, averaged over
+# the scenes of a year / month row.
+_CONTEXT_COORDS = ("cloud_percentage", "scene_coverage")
+
+
+def _is_categorical_band(name):
+    """Band whose values are class codes, not a measured quantity.
+
+    A mean of SCL class numbers or of a 0/1 cloud mask is arithmetically valid
+    and physically meaningless, so these are flagged rather than dropped - the
+    caller may well want the mask's mean (its cloud fraction) on purpose.
+    """
+    n = str(name).lower()
+    return n in {"scl", "qa", "qa60", "qa_pixel"} or n.startswith("cloud_mask")
+
+
+def _cube_time_series(cube):
+    """Resolve the input to (time series DataArray, dataset to close).
+
+    Accepts a path to an exported cube (``.nc`` / ``.zarr``, opened through
+    :func:`stac2cube.export_cfg.open_cube` so legacy variable names migrate),
+    an already-open Dataset, or the time-series DataArray itself.
+    """
+    to_close = None
+    if isinstance(cube, xr.DataArray):
+        stac = cube
+    elif isinstance(cube, xr.Dataset):
+        stac = _time_series_var(cube)
+    elif isinstance(cube, (str, os.PathLike)):
+        if not os.path.exists(cube):
+            raise FileNotFoundError(f"No cube at {cube}.")
+        # "frames" = lazy, one chunk per scene (NetCDF); Zarr stores are
+        # already written that way, so the flag is a no-op there.
+        ds = open_cube(cube, chunks="frames")
+        to_close = ds
+        try:
+            stac = _time_series_var(ds)
+        except Exception:
+            ds.close()
+            raise
+    else:
+        raise TypeError(
+            "cube must be a path to an exported .nc / .zarr cube, an "
+            f"xarray.Dataset or an xarray.DataArray, got {type(cube).__name__}."
+        )
+
+    if "time" not in stac.dims:
+        raise ValueError(
+            "This cube has no time dimension, so it holds temporal composites "
+            "only. A statistics table is built from the time series - rebuild "
+            "the cube with the time series kept (keep_timeseries=True)."
+        )
+    if stac.sizes["time"] == 0:
+        raise ValueError("This cube's time dimension is empty - no dates to report.")
+    return stac, to_close
+
+
+def _time_series_var(ds):
+    """The time-series variable of a cube Dataset, or a helpful error."""
+    if "Time_Series" in ds.data_vars:
+        return ds["Time_Series"]
+    others = [str(v) for v in ds.data_vars if str(v) != "spatial_ref"]
+    if others:
+        raise ValueError(
+            "This cube holds no 'Time_Series' variable, only "
+            f"{others[:8]}{' ...' if len(others) > 8 else ''}. Those are "
+            "temporal composites; a statistics table needs the time series "
+            "the composites were reduced from."
+        )
+    raise ValueError("This cube holds no data variables.")
+
+
+def _period_rows(times):
+    """Row specification of the whole table.
+
+    Returns ``[(period, label, indices), ...]``: every date of the cube in
+    chronological order, then one row per year, then one per month. Positions
+    are taken by index rather than by slicing the time axis, so an unsorted
+    time coordinate (update mode, tile_handling="separate") is handled without
+    reordering the cube.
+    """
+    order = np.argsort(times.values)
+    rows = [
+        ("date", times[i].strftime("%Y-%m-%d"), np.array([i]))
+        for i in order
+    ]
+    years = times.year.values
+    for y in sorted(set(int(v) for v in years)):
+        rows.append(("year", str(y), np.flatnonzero(years == y)))
+    months = years * 100 + times.month.values
+    for key in sorted(set(int(v) for v in months)):
+        y, m = key // 100, key % 100
+        rows.append(("month", f"{_MONTH_NAMES[m - 1]}_{y}", np.flatnonzero(months == key)))
+    return rows
+
+
+def _row_statistics(sub, ops):
+    """The requested statistics of one row, per band.
+
+    Reduced over every dimension except ``band`` - i.e. over the pixels of the
+    scenes in this period, all at once. For a year or a month that is NOT the
+    same as summarising the date rows above it: a mean of per-date means
+    weights a date with 5% valid pixels like one with 100%, and a median or a
+    standard deviation of per-date values is a different quantity altogether
+    (spread BETWEEN dates rather than in the data). Only min and max come out
+    identical either way.
+    """
+    dims = [d for d in sub.dims if d != "band"]
+    with warnings.catch_warnings():
+        # All-NaN period (a fully clouded date) -> NaN, written as an empty
+        # cell. numpy's "All-NaN slice"/"Mean of empty slice" notices are the
+        # expected path here, not a problem to report.
+        warnings.simplefilter("ignore", RuntimeWarning)
+        reduced = xr.Dataset(
+            {op: getattr(sub, op)(dim=dims, skipna=True) for op in ops}
+        ).compute()
+    return {
+        op: np.atleast_1d(np.asarray(reduced[op].values, dtype="float64"))
+        for op in ops
+    }
+
+
+def _coord_value(sub, name):
+    """Mean of a per-scene coordinate over the scenes of one row (NaN if none).
+
+    A cube built lazily can carry cloud_percentage / scene_coverage as deferred
+    coordinates; reading them here materialises them, which is the point.
+    """
+    if name not in sub.coords:
+        return None
+    values = np.atleast_1d(np.asarray(sub[name].values, dtype="float64"))
+    if values.size == 0 or np.all(np.isnan(values)):
+        return float("nan")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        return float(np.nanmean(values))
+
+
+def _default_csv_path(source):
+    p = Path(source)
+    name = p.name
+    for ext in (".zarr", ".nc4", ".nc", ".netcdf"):
+        if name.lower().endswith(ext):
+            name = name[: -len(ext)]
+            break
+    return str(p.parent / f"{name}_statistics.csv")
+
+
+def export_cube_statistics(
+    cube,
+    csv_path=None,
+    bands=None,
+    stats=None,
+    decimals=6,
+    q=False,
+):
+    """
+    Statistics table of an exported data cube, written as one CSV.
+
+    Every row is one band over one period; the ``period`` column says which
+    kind of period the ``label`` names:
+
+    ==========  ==============  ==================================
+    period      label           rows
+    ==========  ==============  ==================================
+    ``date``    ``2024-04-01``  every date the cube holds
+    ``year``    ``2024``        every year present
+    ``month``   ``April_2024``  every month present
+    ==========  ==============  ==================================
+
+    Columns: ``period, label, band, n_dates, mean, median, min, max, std``,
+    followed by ``cloud_percentage`` and ``scene_coverage`` where the cube
+    carries them, and by ``tile`` for a cube built with
+    ``tile_handling="separate"``.
+
+    All three sections are computed from the cube's ``Time_Series`` variable,
+    reduced over the pixels of the period's scenes. The year and month rows are
+    NOT summaries of the date rows and not read from stored composite layers,
+    so they hold for a cube that carries no composites at all - and they stay
+    correct when the number of valid pixels varies from date to date, which
+    cloud masking guarantees it does. ``std`` is the population standard
+    deviation (ddof=0), xarray's default.
+
+    A cube built without its time series (temporal composites only, no time
+    dimension) cannot produce this table and raises.
+
+    Parameters
+    ----------
+    cube : str | Path | xr.Dataset | xr.DataArray
+        An exported ``.nc`` / ``.zarr`` cube, or an already-open one.
+    csv_path : str, optional
+        Where to write. Defaults to ``<cube>_statistics.csv`` next to the cube;
+        pass ``None`` with an in-memory cube to skip writing and only get the
+        table back.
+    bands : str | list of str, optional
+        Restrict to these bands (default: all, in the cube's band order).
+    stats : list of str, optional
+        Subset of ``mean, median, min, max, std`` (default: all five).
+    decimals : int, optional
+        Rounding of the numeric columns; ``None`` writes full precision. The
+        default of 6 is already beyond the ~7 significant digits a float32 cube
+        actually carries.
+    q : bool
+        Quiet: suppress the summary print.
+
+    Returns
+    -------
+    pandas.DataFrame
+        The same table that was written.
+
+    Notes
+    -----
+    Memory: each row is reduced from the scenes of its period, one period at a
+    time. ``median`` cannot be streamed - it needs the whole period in memory -
+    so the peak is roughly the largest year of the cube. Drop it
+    (``stats=["mean", "min", "max", "std"]``) to keep the whole run streaming
+    scene by scene.
+
+    ``n_dates`` counts the timesteps the period holds - including a fully
+    clouded one that contributed no pixel - and for a
+    ``tile_handling="separate"`` cube counts tiles, not solar days.
+
+    Examples
+    --------
+    >>> df = export_cube_statistics("results/naryn.nc")
+    >>> df = export_cube_statistics("results/naryn.zarr", bands=["ndvi"],
+    ...                             stats=["mean", "std"])
+    """
+    ops = list(_STAT_OPS) if stats is None else [str(s).strip().lower() for s in
+                                                 ([stats] if isinstance(stats, str) else stats)]
+    unknown = [op for op in ops if op not in _STAT_OPS]
+    if unknown:
+        raise ValueError(
+            f"Unsupported statistic(s) {unknown}. Available: {list(_STAT_OPS)}."
+        )
+    if not ops:
+        raise ValueError("stats is empty - nothing to compute.")
+
+    stac, to_close = _cube_time_series(cube)
+    try:
+        # A cube with a single band may carry it as a scalar coordinate or not
+        # at all; promoting it to a length-1 dimension keeps one code path.
+        if "band" not in stac.dims:
+            name = str(stac["band"].values) if "band" in stac.coords else "band"
+            stac = stac.expand_dims(band=[name])
+        band_names = [str(b) for b in np.atleast_1d(stac["band"].values)]
+
+        if bands is not None:
+            wanted = [bands] if isinstance(bands, str) else [str(b) for b in bands]
+            missing = [b for b in wanted if b not in band_names]
+            if missing:
+                raise ValueError(
+                    f"Band(s) {missing} are not in this cube. Available: {band_names}."
+                )
+            stac = stac.sel(band=wanted)
+            band_names = wanted
+
+        categorical = [b for b in band_names if _is_categorical_band(b)]
+        has_tile = "tile" in stac.coords and "time" in stac["tile"].dims
+        context = [c for c in _CONTEXT_COORDS if c in stac.coords]
+
+        times = pd.to_datetime(stac["time"].values)
+        rows = _period_rows(times)
+        # median has to hold a whole period at once (no streaming quantile);
+        # without it every reduction is a running one and the cube can stay
+        # lazy, one scene in memory at a time.
+        materialize = "median" in ops
+
+        records = []
+        for period, label, idx in rows:
+            sub = stac.isel(time=idx)
+            if materialize:
+                sub = sub.compute()
+            values = _row_statistics(sub, ops)
+            shared = {
+                "period": period,
+                "label": label,
+                "n_dates": int(idx.size),
+            }
+            if has_tile:
+                # Blank for year / month rows: they span whichever tiles the
+                # period holds, so no single tile id describes them.
+                shared["tile"] = (
+                    str(np.atleast_1d(sub["tile"].values)[0]) if period == "date" else ""
+                )
+            ctx = {name: _coord_value(sub, name) for name in context}
+            for i, band in enumerate(band_names):
+                records.append({
+                    **shared,
+                    "band": band,
+                    **{op: float(values[op][i]) for op in ops},
+                    **ctx,
+                })
+
+        columns = ["period", "label", "band"]
+        if has_tile:
+            columns.append("tile")
+        columns += ["n_dates"] + ops + context
+        df = pd.DataFrame.from_records(records, columns=columns)
+        if decimals is not None:
+            numeric = [c for c in ops + context]
+            df[numeric] = df[numeric].round(int(decimals))
+
+        out_path = csv_path
+        if out_path is None and isinstance(cube, (str, os.PathLike)):
+            out_path = _default_csv_path(cube)
+        if out_path is not None:
+            df.to_csv(out_path, index=False)
+
+        if not q:
+            n_dates = sum(1 for p, _, _ in rows if p == "date")
+            n_years = sum(1 for p, _, _ in rows if p == "year")
+            n_months = sum(1 for p, _, _ in rows if p == "month")
+            print(
+                f"Statistics: {len(df)} rows - {n_dates} dates, {n_years} year(s), "
+                f"{n_months} month(s) x {len(band_names)} band(s)."
+            )
+            if categorical:
+                print(
+                    f"  note: {', '.join(categorical)} carry class codes / "
+                    "flags, so those rows describe category numbers, not "
+                    "reflectance."
+                )
+            if out_path is not None:
+                print(f"  written to {out_path}")
+        return df
+    finally:
+        if to_close is not None:
+            to_close.close()
 
 
 def preview_scene_footprints(

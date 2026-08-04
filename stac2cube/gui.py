@@ -51,6 +51,11 @@ from stac2cube import (
     preview_scene_footprints,
 )
 from .auxiliary import GRAZE_THRESHOLD as _GRAZE_THRESHOLD
+from .auxiliary import export_cube_statistics
+# The CSV lands next to the cube, so both GUIs derive its path with the same
+# rule export_cube_statistics itself uses for a bare path.
+from .auxiliary import _default_csv_path as _statistics_csv_path
+from .main import settings_sidecar_path
 from .mosaic import mosaic_cubes, mosaic_layers
 
 from .get_data import (
@@ -2051,7 +2056,7 @@ def datacube_builder(missions_func=missions):
     # read its pixels back (see write_qgis_vrt).
     export_vrt_w = widgets.Checkbox(
         value=False,
-        description="Export Band Mapping for GIS Tools",
+        description="Export Band Mapping for GIS Tools (.vrt)",
         indent=False,
         layout=widgets.Layout(width="auto"),
     )
@@ -2062,23 +2067,92 @@ def datacube_builder(missions_func=missions):
     )
     export_vrt_note_html.layout.display = "none"
 
+    # Writes the current build settings as a config JSON beside the export -
+    # same name, same folder, '.json' instead of the cube extension (for a COG
+    # folder: inside it, named after the folder). Same content as Copy
+    # Settings, so the file re-runs headless on SLURM and pastes back into this
+    # form. Applies to all three export modes.
+    export_settings_w = widgets.Checkbox(
+        value=False,
+        description="Export Settings (.json)",
+        indent=False,
+        layout=widgets.Layout(width="auto"),
+    )
+    export_settings_note_html = widgets.HTML(
+        "<div style='font-size:12px; color:#555; margin-left:2px;'>"
+        "&#8505;&#65039; Saved next to the export with the same name "
+        "(<b>.json</b>). Same content as <b>Copy Settings</b>: re-run it on "
+        "SLURM, or load it back with <b>Paste Settings</b>.</div>"
+    )
+    export_settings_note_html.layout.display = "none"
+
+    # Statistics report: written AFTER the cube, read back from the file just
+    # exported. That is what makes it free of extra scene reads - export_stac
+    # streams and keeps nothing, so computing the statistics from the lazy
+    # result instead would fetch every scene from the archive a second time.
+    # NetCDF / Zarr only: a COG folder has no cube file to read back.
+    export_csv_w = widgets.Checkbox(
+        value=False,
+        description="Export Statistics Report (.csv)",
+        indent=False,
+        layout=widgets.Layout(width="auto"),
+    )
+    export_csv_note_html = widgets.HTML(
+        "<div style='font-size:12px; color:#555; margin-left:2px;'>"
+        "&#8505;&#65039; Per-band mean, median, min, max and standard "
+        "deviation for every date, year and month of the exported cube. "
+        "Saved next to it as <b>&lt;cube&gt;_statistics.csv</b>.</div>"
+    )
+    export_csv_note_html.layout.display = "none"
+
+    def _gate_export_option(box, note, available, reason):
+        """Grey out an export option the current export mode cannot honour.
+
+        Greyed and still visible, never removed: a box that disappears when the
+        mode changes reads as a bug, and the user loses the fact that the
+        option exists at all. A ticked box is unticked as it is disabled, so
+        the export can never carry an intent the mode cannot honour, and the
+        tooltip says why it is unavailable.
+        """
+        if not available and box.value:
+            box.value = False
+        box.disabled = not available
+        box.tooltip = "" if available else reason
+        note.layout.display = "" if (available and box.value) else "none"
+
     def _apply_compress_visibility(*_):
-        # Both options are NetCDF-only (Zarr and COGs bring their own codecs,
-        # and a VRT cannot read a Zarr store's pixels back), so hide them
-        # entirely for the other modes. Each explanation shows only when its
-        # own box is both visible and ticked.
-        show = export_mode_w.value == "netcdf"
-        export_compress_w.layout.display = "" if show else "none"
-        export_compress_warn_html.layout.display = (
-            "" if (show and export_compress_w.value) else "none"
+        netcdf_only = export_mode_w.value == "netcdf"
+        # zlib compresses the cube file itself; Zarr and COGs already carry
+        # their own codecs, so there is nothing for it to do there.
+        _gate_export_option(
+            export_compress_w, export_compress_warn_html, netcdf_only,
+            "Available for NetCDF exports only: Zarr stores and GeoTIFFs are "
+            "already compressed by their own codecs.",
         )
-        export_vrt_w.layout.display = "" if show else "none"
-        export_vrt_note_html.layout.display = (
-            "" if (show and export_vrt_w.value) else "none"
+        # A VRT cannot read a Zarr store's pixels back, and COGs already carry
+        # their band names, so the band mapping is NetCDF-only.
+        _gate_export_option(
+            export_vrt_w, export_vrt_note_html, netcdf_only,
+            "Available for NetCDF exports only: a VRT cannot read a Zarr "
+            "store's pixels, and GeoTIFFs already carry their band names.",
+        )
+        # The settings JSON works for every mode, so only its note toggles.
+        export_settings_note_html.layout.display = (
+            "" if export_settings_w.value else "none"
+        )
+        # The statistics CSV is read back from the exported cube, so it needs a
+        # cube FILE - which a folder of GeoTIFFs is not.
+        _gate_export_option(
+            export_csv_w, export_csv_note_html,
+            export_mode_w.value in ("netcdf", "zarr"),
+            "Available for NetCDF and Zarr exports only: the table is read "
+            "back from the exported cube, and a GeoTIFF folder is not one.",
         )
 
     export_compress_w.observe(_apply_compress_visibility, names="value")
     export_vrt_w.observe(_apply_compress_visibility, names="value")
+    export_settings_w.observe(_apply_compress_visibility, names="value")
+    export_csv_w.observe(_apply_compress_visibility, names="value")
 
     browse_polygon_btn = widgets.Button(
         description="",
@@ -4839,6 +4913,62 @@ def datacube_builder(missions_func=missions):
         export_granule_metadata(da, base_dir, q=True)
         return base_dir
 
+    def _write_settings_sidecar():
+        """Write the current settings as a config JSON next to the exported
+        cube: same folder, same name, '.json' instead of the cube extension
+        (for a COG folder: inside it, named after the folder). Content is
+        exactly what Copy Settings produces, so the file runs headless on
+        SLURM and pastes back into this form. Runs only when the Export
+        Settings box is ticked. Returns the path written, or None.
+
+        A multi-feature batch gets ONE file at the un-suffixed export path -
+        the same config rebuilds every feature (it carries the multi-feature
+        polygon file itself).
+        """
+        if export_settings_w.value is not True:
+            return None
+        target = (export_target_w.value or "").strip()
+        if not target:
+            return None
+        path = settings_sidecar_path(target, export_mode_w.value)
+        if not path:
+            return None
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(_build_json_syntax_text())
+        return path
+
+    def _write_statistics_csv(info):
+        """Statistics CSV next to the exported cube, read back FROM the file
+        that was just written.
+
+        Reading the file rather than the in-memory result is what keeps this
+        free: export_stac streams and retains nothing, so reducing the lazy
+        result here would fetch every scene from the archive a second time.
+        The written file is local, and the numbers are bit-identical (verified
+        on a NetCDF, a zlib NetCDF and a Zarr round trip).
+
+        A multi-feature batch gets one CSV per cube, like the .vrt: statistics
+        describe one cube, so a single file for N features would describe none
+        of them. Returns the list of paths written, or None.
+        """
+        if export_csv_w.value is not True:
+            return None
+        # COGs are a folder of GeoTIFFs with no cube file to read back.
+        if info.get("mode") not in ("netcdf", "zarr"):
+            return None
+        targets = info.get("files") or (
+            [info.get("target")] if info.get("target") else []
+        )
+        written = []
+        for target in targets:
+            if not target or not os.path.exists(target):
+                continue
+            csv_path = _statistics_csv_path(target)
+            export_cube_statistics(target, csv_path=csv_path, q=True)
+            written.append(csv_path)
+        return written or None
+
     def _export_current_result(export_mode: str, export_target: str):
         if state["result"] is None:
             raise ValueError("No generated result is available to export yet.")
@@ -5126,6 +5256,21 @@ def datacube_builder(missions_func=missions):
                 "compress": bool(export_compress_w.value) and export_mode == "netcdf",
                 # Same NetCDF-only pinning for the QGIS band-mapping sidecar.
                 "vrt": bool(export_vrt_w.value) and export_mode == "netcdf",
+                # The settings file describes itself: a config that asks for
+                # the JSON sidecar writes one again on the next (SLURM) run.
+                # Needs an export target to sit next to, so it is pinned to
+                # false for a lazy config with no output.
+                "export_settings": (
+                    bool(export_settings_w.value) and bool(output_for_json)
+                ),
+                # Read back from the exported cube, so it needs one: pinned to
+                # the two modes that write a cube file, like 'vrt' is pinned to
+                # NetCDF. Headless honours it in get_stac_layers.
+                "statistics_csv": (
+                    bool(export_csv_w.value)
+                    and bool(output_for_json)
+                    and export_mode in ("netcdf", "zarr")
+                ),
             }
         }
 
@@ -5535,6 +5680,16 @@ def datacube_builder(missions_func=missions):
         # rather than silently turning the sidecar off.
         if "vrt" in params:
             export_vrt_w.value = bool(params.get("vrt"))
+        # Absent from a hand-written config -> leave the box as it is.
+        if "export_settings" in params:
+            export_settings_w.value = bool(params.get("export_settings"))
+        if "statistics_csv" in params:
+            export_csv_w.value = bool(params.get("statistics_csv"))
+        # Re-run the gate last: a hand-written config can ask for a side output
+        # the pasted export mode cannot produce, and the box must not be left
+        # ticked-but-greyed. Copy Settings never emits such a pair (both flags
+        # are pinned to their modes), so this only ever fires on hand edits.
+        _apply_compress_visibility()
         if not export_granule_meta_w.disabled:
             export_granule_meta_w.value = params.get("metadata_output") is not None
 
@@ -5878,7 +6033,7 @@ def datacube_builder(missions_func=missions):
             current = ""
             export_target_w.value = ""
 
-        # Show the zlib option only in NetCDF mode.
+        # Re-gate the options that only some export modes can honour.
         _apply_compress_visibility()
 
         if mode == "lazy":
@@ -6534,6 +6689,29 @@ def datacube_builder(missions_func=missions):
                         print(f"✅ Granule metadata exported: {_meta_written}")
                 except Exception as _me:
                     print(f"⚠️ Granule metadata export failed: {_me}")
+
+                # Settings JSON beside the cube (own try for the same reason:
+                # the cube is already written, a sidecar problem is a warning).
+                try:
+                    _settings_written = _write_settings_sidecar()
+                    if _settings_written:
+                        print(f"✅ Settings exported: {_settings_written}")
+                except Exception as _se:
+                    print(f"⚠️ Settings export failed: {_se}")
+
+                # Statistics CSV, read back from the cube(s) just written (own
+                # try for the same reason: the cube is already on disk).
+                try:
+                    _csv_written = _write_statistics_csv(info)
+                    if _csv_written and len(_csv_written) == 1:
+                        print(f"✅ Statistics report exported: {_csv_written[0]}")
+                    elif _csv_written:
+                        print(
+                            f"✅ Statistics reports exported: {len(_csv_written)} "
+                            f"files, one per area ({_csv_written[0]}, ...)"
+                        )
+                except Exception as _ce:
+                    print(f"⚠️ Statistics report failed: {_ce}")
 
         except Exception as e:
             _show_status(_friendly_error(e, "Export"))
@@ -8340,20 +8518,39 @@ def datacube_builder(missions_func=missions):
         "Export mode & Output",
         [
             _with_help_left(export_mode_w, "export_mode", label_text="Export mode"),
-            # Both are NetCDF-only switches, so they sit with the mode that
-            # owns them rather than below the shared Output field.
+            # Compression belongs to the MODE, not below: it changes the cube
+            # file itself (NetCDF only) rather than adding a file beside it,
+            # which is what separates it from the Side Outputs group.
             export_compress_w,
             export_compress_warn_html,
-            export_vrt_w,
-            export_vrt_note_html,
             _stacked_field(output_input_box, "Output"),
         ],
+    )
+
+    # Side Outputs: the extra files an export can drop next to the cube. All
+    # three are named after the Output path above, none of them changes the
+    # cube, and each is one boolean in the copied settings - so they read as
+    # one group. Collapsed by default: the common export needs none of them.
+    export_side_outputs_group = _field_group(
+        "Side Outputs",
+        [
+            export_vrt_w,
+            export_vrt_note_html,
+            export_settings_w,
+            export_settings_note_html,
+            export_csv_w,
+            export_csv_note_html,
+        ],
+        subtitle="Extra files written besides the cube. Format dependent.",
+        collapsible=True,
+        open=False,
     )
 
     export_box = widgets.VBox(
         [
             #widgets.HTML("<b>Export Options</b>"),
             export_mode_group,
+            export_side_outputs_group,
         ],
         layout=widgets.Layout(width="100%", gap="6px"),
     )
@@ -8690,6 +8887,10 @@ def datacube_builder(missions_func=missions):
             "aggregator": aggregator_w,
             "export_mode": export_mode_w,
             "export_target": export_target_w,
+            "export_settings": export_settings_w,
+            "export_vrt": export_vrt_w,
+            "export_csv": export_csv_w,
+            "export_compress": export_compress_w,
             "browse_output_btn": browse_output_btn,
             "generate_btn": generate_btn,
             "coreg_resize_btn": coreg_resize_btn,
@@ -9213,6 +9414,53 @@ def datacube_editor():
 
             _sync_export_filechooser_from_mode_and_text()
 
+    def _is_derived_path(path):
+        """True when the working cube was produced in-session and has no file of
+        its own on disk.
+
+        A mosaic is handed to the ordinary load path under a placeholder name
+        ('<mosaic of N cubes>', see _on_mosaic_run_clicked), so state['loaded_path']
+        is a label rather than a path. The two archive actions - Update Data Cube
+        and Build Cloud Mask Cube - re-open that path to recover the cube's build
+        parameters, so neither can run on such a cube: they have to be pointed at
+        an exported file instead.
+        """
+        s = str(path or "").strip()
+        return s.startswith("<") and s.endswith(">")
+
+    def _archive_note(action):
+        return (
+            "<div style='font-size:12px; color:#9a3412; background:#fff7ed; "
+            "border:1px solid #fed7aa; border-radius:6px; padding:8px 10px;'>"
+            f"ℹ️ {action} needs the cube's own file, to read the build parameters "
+            "stored in it. This cube was mosaicked in this session and has no "
+            "file yet. Export it below, then load the exported file to use this "
+            "tool.</div>"
+        )
+
+    def _sync_archive_actions():
+        """Gate the two archive-backed actions on the working cube having a file.
+
+        Runs after the plain enabled/disabled pass in _set_editor_enabled, so it
+        can only ever tighten what that pass allowed.
+        """
+        derived = _is_derived_path(state.get("loaded_path"))
+
+        if derived:
+            update_run_btn.disabled = True
+            build_mask_btn.disabled = True
+            build_mask_out_w.disabled = True
+            browse_build_mask_btn.disabled = True
+
+        update_archive_note_html.value = (
+            _archive_note("Update Data Cube") if derived else ""
+        )
+        update_archive_note_html.layout.display = "" if derived else "none"
+        build_mask_archive_note_html.value = (
+            _archive_note("Building a binary cloud mask") if derived else ""
+        )
+        build_mask_archive_note_html.layout.display = "" if derived else "none"
+
     def _set_editor_enabled(enabled):
         # Actions
         edit_btn.disabled = not enabled
@@ -9250,6 +9498,13 @@ def datacube_editor():
         build_mask_out_w.disabled = not enabled
         build_mask_btn.disabled = not enabled
         browse_build_mask_btn.disabled = (not enabled) or (not filechooser_available)
+
+        # Generate CSV Report (standalone export). Deliberately absent from
+        # _sync_archive_actions: it reads the cube in hand, not the archive, so
+        # a mosaic with no file of its own can still be reported on.
+        csv_report_out_w.disabled = not enabled
+        csv_report_btn.disabled = not enabled
+        browse_csv_report_btn.disabled = (not enabled) or (not filechooser_available)
 
         # Mosaic Data Cubes is deliberately NOT gated here. Every other feature
         # edits the loaded cube, so it needs one; this one PRODUCES a cube from
@@ -9326,6 +9581,10 @@ def datacube_editor():
             with anim_out:
                 clear_output()
 
+        # Last: may only tighten the states set above.
+        _sync_archive_actions()
+        _sync_edit_button()
+
     def _update_slice_widget_enabled_state(editor_enabled):
         obj = state.get("current")
         has_obj = editor_enabled and (obj is not None)
@@ -9399,6 +9658,9 @@ def datacube_editor():
             slice_band_w.value = ()
 
         _update_slice_widget_enabled_state(True)
+        # Options changed, so the "is this a strict subset?" answer may have
+        # changed even where .value did not and no observer fired.
+        _sync_edit_button()
 
     # ---------------------------------------------------------------------
     # Spectral indices helpers
@@ -9629,6 +9891,7 @@ def datacube_editor():
     clip_fc = None
     mask_file_fc = None
     build_mask_fc = None
+    csv_report_fc = None
 
     load_fc_box = widgets.VBox([], layout=widgets.Layout(display="none", width="100%"))
     export_fc_box = widgets.VBox([], layout=widgets.Layout(display="none", width="100%"))
@@ -9636,6 +9899,7 @@ def datacube_editor():
     clip_fc_box = widgets.VBox([], layout=widgets.Layout(display="none", width="100%"))
     mask_file_fc_box = widgets.VBox([], layout=widgets.Layout(display="none", width="100%"))
     build_mask_fc_box = widgets.VBox([], layout=widgets.Layout(display="none", width="100%"))
+    csv_report_fc_box = widgets.VBox([], layout=widgets.Layout(display="none", width="100%"))
 
     def _toggle_box_display(box):
         box.layout.display = "" if box.layout.display == "none" else "none"
@@ -9789,6 +10053,21 @@ def datacube_editor():
             except Exception:
                 pass
 
+    def _sync_csv_report_filechooser_from_text():
+        if not filechooser_available or csv_report_fc is None:
+            return
+        current = (csv_report_out_w.value or "").strip()
+        start_dir = _existing_dir_or_parent(current)
+        suggested_name = Path(current).name if current else ""
+        try:
+            csv_report_fc.reset(path=start_dir, filename=suggested_name)
+        except Exception:
+            try:
+                csv_report_fc.default_path = start_dir
+                csv_report_fc.default_filename = suggested_name
+            except Exception:
+                pass
+
     if filechooser_available:
         try:
             load_fc = _CubeFileChooser(
@@ -9867,6 +10146,20 @@ def datacube_editor():
                 pass
             build_mask_fc_box = widgets.VBox([build_mask_fc], layout=widgets.Layout(display="none", width="100%"))
 
+            csv_report_fc = _CubeFileChooser(
+                path=str(Path(".").resolve()),
+                filename="",
+                title="Select output for the statistics report (.csv)",
+                show_only_dirs=False,
+                select_default=False,
+            )
+            csv_report_fc.use_dir_icons = True
+            try:
+                csv_report_fc.filter_pattern = ["*.csv", "*"]
+            except Exception:
+                pass
+            csv_report_fc_box = widgets.VBox([csv_report_fc], layout=widgets.Layout(display="none", width="100%"))
+
             mosaic_fc = _CubeFileChooser(
                 path=str(Path(".").resolve()),
                 filename="",
@@ -9884,6 +10177,7 @@ def datacube_editor():
         except Exception:
             filechooser_available = False
             load_fc = export_fc = gif_fc = clip_fc = mask_file_fc = build_mask_fc = None
+            csv_report_fc = None
             mosaic_fc = None
             mosaic_fc_box = widgets.VBox([], layout=widgets.Layout(display="none", width="100%"))
             load_fc_box = widgets.VBox([], layout=widgets.Layout(display="none", width="100%"))
@@ -9892,6 +10186,7 @@ def datacube_editor():
             clip_fc_box = widgets.VBox([], layout=widgets.Layout(display="none", width="100%"))
             mask_file_fc_box = widgets.VBox([], layout=widgets.Layout(display="none", width="100%"))
             build_mask_fc_box = widgets.VBox([], layout=widgets.Layout(display="none", width="100%"))
+            csv_report_fc_box = widgets.VBox([], layout=widgets.Layout(display="none", width="100%"))
 
     # ---------------------------------------------------------------------
     # Widgets
@@ -10141,6 +10436,38 @@ def datacube_editor():
         disabled=True,
     )
     build_mask_out = widgets.Output(layout=widgets.Layout(width="99%", overflow="auto"))
+    # Shown instead of the button being silently dead when the loaded cube has
+    # no file of its own (see _is_derived_path).
+    build_mask_archive_note_html = widgets.HTML(
+        value="", layout=widgets.Layout(display="none", width="99%")
+    )
+
+    # Generate CSV Report: per-band statistics of the WORKING cube (the result
+    # shown above, edits included), written as one CSV. Reads no archive and
+    # needs no build parameters, so unlike the two tools above it also works on
+    # a mosaic that has no file of its own.
+    csv_report_out_w = widgets.Text(
+        value="",
+        placeholder="./results/<cube>_statistics.csv",
+        layout=widgets.Layout(width="100%"),
+        disabled=True,
+    )
+    browse_csv_report_btn = widgets.Button(
+        description="",
+        icon="folder-open",
+        tooltip="Browse output for the statistics report (.csv)",
+        layout=widgets.Layout(width="34px", min_width="34px", height="32px", padding="0px"),
+        disabled=True,
+    )
+    browse_csv_report_btn.style.button_color = "#f3f4f6"
+    csv_report_btn = widgets.Button(
+        description="Generate CSV Report",
+        button_style="primary",
+        icon="table",
+        layout=widgets.Layout(width="230px"),
+        disabled=True,
+    )
+    csv_report_out = widgets.Output(layout=widgets.Layout(width="99%", overflow="auto"))
 
     # ------------------------------------------------------------------
     # Mosaic Data Cubes
@@ -10558,6 +10885,9 @@ def datacube_editor():
         for row in _custom_rows:
             for key in ("mode", "start", "end", "op", "name", "remove"):
                 row[key].disabled = off
+        # Custom rows are created and removed at runtime, so they cannot be
+        # observed once up front like the fixed controls are.
+        _sync_edit_button()
 
     custom_add_btn.on_click(_custom_add_row)
 
@@ -10615,6 +10945,11 @@ def datacube_editor():
         icon="refresh",
         layout=widgets.Layout(width="200px"),
         disabled=True,
+    )
+    # Shown instead of the button being silently dead when the loaded cube has
+    # no file of its own (see _is_derived_path).
+    update_archive_note_html = widgets.HTML(
+        value="", layout=widgets.Layout(display="none", width="99%")
     )
 
     # -- Date Update: mirrors the builder's Time Period group (simple From/To
@@ -10724,7 +11059,7 @@ def datacube_editor():
     # QGIS band-mapping sidecar, same option as the Data Cube Builder.
     export_vrt_w = widgets.Checkbox(
         value=False,
-        description="Export Band Mapping for GIS Tools",
+        description="Export Band Mapping for GIS Tools (.vrt)",
         indent=False,
         layout=widgets.Layout(width="auto"),
         disabled=True,
@@ -10914,7 +11249,7 @@ def datacube_editor():
         description="Edit data cube",
         icon="play",
         button_style="success",
-        layout=widgets.Layout(width="160px"),
+        layout=widgets.Layout(width="210px"),
         disabled=True,
     )
 
@@ -11063,6 +11398,17 @@ def datacube_editor():
                 build_mask_out_w.value = _normalize_ui_path(s)
                 build_mask_fc_box.layout.display = "none"
 
+        def _on_csv_report_fc_selected(chooser):
+            # Save path: append .csv when the name carries no extension, the
+            # same courtesy the mask chooser does for .nc.
+            selected = getattr(chooser, "selected", None)
+            if selected:
+                s = str(selected)
+                if not s.lower().endswith(".csv"):
+                    s += ".csv"
+                csv_report_out_w.value = _normalize_ui_path(s)
+                csv_report_fc_box.layout.display = "none"
+
         try:
             load_fc.register_callback(_on_load_fc_selected)
             export_fc.register_callback(_on_export_fc_selected)
@@ -11073,6 +11419,8 @@ def datacube_editor():
                 mask_file_fc.register_callback(_on_mask_file_fc_selected)
             if build_mask_fc is not None:
                 build_mask_fc.register_callback(_on_build_mask_fc_selected)
+            if csv_report_fc is not None:
+                csv_report_fc.register_callback(_on_csv_report_fc_selected)
         except Exception:
             filechooser_available = False
 
@@ -11129,6 +11477,16 @@ def datacube_editor():
             return
         _sync_build_mask_filechooser_from_text()
         _toggle_box_display(build_mask_fc_box)
+
+    def _on_browse_csv_report_clicked(_):
+        if state["current"] is None:
+            _show_status("ℹ️ Load a cube first to enable editing features.")
+            return
+        if not filechooser_available or csv_report_fc is None:
+            _show_status("ℹ️ Optional dependency 'ipyfilechooser' is not available. Install it to use Browse buttons.")
+            return
+        _sync_csv_report_filechooser_from_text()
+        _toggle_box_display(csv_report_fc_box)
 
     # ---------------------------------------------------------------------
     # Feature helpers
@@ -11414,6 +11772,13 @@ def datacube_editor():
         loaded_path = state.get("loaded_path")
         if not loaded_path:
             raise ValueError("No loaded cube path available for update.")
+        if _is_derived_path(loaded_path):
+            raise ValueError(
+                "Update Data Cube needs the cube's own file, to read the build "
+                "parameters stored in it. This cube was mosaicked in this "
+                "session and has no file yet. Export it below, then load the "
+                "exported file and update that."
+            )
 
         daterange = _resolve_update_daterange()
         add_bands = [str(b) for b in update_bands_w.value]
@@ -11993,6 +12358,16 @@ def datacube_editor():
                 build_mask_out_w.value = _bm_new
             state["last_auto_build_mask_suggestion"] = _bm_new
 
+        # CSV report output: same freshening rule again.
+        _csv_new = _suggest_csv_report_path()
+        if _csv_new:
+            csv_report_out_w.placeholder = _csv_new
+            _csv_cur = (csv_report_out_w.value or "").strip()
+            _csv_prev = state.get("last_auto_csv_report_suggestion")
+            if _csv_cur == "" or (_csv_prev is not None and _csv_cur == _csv_prev):
+                csv_report_out_w.value = _csv_new
+            state["last_auto_csv_report_suggestion"] = _csv_new
+
         print(f"✅ Loaded cube: {path}")
         print(f"   Working layer: {_layer_display_name(var_name)}")
         _print_working_note()
@@ -12166,6 +12541,74 @@ def datacube_editor():
         enable_mask_clouds_w.value = False
         enable_clip_w.value = False
         enable_reproject_w.value = False
+        _sync_edit_button()
+
+    def _staged_features():
+        """Names of the Edit-card tools that would do something right now.
+
+        Each entry mirrors the early-return gate of the matching _apply_*_feature
+        function, so the count on the button cannot promise a change that the
+        Edit run then skips. Slice is special: it has no on/off switch, and an
+        empty OR complete selection means 'keep everything' (see
+        _apply_slice_feature), so only a strict subset counts as staged.
+        """
+        staged = []
+
+        def _is_subset(w):
+            sel, opts = list(w.value), list(w.options)
+            return 0 < len(sel) < len(opts)
+
+        if _is_subset(slice_time_w) or _is_subset(slice_band_w):
+            staged.append("Slice")
+        if enable_cloud_filter_w.value:
+            staged.append("Cloud filter")
+        if enable_coverage_filter_w.value:
+            staged.append("Coverage filter")
+        if enable_mask_clouds_w.value:
+            staged.append("Mask with file")
+        if enable_clip_w.value:
+            staged.append("Clip")
+        if enable_reproject_w.value:
+            staged.append("Reproject")
+        # Indices already present as bands are skipped by _apply_indices_feature,
+        # and the selection survives an Edit run, so a plain "is anything
+        # selected?" would keep claiming work after the indices were added.
+        selected_idx = [str(i) for i in indices_select_w.value]
+        if selected_idx:
+            obj = state.get("current")
+            da = (
+                obj["Time_Series"]
+                if isinstance(obj, xr.Dataset) and "Time_Series" in obj.data_vars
+                else obj
+            )
+            try:
+                present = {str(b).lower() for b in da.coords["band"].values}
+            except Exception:
+                present = set()
+            if any(i.lower() not in present for i in selected_idx):
+                staged.append("Indices")
+        if _selected_composites():
+            staged.append("Composites")
+        return staged
+
+    def _sync_edit_button(*_):
+        """Put the number of staged tools on the Edit button.
+
+        A multi-select pipeline's usual failure is a switch left on from the
+        previous run; showing the count makes that visible before the click
+        rather than in the Applied list afterwards.
+        """
+        try:
+            n = len(_staged_features())
+        except Exception:
+            n = 0
+        edit_btn.description = (
+            f"Edit data cube ({n} staged)" if n else "Edit data cube"
+        )
+        edit_btn.tooltip = (
+            "Will apply: " + ", ".join(_staged_features()) if n
+            else "Switch on at least one tool above"
+        )
 
     def _on_edit_clicked(_):
         if state["current"] is None:
@@ -12466,6 +12909,19 @@ def datacube_editor():
     edit_btn.on_click(_on_edit_clicked)
     export_current_btn.on_click(_on_export_current_clicked)
 
+    # Keep the staged count on the Edit button in step with the controls it
+    # reads. Every fixed control that _staged_features() looks at is listed here;
+    # the runtime-created Custom Composites rows are covered by the call inside
+    # _custom_sync_enabled instead.
+    for _w in (
+        slice_time_w, slice_band_w,
+        enable_cloud_filter_w, enable_coverage_filter_w, enable_mask_clouds_w,
+        enable_clip_w, enable_reproject_w,
+        indices_select_w,
+        comp_mean_w, comp_median_w, stats_select_w,
+    ):
+        _w.observe(_sync_edit_button, names="value")
+
     slice_time_all_btn.on_click(_select_all_dates)
     slice_time_clear_btn.on_click(_clear_dates)
     slice_band_all_btn.on_click(_select_all_bands)
@@ -12508,16 +12964,16 @@ def datacube_editor():
         # Step 1 - blue "load"
         "<div style='flex:1 1 200px; background:#f8fafc; border:1px solid #e5e7eb; "
         "border-left:4px solid #3b82f6; border-radius:8px; padding:8px 10px;'>"
-        "<div style='font-weight:700; color:#1e3a8a; font-size:13px;'>1 &nbsp; Load</div>"
-        "<div style='font-size:12px; color:#475569; margin-top:2px;'>Load a "
-        "<b>NetCDF</b> data cube - e.g. one built with the <b>Data Cube Builder</b>.</div></div>"
+        "<div style='font-weight:700; color:#1e3a8a; font-size:13px;'>1 &nbsp; Source</div>"
+        "<div style='font-size:12px; color:#475569; margin-top:2px;'>Open a "
+        "<b>NetCDF</b> or <b>Zarr</b> data cube, or mosaic several into one.</div></div>"
         # Step 2 - green "edit", matches the green Edit button
         "<div style='flex:1 1 200px; background:#f0fdf4; border:1px solid #dcfce7; "
         "border-left:4px solid #16a34a; border-radius:8px; padding:8px 10px;'>"
         "<div style='font-weight:700; color:#166534; font-size:13px;'>2 &nbsp; Edit &amp; inspect</div>"
-        "<div style='font-size:12px; color:#475569; margin-top:2px;'>Select editing "
-        "feature(s), click <b>Edit data cube</b>, then check the <b>Result</b>. "
-        "Repeat to chain edits.</div></div>"
+        "<div style='font-size:12px; color:#475569; margin-top:2px;'>Switch on the "
+        "tools you want in <b>Edit</b>, click <b>Edit data cube</b>, then check "
+        "the <b>Result</b>. Repeat to chain edits.</div></div>"
         # Step 3 - orange "export", matches the orange Export button
         "<div style='flex:1 1 200px; background:#fff7ed; border:1px solid #fed7aa; "
         "border-left:4px solid #f97316; border-radius:8px; padding:8px 10px;'>"
@@ -12537,13 +12993,14 @@ def datacube_editor():
         layout=widgets.Layout(width="100%", gap="4px"),
     )
 
-    loading_box = widgets.VBox(
+    # Body of the "Open a cube" source mode. The card around it (mode switch,
+    # heading, and the shared Layer dropdown both modes hand over to) is
+    # assembled further down, next to the mosaic body - see source_box.
+    open_cube_box = widgets.VBox(
         [
-            widgets.HTML("<b>Loading</b>"),
             widgets.HTML("<div style='font-size:12px; color:#666;'>NetCDF and Zarr only (Geotiffs are not supported as editor input).</div>"),
             _stacked_field(load_input_box, "Data cube path"),
             widgets.HBox([load_cube_btn, reset_btn], layout=widgets.Layout(gap="8px", flex_flow="row wrap")),
-            layer_select_box,
         ],
         layout=widgets.Layout(width="100%", gap="6px"),
     )
@@ -12570,9 +13027,6 @@ def datacube_editor():
         layout=widgets.Layout(width="50%", gap="6px"),
     )
 
-    # Small badge at the top of each editing feature: whether it can be combined
-    # with other features in one Edit run (chainable) or must run on its own
-    # (standalone). Green = chainable, amber = standalone.
     # Same two layout helpers the builder uses, so the Temporal Composites
     # section looks identical in both GUIs (both are pure CSS-class wrappers -
     # see .stac2cube-subpanel in gui_common's stylesheet).
@@ -12592,21 +13046,63 @@ def datacube_editor():
             "margin:18px 0 16px 0;'></div>"
         )
 
-    def _chainable_badge(chainable, note=None):
-        if chainable:
-            bg, border, color, label = "#f0fdf4", "#bbf7d0", "#166534", "Chainable feature"
-        else:
-            bg, border, color, label = "#fff7ed", "#fed7aa", "#9a3412", "Standalone feature"
-        text = label + (f" &middot; {note}" if note else "")
+    # Accent colours for the Edit card's stage headers. Deliberately the SAME
+    # meanings the builder's field_group accents already carry, so nothing new
+    # has to be learned (see .stac2cube-group-* in gui_common's stylesheet):
+    #   turquoise = what gets taken out (scenes, bands, cloudy pixels)
+    #   violet    = how the cube is laid out on the ground (grid, projection)
+    #   green     = what gets added on top (new bands)
+    #   blue      = temporal composites (already the accent of the stats panel
+    #               in both GUIs)
+    # Amber and red are deliberately absent: they mean warning and error here.
+    _STAGE_ACCENTS = {
+        "turquoise": "#14b8a6",
+        "violet": "#8b5cf6",
+        "green": "#16a34a",
+        "blue": "#3b82f6",
+    }
+
+    def _card_title(text):
+        """Heading of a top-level card (Source, Extend, Edit, ...).
+
+        Deliberately larger than the 13px stage headers and group titles inside
+        the cards: these five are the spine of the page, and at plain <b> size
+        they were easy to scroll straight past.
+        """
         return widgets.HTML(
-            f"<div style='display:inline-block; font-size:11px; font-weight:700; "
-            f"color:{color}; background:{bg}; border:1px solid {border}; "
-            f"border-radius:6px; padding:2px 8px; margin:0 0 2px 0;'>{text}</div>"
+            f"<div class='stac2cube-card-title' style='font-size:17px; "
+            f"font-weight:700; color:#374151; margin:0 0 2px 0; "
+            f"line-height:1.3;'>{text}</div>"
+        )
+
+    def _stage_header(number, title, subtitle, accent):
+        """Header strip introducing one stage of the Edit pipeline.
+
+        Plain HTML rather than a field_group wrapper on purpose. The items below
+        it are Accordions, which already bring their own container and sage
+        header bar; boxing them again would stack three tinted backgrounds
+        (card, group, header) whose two innermost tints are nearly the same hue,
+        and nesting containers is exactly what has raised stray horizontal
+        scrollbars elsewhere in this file.
+
+        The NUMBER carries the running order (the Edit button applies the stages
+        top to bottom, see _on_edit_clicked); the COLOUR carries what kind of
+        change the stage makes. Two channels, two separate jobs - a colour alone
+        cannot express a sequence.
+        """
+        bar = _STAGE_ACCENTS[accent]
+        return widgets.HTML(
+            f"<div style='border-left:4px solid {bar}; padding:2px 0 2px 10px; "
+            f"margin:14px 0 6px 0;'>"
+            f"<div style='font-weight:700; font-size:13px; color:#374151;'>"
+            f"<span style='color:{bar};'>{number}</span> &nbsp;{title}</div>"
+            f"<div style='font-size:12px; color:#6b7280; margin-top:1px;'>"
+            f"{subtitle}</div>"
+            f"</div>"
         )
 
     slice_feature_box = widgets.VBox(
         [
-            _chainable_badge(True),
             #widgets.HTML("<b>Slice Data Cube</b>"),
             widgets.HTML(
                 "<div style='font-size:12px; color:#666;'>"
@@ -12634,7 +13130,6 @@ def datacube_editor():
 
     cloud_filter_feature_box = widgets.VBox(
         [
-            _chainable_badge(True),
             #widgets.HTML("<b>Filter by Cloud Coverage</b>"),
             widgets.HTML(
                 "<div style='font-size:12px; color:#666;'>"
@@ -12664,7 +13159,6 @@ def datacube_editor():
 
     coverage_filter_feature_box = widgets.VBox(
         [
-            _chainable_badge(True),
             widgets.HTML(
                 "<div style='font-size:12px; color:#666;'>"
                 "Keeps only scenes imaging at least the chosen % of the area, "
@@ -12705,6 +13199,16 @@ def datacube_editor():
         if state.get("loaded_path") is None:
             with build_mask_out:
                 print("❌ Load a cube first.")
+            return
+        if _is_derived_path(state.get("loaded_path")):
+            with build_mask_out:
+                print(
+                    "❌ Building a binary cloud mask needs the cube's own file, to "
+                    "read the build parameters stored in it. This cube was "
+                    "mosaicked in this session and has no file yet. Export it "
+                    "below, then load the exported file and build the mask from "
+                    "that."
+                )
             return
         if state.get("loaded_var") != "Time_Series":
             with build_mask_out:
@@ -12747,9 +13251,24 @@ def datacube_editor():
             )
             missing_days = sorted(cube_days - mask_days)
             m_bands = [str(b) for b in mask_out["band"].values]
+            # Hand the file straight to its consumer: "Mask Clouds with Binary
+            # Masking File" in stage 1 of the Edit card is the reason this tool
+            # exists, and copying the path across by hand was the only link
+            # between them. Never overwrite a path the user typed themselves.
+            filled_mask_field = False
+            if not (mask_file_w.value or "").strip():
+                mask_file_w.value = out_path
+                filled_mask_field = True
+
             with build_mask_out:
                 clear_output()
                 print(f"✅ Binary cloud mask exported: {out_path}")
+                if filled_mask_field:
+                    print(
+                        "   Filled in as the mask file of 'Mask Clouds with "
+                        "Binary Masking File' above - tick 'Enable masking' "
+                        "there to apply it."
+                    )
                 print(
                     f"   Scenes: {int(mask_out.sizes.get('time', 0))} (matched to "
                     f"the cube's {len(cube_days)} date(s)) | bands: {', '.join(m_bands)}"
@@ -12780,7 +13299,6 @@ def datacube_editor():
 
     build_mask_feature_box = widgets.VBox(
         [
-            _chainable_badge(False, "run on its own"),
             widgets.HTML(
                 "<div style='font-size:12px; color:#666;'>"
                 "Build the <b>binary cloud mask</b> of the loaded data cube "
@@ -12788,6 +13306,7 @@ def datacube_editor():
                 "data cube that isn't masked yet."
                 "</div>"
             ),
+            build_mask_archive_note_html,
             _stacked_field(build_mask_input_box, "Output binary mask (NetCDF/Zarr)"),
             build_mask_btn,
             build_mask_out,
@@ -12797,6 +13316,124 @@ def datacube_editor():
     build_mask_acc = widgets.Accordion(children=[build_mask_feature_box], selected_index=None)
     build_mask_acc.set_title(0, "Build Cloud Mask Cube")
     build_mask_acc.layout = widgets.Layout(width="99%")
+
+    # ------------------------------------------------------------------
+    # Generate CSV Report (standalone export)
+    # ------------------------------------------------------------------
+    def _suggest_csv_report_path():
+        lp = state.get("loaded_path")
+        # A mosaic's "path" is a label, not a file (see _is_derived_path), so
+        # there is nothing to name the report after; the user types one.
+        if not lp or _is_derived_path(lp):
+            return ""
+        p = Path(lp)
+        return (p.parent / f"{p.stem}_statistics.csv").as_posix()
+
+    def _on_csv_report_clicked(_):
+        with csv_report_out:
+            clear_output()
+
+        if state.get("current") is None:
+            with csv_report_out:
+                print("❌ Load a cube first.")
+            return
+
+        # Both refusals below are also raised by export_cube_statistics, but in
+        # the words of a headless build ("rebuild with keep_timeseries=True").
+        # Caught here so the advice names what to do IN THE EDITOR.
+        current = state["current"]
+        if state.get("loaded_var") not in (None, "Time_Series"):
+            with csv_report_out:
+                print(
+                    "❌ A CSV report needs the 'Time_Series' cube (the loaded "
+                    f"layer is '{state.get('loaded_var')}')."
+                )
+            return
+        has_time_series = (
+            "Time_Series" in current.data_vars
+            if isinstance(current, xr.Dataset)
+            else "time" in getattr(current, "dims", ())
+        )
+        if not has_time_series:
+            with csv_report_out:
+                print(
+                    "❌ The current result holds temporal composites only, so it "
+                    "has no dates to report. Tick 'Keep the full time series' in "
+                    "Temporal Composites and edit again, or press Reset."
+                )
+            return
+
+        out_path = (csv_report_out_w.value or "").strip()
+        if not out_path:
+            out_path = _suggest_csv_report_path()
+            csv_report_out_w.value = out_path
+        if not out_path:
+            with csv_report_out:
+                print("❌ Choose where to write the CSV report.")
+            return
+
+        try:
+            with csv_report_out:
+                print("Calculating statistics...")
+                # The WORKING cube, not the file on disk: what the report
+                # describes is what the Result panel shows, edits included.
+                # q=True - the row counts are printed GUI-style below instead.
+                df = export_cube_statistics(
+                    state["current"], csv_path=out_path, q=True
+                )
+
+            # Distinct periods, not rows: every period contributes one row PER
+            # BAND, so counting rows would report 24 dates for a 4-date cube.
+            counts = {
+                p: int(df.loc[df["period"] == p, "label"].nunique())
+                for p in ("date", "year", "month")
+            }
+            n_bands = int(df["band"].nunique()) if len(df) else 0
+            with csv_report_out:
+                clear_output()
+                print(f"✅ CSV report written: {out_path}")
+                print(
+                    f"   {len(df)} rows: {counts['date']} date(s), "
+                    f"{counts['year']} year(s), {counts['month']} month(s) "
+                    f"x {n_bands} band(s)."
+                )
+                print("   Describes the current result, with every edit applied.")
+        except Exception as e:
+            with csv_report_out:
+                clear_output()
+                print(_friendly_error(e, "Generate CSV report"))
+
+    csv_report_btn.on_click(_on_csv_report_clicked)
+    browse_csv_report_btn.on_click(_on_browse_csv_report_clicked)
+
+    csv_report_input_row = widgets.HBox(
+        [browse_csv_report_btn, csv_report_out_w],
+        layout=widgets.Layout(width="100%", gap="6px", align_items="center"),
+    )
+    csv_report_input_box = widgets.VBox(
+        [csv_report_input_row, csv_report_fc_box],
+        layout=widgets.Layout(width="100%", gap="4px"),
+    )
+
+    csv_report_feature_box = widgets.VBox(
+        [
+            widgets.HTML(
+                "<div style='font-size:12px; color:#666;'>"
+                "Per-band <b>statistics</b> of the current result as a table: "
+                "mean, median, min, max and standard deviation, one row per "
+                "date, per year and per month. Time series only - a cube of "
+                "temporal composites alone has no dates to report."
+                "</div>"
+            ),
+            _stacked_field(csv_report_input_box, "Output report (CSV)"),
+            csv_report_btn,
+            csv_report_out,
+        ],
+        layout=widgets.Layout(width="100%", gap="8px"),
+    )
+    csv_report_acc = widgets.Accordion(children=[csv_report_feature_box], selected_index=None)
+    csv_report_acc.set_title(0, "Generate CSV Report")
+    csv_report_acc.layout = widgets.Layout(width="99%")
 
     # Mask Clouds with Binary Masking File
     mask_file_input_row = widgets.HBox(
@@ -12816,7 +13453,6 @@ def datacube_editor():
     )
     mask_clouds_feature_box = widgets.VBox(
         [
-            _chainable_badge(True),
             widgets.HTML(
                 "<div style='font-size:12px; color:#666;'>"
                 "Mask the loaded cube's clouds out using a binary cloud-mask file "
@@ -12854,7 +13490,6 @@ def datacube_editor():
 
     clip_feature_box = widgets.VBox(
         [
-            _chainable_badge(True),
             #widgets.HTML("<b>Clip Raster</b>"),
             widgets.HTML(
                 "<div style='font-size:12px; color:#666;'>"
@@ -12888,7 +13523,6 @@ def datacube_editor():
 
     reproject_feature_box = widgets.VBox(
         [
-            _chainable_badge(True),
             widgets.HTML(
                 "<div style='font-size:12px; color:#666;'>"
                 "Put the data cube into another projection, for example "
@@ -12918,7 +13552,6 @@ def datacube_editor():
 
     indices_feature_box = widgets.VBox(
         [
-            _chainable_badge(True),
             widgets.HTML(
                 "<div style='font-size:12px; color:#666;'>"
                 "Calculate spectral indices from the cube's spectral bands and append them as new bands. "
@@ -13001,7 +13634,6 @@ def datacube_editor():
 
     stats_feature_box = widgets.VBox(
         [
-            _chainable_badge(True, "best applied last"),
             widgets.HTML(
                 "<div style='font-size:12px; color:#475569; margin:0 0 2px 0;'>"
                 "Statistics calculated over the dates of the current result."
@@ -13120,7 +13752,6 @@ def datacube_editor():
 
     update_feature_box = widgets.VBox(
         [
-            _chainable_badge(False, "run on its own"),
             widgets.HTML(
                 "<div style='font-size:12px; color:#666;'>"
                 "Fetch missing dates and bands for the loaded data cube in the given date range. "
@@ -13128,6 +13759,7 @@ def datacube_editor():
                 "<b>This feature is recommended to be used alone without in sequence with other features.</b>"
                 "</div>"
             ),
+            update_archive_note_html,
             update_date_group,
             update_band_group,
             update_run_btn,
@@ -13841,7 +14473,6 @@ def datacube_editor():
 
     mosaic_feature_box = widgets.VBox(
         [
-            _chainable_badge(False, "no loaded cube needed"),
             widgets.HTML(
                 "<div style='font-size:12px; color:#666;'>"
                 "Join several cubes into one. The result becomes the cube you "
@@ -13885,26 +14516,102 @@ def datacube_editor():
             width="100%", gap="8px", overflow="hidden", min_width="0",
         ),
     )
-    mosaic_acc = widgets.Accordion(children=[mosaic_feature_box], selected_index=None)
-    mosaic_acc.set_title(0, "Mosaic Data Cubes")
-    mosaic_acc.layout = widgets.Layout(width="99%")
+    # ------------------------------------------------------------------
+    # Source card: the two ways to get a working cube.
+    #
+    # Mosaicking used to sit in the feature list, among tools that CONSUME the
+    # working cube - but it needs no loaded cube and PRODUCES one: it ends in
+    # _finalize_load, exactly like opening a file does. So it belongs here, as
+    # the second of two alternatives, and both modes hand over to the same Layer
+    # dropdown below.
+    # ------------------------------------------------------------------
+    source_mode_w = widgets.ToggleButtons(
+        options=[("Open a cube", "open"), ("Mosaic several cubes", "mosaic")],
+        value="open",
+        style={"button_width": "180px"},
+        layout=widgets.Layout(margin="0 0 4px 0"),
+    )
 
+    open_mode_box = widgets.VBox([open_cube_box], layout=widgets.Layout(width="100%"))
+    mosaic_mode_box = widgets.VBox(
+        [mosaic_feature_box],
+        layout=widgets.Layout(width="100%", display="none"),
+    )
+
+    def _sync_source_mode(*_):
+        mosaic = source_mode_w.value == "mosaic"
+        open_mode_box.layout.display = "none" if mosaic else ""
+        mosaic_mode_box.layout.display = "" if mosaic else "none"
+
+    source_mode_w.observe(_sync_source_mode, names="value")
+    _sync_source_mode()
+
+    source_box = widgets.VBox(
+        [
+            _card_title("Source"),
+            widgets.HTML(
+                "<div style='font-size:12px; color:#666;'>Open a data cube, or "
+                "mosaic several into one. Either way the result becomes the cube "
+                "you edit below.</div>"
+            ),
+            source_mode_w,
+            open_mode_box,
+            mosaic_mode_box,
+            # Shared by both modes: a multi-layer file and a multi-layer mosaic
+            # both stop here for the user to pick which layer to work on.
+            layer_select_box,
+        ],
+        layout=widgets.Layout(width="100%", gap="6px"),
+    )
+
+    # The Edit card holds ONLY the tools the Edit button applies. Their order
+    # here is the order _on_edit_clicked runs them in, and the stage headers
+    # number it, so what you read top to bottom is what actually happens. The
+    # three tools that run on their own (Mosaic, Update, Build Cloud Mask) live
+    # in their own cards - see the ui assembly at the end of this function.
     features_box = widgets.VBox(
         [
-            widgets.HTML("<b>Features</b>"),
-            widgets.HTML("<div style='font-size:12px; color:#666;'>Multiple features can be selected before editing the data cube.</div>"),
-            #widgets.HTML("<div style='font-size:12px; color:#666;'>- Do not forget to uncheck boxes after editing a data cube to prevent.</div>"),
+            _card_title("Edit"),
+            widgets.HTML(
+                "<div style='font-size:12px; color:#666;'>Chain as many tools as "
+                "you like, then click <b>Edit data cube</b> once. They are "
+                "applied in the order shown below, top to bottom. Don't forget "
+                "to click <b>enable button</b> for some features.</div>"
+            ),
+
+            _stage_header(
+                "1", "Select a subset",
+                "Slice and filter out the data cube based on bands, time, "
+                "clouds and coverage.",
+                "turquoise",
+            ),
             slice_acc,
             cloud_filter_acc,
             coverage_filter_acc,
-            build_mask_acc,
             mask_clouds_acc,
+
+            _stage_header(
+                "2", "Change the geometry",
+                "Reshapes the grid system of the pixels. Clip Raster is "
+                "recommended to obtain the final product.",
+                "violet",
+            ),
             clip_acc,
-            mosaic_acc,
             reproject_acc,
+
+            _stage_header(
+                "3", "Add new bands",
+                "Derives extra bands from the ones the cube already has.",
+                "green",
+            ),
             indices_acc,
+
+            _stage_header(
+                "4", "Collapse the time axis",
+                "Runs last, on whatever the stages above left behind.",
+                "blue",
+            ),
             stats_acc,
-            update_acc,
         ],
         layout=widgets.Layout(width="100%", gap="8px"),
     )
@@ -13914,6 +14621,40 @@ def datacube_editor():
     action_row = widgets.HBox(
         [edit_btn],
         layout=widgets.Layout(gap="8px", flex_flow="row wrap"),
+    )
+
+    # Update: its own card between the loaded summary and Edit. It fetches
+    # missing dates and bands from the archive, which completes the SOURCE
+    # rather than editing it, and it has always been the one tool that should
+    # not be mixed into an Edit run.
+    extend_box = widgets.VBox(
+        [
+            _card_title("Extend"),
+            widgets.HTML(
+                "<div style='font-size:12px; color:#666;'>Queries the catalog "
+                "for scenes and bands the loaded cube is missing. Runs on its "
+                "own, before editing.</div>"
+            ),
+            update_acc,
+        ],
+        layout=widgets.Layout(width="100%", gap="6px"),
+    )
+
+    # Build Cloud Mask: the one tool whose product is a separate FILE rather
+    # than the working cube, so it sits beside Export rather than in the Edit
+    # list. Its output is the input of "Mask Clouds with Binary Masking File"
+    # up in stage 1, which _on_build_mask_clicked now fills in automatically.
+    side_outputs_box = widgets.VBox(
+        [
+            _card_title("Side Outputs"),
+            widgets.HTML(
+                "<div style='font-size:12px; color:#666;'>Writes a separate file "
+                "alongside the cube. Does not change the result above.</div>"
+            ),
+            build_mask_acc,
+            csv_report_acc,
+        ],
+        layout=widgets.Layout(width="100%", gap="6px"),
     )
 
     # Result accordion
@@ -13983,11 +14724,17 @@ def datacube_editor():
     spacer_after_buttons = widgets.HTML("<div style='height:8px;'></div>")
 
     # --- NEW: wrap sections into cards (layout only) ---
-    loading_card = widgets.VBox([loading_box], layout=widgets.Layout(width="100%"))
-    loading_card.add_class("stac2cube-card")
+    source_card = widgets.VBox([source_box], layout=widgets.Layout(width="100%"))
+    source_card.add_class("stac2cube-card")
 
     loaded_summary_card = widgets.VBox([loaded_summary_acc], layout=widgets.Layout(width="100%"))
     loaded_summary_card.add_class("stac2cube-card")
+
+    extend_card = widgets.VBox([extend_box], layout=widgets.Layout(width="100%"))
+    extend_card.add_class("stac2cube-card")
+
+    side_outputs_card = widgets.VBox([side_outputs_box], layout=widgets.Layout(width="100%"))
+    side_outputs_card.add_class("stac2cube-card")
 
     features_card = widgets.VBox(
         [features_box, widgets.HTML("<div style='height:6px;'></div>"), action_row],
@@ -14014,7 +14761,7 @@ def datacube_editor():
     export_card.add_class("stac2cube-card")
 
     status_card = widgets.VBox(
-        [widgets.HTML("<b>Status</b>"), status_out],
+        [_card_title("Status"), status_out],
         layout=widgets.Layout(width="100%", gap="6px"),
     )
     status_card.add_class("stac2cube-card")
@@ -14025,14 +14772,19 @@ def datacube_editor():
     spacer_small = widgets.HTML("<div style='height:6px;'></div>")
     spacer_med = widgets.HTML("<div style='height:12px;'></div>")
 
+    # One card per verb, in the order the work happens:
+    #   get a cube -> complete it -> edit it -> look at it -> write it out.
     ui = widgets.VBox(
         [
             header,
             subtitle,
 
-            loading_card,
+            source_card,
             spacer_small,
             loaded_summary_card,
+
+            spacer_med,
+            extend_card,
 
             spacer_med,
             features_card,
@@ -14045,6 +14797,9 @@ def datacube_editor():
 
             spacer_med,
             export_card,
+
+            spacer_med,
+            side_outputs_card,
 
             spacer_med,
             status_card,
@@ -14068,7 +14823,7 @@ def datacube_editor():
 
     _set_editor_enabled(False)
     _show_status(
-        "ℹ️ Load a NetCDF or Zarr cube to start editing - or use "
+        "ℹ️ Load a NetCDF or Zarr cube to start editing or use "
         "'Mosaic Data Cubes' to join several into one first."
     )
     _update_gif_output_suggestion(force=True)
@@ -14140,6 +14895,14 @@ def datacube_editor():
             "gif_label": gif_label_w,
             "gif_out_path": gif_out_path_w,
             "viz_make_gif_btn": viz_make_gif_btn,
+            # Source card: which of the two ways to get a cube is showing.
+            "source_mode": source_mode_w,
+            "mosaic_run_btn": mosaic_run_btn,
+            # Side outputs card.
+            "build_mask_btn": build_mask_btn,
+            "build_mask_out_path": build_mask_out_w,
+            "csv_report_btn": csv_report_btn,
+            "csv_report_out_path": csv_report_out_w,
         },
         "outputs": {
             "loaded_summary": loaded_summary_out,
@@ -14147,6 +14910,12 @@ def datacube_editor():
             "status": status_out,
             "visualization": viz_out,
             "animation": anim_out,
+            # The three standalone tools report into their own panels rather
+            # than into Status.
+            "update": update_out,
+            "build_mask": build_mask_out,
+            "csv_report": csv_report_out,
+            "mosaic": mosaic_out,
         },
     }
 
@@ -14535,7 +15304,7 @@ def ard_cube_tools():
     cm_compress_warn_html.layout.display = "none"
     cm_vrt_w = widgets.Checkbox(
         value=False,
-        description="Export Band Mapping for GIS Tools",
+        description="Export Band Mapping for GIS Tools (.vrt)",
         indent=False,
         layout=widgets.Layout(width="auto"),
     )
@@ -16186,7 +16955,7 @@ def ard_cube_tools():
     cr_compress_warn_html.layout.display = "none"
     cr_vrt_w = widgets.Checkbox(
         value=False,
-        description="Export Band Mapping for GIS Tools",
+        description="Export Band Mapping for GIS Tools (.vrt)",
         indent=False,
         layout=widgets.Layout(width="auto"),
     )
@@ -16992,7 +17761,7 @@ def ard_cube_tools():
 
     sr_vrt_w = widgets.Checkbox(
         value=False,
-        description="Export Band Mapping for GIS Tools",
+        description="Export Band Mapping for GIS Tools (.vrt)",
         indent=False,
         layout=widgets.Layout(width="auto"),
     )

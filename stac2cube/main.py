@@ -1,3 +1,4 @@
+import json
 import os
 
 from .get_data import (
@@ -92,6 +93,153 @@ def _validate_export_format(output, export_format):
             f"(got {output!r}). Use export_format='zarr' or a '.nc' path."
         )
     return fmt
+
+
+def settings_sidecar_path(output, export_format=None):
+    """Path of the settings JSON that belongs to an export target.
+
+    NetCDF / Zarr -> the export path with its extension swapped for '.json'
+    ('cube.nc' -> 'cube.json', 'cube.zarr' -> 'cube.json'). COGs -> the target
+    is a FOLDER, so the file goes INSIDE it and is named after the folder
+    ('results/cogs' -> 'results/cogs/cogs.json'); that keeps the settings with
+    the GeoTIFFs they produced, the same rule the granule-metadata download
+    follows.
+    """
+    if not output:
+        return None
+    target = str(output)
+    if str(export_format or "").lower() == "cogs":
+        folder = target.rstrip("/\\") or target
+        name = os.path.basename(folder) or "settings"
+        return os.path.join(folder, name + ".json")
+    stem, _ext = os.path.splitext(target)
+    return stem + ".json"
+
+
+def _jsonify_setting(value):
+    """One parameter value as a JSON-native one.
+
+    Returns ``(value, exact)``. ``exact=False`` means the value could not be
+    represented in JSON and was stringified, so the written config does NOT
+    reproduce the call verbatim (e.g. polygon passed as a GeoDataFrame). The
+    caller reports those parameters by name instead of writing a config that
+    only looks re-runnable.
+    """
+    if value is None or isinstance(value, (bool, str)):
+        return value, True
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value, True
+    if isinstance(value, np.bool_):
+        return bool(value), True
+    if isinstance(value, np.integer):
+        return int(value), True
+    if isinstance(value, np.floating):
+        return float(value), True
+    if isinstance(value, (np.datetime64, pd.Timestamp)):
+        # ISO string - what daterange / dates accept as input anyway.
+        return str(value), True
+    if isinstance(value, (list, tuple, set)):
+        items = [_jsonify_setting(v) for v in value]
+        return [v for v, _ in items], all(ok for _, ok in items)
+    if isinstance(value, dict):
+        out = {}
+        exact = True
+        for k, v in value.items():
+            jv, ok = _jsonify_setting(v)
+            exact = exact and ok and isinstance(k, str)
+            out[str(k)] = jv
+        return out, exact
+    # os.PathLike (pathlib.Path): a plain path string is a valid config value.
+    if hasattr(value, "__fspath__"):
+        return os.fspath(value), True
+    return str(value), False
+
+
+def write_settings_json(params, output, export_format=None, q=False):
+    """Write the build settings as a config JSON next to the export.
+
+    ``params`` is the parameter mapping of the call that produced the export;
+    it is written under a "parameters" key, i.e. exactly the file the SLURM
+    runner loads (``main.get_stac_layers(**config['parameters'])``). Returns
+    the path written, or None when there is no export target to sit next to.
+    """
+    path = settings_sidecar_path(output, export_format)
+    if not path:
+        return None
+
+    payload = {}
+    stringified = []
+    for key, value in params.items():
+        jv, ok = _jsonify_setting(value)
+        payload[key] = jv
+        if not ok:
+            stringified.append(key)
+
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump({"parameters": payload}, fh, indent=2, ensure_ascii=False)
+
+    if not q:
+        print(f"Settings exported: {path}", flush=True)
+        if stringified:
+            print(
+                "  Note: "
+                + ", ".join(sorted(stringified))
+                + " could not be stored as JSON and was written as text - "
+                "re-running this config needs that parameter set by hand.",
+                flush=True,
+            )
+    return path
+
+
+def write_statistics_csv(output, export_format=None, q=False):
+    """Write the statistics table of an exported cube next to it.
+
+    ``'cube.nc'`` / ``'cube.zarr'`` -> ``'cube_statistics.csv'``: per-band
+    mean, median, min, max and standard deviation for every date, year and
+    month (see :func:`stac2cube.auxiliary.export_cube_statistics`).
+
+    Called AFTER the export and reads the file that was just written, not the
+    in-memory cube: the export streams and retains nothing, so reducing the
+    lazy object here would fetch every scene from the archive a second time.
+    The written file is local and gives identical numbers.
+
+    COG exports are skipped with a note - a folder of GeoTIFFs has no cube file
+    to read back. Returns the path written, or None.
+    """
+    # Imported here, not at module scope: auxiliary pulls geopandas and the
+    # STAC client, and this is the only place in main.py that needs them.
+    from .auxiliary import _default_csv_path, export_cube_statistics
+
+    if not output:
+        return None
+    if str(export_format or "").lower() == "cogs":
+        if not q:
+            print(
+                "  statistics_csv: skipped - a GeoTIFF folder has no cube file "
+                "to compute the table from.",
+                flush=True,
+            )
+        return None
+    if not os.path.exists(output):
+        if not q:
+            print(
+                f"  statistics_csv: skipped - {output} was not written.",
+                flush=True,
+            )
+        return None
+
+    df = export_cube_statistics(output, q=True)
+    path = _default_csv_path(output)
+    if not q:
+        n_dates = int(df.loc[df["period"] == "date", "label"].nunique())
+        print(
+            f"Statistics exported: {path} ({len(df)} rows, {n_dates} date(s))",
+            flush=True,
+        )
+    return path
 
 
 def _export_result(
@@ -263,7 +411,14 @@ def get_stac_layers(
     q=None,
     compress=False,
     vrt=False,
+    export_settings=False,
+    statistics_csv=False,
 ):
+    # Settings sidecar: a copy of THIS call, written as a config JSON next to
+    # the export once the cube is out (see write_settings_json). Captured here,
+    # before any argument is normalised below, so the file records what was
+    # asked for rather than what it was rewritten into.
+    _call_settings = dict(locals()) if export_settings else None
 
     # Reassign short names
     if mission == "s2":
@@ -351,6 +506,30 @@ def get_stac_layers(
 
     # --- Export format --------------------------------------------------------
     _export_format = _validate_export_format(output, export_format)
+
+    # The settings JSON is written NEXT TO the export, so it needs one to sit
+    # next to. Refused early instead of silently writing nothing after a full
+    # build.
+    if export_settings and not output:
+        raise ValueError(
+            "export_settings=True writes the settings JSON next to the export, "
+            "so it needs an output path (or folder for export_format='cogs')."
+        )
+
+    # Same rule for the statistics CSV, with one extra restriction: it is read
+    # back FROM the exported cube, and a COG folder has no cube file to read.
+    if statistics_csv:
+        if not output:
+            raise ValueError(
+                "statistics_csv=True writes the statistics table next to the "
+                "exported cube, so it needs an output path."
+            )
+        if _export_format == "cogs":
+            raise ValueError(
+                "statistics_csv=True needs a cube file to read back, but "
+                "export_format='cogs' writes a folder of GeoTIFFs. Export to "
+                "NetCDF or Zarr, or drop statistics_csv."
+            )
 
     # --- Temporal composites: keep or drop the time series ---------------------
     # stats adds one variable per requested composite NEXT TO the time series.
@@ -644,6 +823,10 @@ def get_stac_layers(
                     q=q,
                     compress=compress,
                     vrt=vrt,
+                    # One settings file for the whole batch, written after the
+                    # loop - the config is identical for every feature (it
+                    # carries the multi-feature polygon file itself).
+                    export_settings=False,
                 )
 
                 # When asked for the in-memory mask, each feature returns
@@ -670,6 +853,13 @@ def get_stac_layers(
                         res, feature_output, _export_format, compress=compress,
                         vrt=vrt, q=bool(q),
                     )
+                    # One CSV per feature, like the .vrt and unlike the single
+                    # settings file below: statistics describe ONE cube, so a
+                    # batch-wide file would describe none of them.
+                    if statistics_csv:
+                        write_statistics_csv(
+                            feature_output, _export_format, q=bool(q),
+                        )
 
                 # Report each cube's estimated (logical, pre-load) data size.
                 if isinstance(res, (xr.DataArray, xr.Dataset)):
@@ -682,6 +872,13 @@ def get_stac_layers(
                         )
 
                 results.append(res)
+
+            # Settings JSON for the batch: one file at the un-suffixed export
+            # path (<stem>.json), since a single config rebuilds all features.
+            if export_settings and output:
+                write_settings_json(
+                    _call_settings, output, _export_format, q=bool(q),
+                )
 
             if return_cloud_mask:
                 return results, masks
@@ -1818,6 +2015,16 @@ def get_stac_layers(
             stac, output, _export_format, crs, transform, compress=compress,
             vrt=vrt, q=bool(q),
         )
+        # Settings JSON beside the finished export (written last: a failed
+        # build must not leave a config claiming a cube that is not there).
+        if export_settings:
+            write_settings_json(
+                _call_settings, output, _export_format, q=bool(q),
+            )
+        # Statistics CSV, read back from the cube just written - same reason it
+        # comes after the export, and it needs the file to exist.
+        if statistics_csv:
+            write_statistics_csv(output, _export_format, q=bool(q))
         if return_cloud_mask:
             return img, mask_cube
         return img
