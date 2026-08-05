@@ -1,6 +1,7 @@
 from .main import get_stac_layers
 from .get_update import get_stac_parameters
 from .get_update import find_missing_times
+from .get_update import geobox_from_cube, _require_same_grid
 from s2cloudless import S2PixelCloudDetector
 import numpy as np
 import xarray as xr
@@ -206,7 +207,12 @@ def get_cloud_layers(
     compress=False,
     vrt=False,
     missing_l1c="scl",
+    geobox=None,
 ):
+    # geobox: the exact grid the Cloud_Stack must land on, for callers that
+    # already hold the cube but pass it only as `polygon=<bbox>` - the shadow
+    # tool with an IN-MEMORY cube is the one that does. Normally left None and
+    # recovered from masking=/input_cube=/update= below.
     # missing_l1c: what to do with a cube date that has NO Sentinel-2 L1C scene
     # (element84 is sparse before ~2021, so cubes built from Planetary Computer /
     # terrabyte routinely carry dates with no L1C to run s2cloudless on):
@@ -237,6 +243,8 @@ def get_cloud_layers(
     # historical unpinned behaviour.
     _src_resolution = None
     _src_crs = None
+    # An explicit geobox= wins over anything recovered from a source cube below.
+    _src_geobox = geobox
     _src_params = None
 
     # `is not None`, not truthiness: masking/input_cube may be an in-memory
@@ -247,6 +255,13 @@ def get_cloud_layers(
         _src_params = stac_parameters
         _src_resolution = stac_parameters.get("resolution")
         _src_crs = stac_parameters.get("crs")
+        # The cube's full grid, not just its resolution and projection. Pinning
+        # those two still let the L1C query re-derive the EXTENT from the stored
+        # lon/lat bbox, which does not reproduce an AOI-pinned grid: the
+        # Cloud_Stack then landed beside the cube and the label-join produced an
+        # empty (4, 1, 0, 0) result. See get_update.geobox_from_cube.
+        if _src_geobox is None:
+            _src_geobox = stac_parameters.get("geobox")
         polygon = stac_parameters["polygon"]
         daterange = stac_parameters["daterange"]
 
@@ -273,6 +288,10 @@ def get_cloud_layers(
     if update:
         stac_parameters = get_stac_parameters(update)
         polygon = stac_parameters["polygon"]
+        # Same reason as above: the new L1C scenes are concatenated onto the
+        # stored Cloud_Stack, so they have to land on its grid.
+        if _src_geobox is None:
+            _src_geobox = stac_parameters.get("geobox")
         if daterange is None:
             daterange = stac_parameters.get("daterange")
 
@@ -357,6 +376,10 @@ def get_cloud_layers(
         # to an all-different grid and silently produced an empty cube.
         resolution=_src_resolution,
         crs=_src_crs,
+        # The exact grid of the cube being masked (origin and extent as well as
+        # resolution and CRS), when there is one. None on the bare polygon path,
+        # which keeps deriving its grid from the AOI as before.
+        geobox=_src_geobox,
         # s2cloudless is documented and calibrated for bilinearly-resampled
         # reflectance. Pin bilinear explicitly so this does NOT inherit the
         # global get_stac_layers default (now "nearest") - nearest-resampled
@@ -841,7 +864,7 @@ _SCL_MASK_STATUSES = {"clouds_detected", "scl_masked", "scl_shadow_masked"}
 def _build_scl_mask_in_memory(
     mission, polygon, resolution, daterange, cloud_status,
     stac_api, resampling, nir_dark_threshold=None, shadow_proj_distance=None,
-    crs=None,
+    crs=None, geobox=None,
 ):
     """Re-query STAC and return the SCL binary mask (Cloud_Stack DataArray)
     over ``daterange``. keep_clouds=True: only the mask is wanted, never a
@@ -854,13 +877,18 @@ def _build_scl_mask_in_memory(
 
     ``crs`` pins the target projection (used by the hybrid SCL fill so the mask
     lands on the same grid as the cube being s2cloudless-masked). None keeps the
-    historical behaviour of letting the query derive the CRS itself."""
+    historical behaviour of letting the query derive the CRS itself.
+
+    ``geobox`` pins the WHOLE grid - origin and extent too - to that of the cube
+    the mask must line up with. Without it the query re-derives the extent from
+    the lon/lat ``polygon``, which does not reproduce an AOI-pinned grid, and
+    the mask comes back on a grid the cube cannot be indexed with."""
     shadow = (cloud_status == "scl_shadow_masked")
     kw = dict(
         mission=mission, polygon=polygon, resolution=resolution,
         daterange=daterange, bands=["nir"], indices=None, max_cc=100,
         cloud_masking=True, keep_clouds=True, shadow_masking=shadow,
-        source=stac_api, resampling_method=resampling, crs=crs,
+        source=stac_api, resampling_method=resampling, crs=crs, geobox=geobox,
         return_cloud_mask=True, output=None, q=True,
     )
     if shadow:
@@ -908,6 +936,7 @@ def _scl_fill_cloud_prob(missing_times, src_params, grid_ref=None):
         stac_api=src_params.get("stac_api"),
         resampling=src_params.get("resampling"),
         crs=src_params.get("crs"),
+        geobox=src_params.get("geobox"),
     )
 
     # Match SCL scenes to the missing cube timestamps at day precision and
@@ -1051,6 +1080,11 @@ def build_cloud_mask_cube(cube, output=None, q=False):
         params["daterange"], cs,
         params.get("stac_api"), params.get("resampling"),
         params.get("nir_dark_threshold"), params.get("shadow_proj_distance"),
+        # The mask must be indexable against the cube it describes, so it is
+        # built on the cube's OWN grid rather than on one re-derived from its
+        # lon/lat bbox (which used to return e.g. a 281 x 523 mask for a
+        # 256 x 511 cube, with no error).
+        crs=params.get("crs"), geobox=params.get("geobox"),
     )
 
     # Exact date match: keep ONLY the mask scenes whose day is present in the
@@ -1155,6 +1189,10 @@ def update_cloud_mask_cube(mask, daterange, output=None, q=False):
         mission, polygon, resolution, daterange, cloud_status,
         a.get("stac_api", "element84"), a.get("resampling", "nearest"),
         a.get("nir_dark_threshold"), a.get("shadow_proj_distance"),
+        # Build the new scenes on the STORED mask's own grid: they are
+        # concatenated onto it, and a grid re-derived from the lon/lat bbox does
+        # not reproduce an AOI-pinned one (the concat would then union the two).
+        crs=a.get("crs"), geobox=geobox_from_cube(existing),
     )
 
     # Floor both time axes to day, keep only genuinely new dates.
@@ -1182,8 +1220,11 @@ def update_cloud_mask_cube(mask, daterange, output=None, q=False):
             )
         return existing
 
-    # Align bands to the existing mask, then concat along time.
+    # Align bands to the existing mask, then concat along time. The grid check
+    # is explicit because xr.concat would otherwise UNION mismatched y/x axes
+    # instead of refusing (see get_update._require_same_grid).
     new_only = new_only.sel(band=_bands)
+    _require_same_grid(new_only, existing, "Binary mask update")
     merged = xr.concat([existing, new_only], dim="time").sortby("time")
     merged.name = "Cloud_Stack"
     merged.attrs = dict(existing.attrs)  # keep reconstruction metadata

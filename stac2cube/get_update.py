@@ -33,6 +33,122 @@ def _require_timeseries_layer(ds):
     )
 
 
+def _as_str_list(value):
+    """A list-valued cube attribute, restored as a real list of str.
+
+    The containers disagree about what a list attribute is on read-back:
+    NetCDF gives an ndarray for two or more entries but a bare SCALAR STRING
+    for exactly one (and a 0-d array for a single number), while Zarr's JSON
+    attrs give a plain list. Consumers that assumed ndarray hit
+    ``AttributeError: 'str' object has no attribute 'tolist'``; consumers that
+    assumed a sequence iterated the single name per character ("ndvi" ->
+    "n","d","v","i"). ``np.asarray(...).ravel()`` collapses all three forms
+    onto the same 1-D array, which is why every restore goes through here.
+    """
+    if value is None:
+        return None
+    return [str(v) for v in np.asarray(value).ravel().tolist()]
+
+
+def geobox_from_cube(cube):
+    """Recover the EXACT output grid of a stored cube as an odc ``GeoBox``.
+
+    Every path that re-queries STAC for an existing cube (update mode, the
+    cloud tools, the shadow SCL fetch) used to restore only the cube's lon/lat
+    ``bbox`` attribute and let odc-stac derive a grid from it. That derivation
+    is NOT the inverse of how the cube was built: a cube built from a vector
+    file is pinned to the AOI's projected bounds (see get_data.get_stac), while
+    a lon/lat bbox is projected, enclosed in a rectangle and snapped to a
+    resolution-aligned grid. The two differ by up to a pixel in origin and by
+    tens of pixels in size, so the re-query landed on a different grid and the
+    time concat silently unioned the two (xarray's default join="outer").
+
+    The grid is fully recoverable from the stored cube itself: the x/y
+    coordinate arrays are pixel CENTRES, so the affine and the shape follow
+    directly, and ``attrs["crs"]`` gives the projection. Reconstructing it here
+    - rather than re-deriving it from the bbox - is exact by construction and
+    also carries over grids the bbox could never describe (a cube that was
+    clipped, coregistered or reprojected after creation).
+
+    Returns None when the grid cannot be recovered (single-pixel or irregular
+    axes, no CRS attribute, odc.geo unavailable). Callers then fall back to
+    their historical bbox behaviour rather than failing.
+    """
+    try:
+        if "x" not in cube.coords or "y" not in cube.coords:
+            return None
+        x = np.asarray(cube["x"].values, dtype="float64")
+        y = np.asarray(cube["y"].values, dtype="float64")
+        if x.size < 2 or y.size < 2:
+            return None
+
+        dx = (x[-1] - x[0]) / (x.size - 1)
+        dy = (y[-1] - y[0]) / (y.size - 1)
+        if dx == 0 or dy == 0:
+            return None
+        # Regularity check: an irregular axis has no affine at all, and forcing
+        # one would misplace pixels. Tolerance is relative to the pixel size,
+        # which covers float round-off in a stored coordinate array.
+        if not (
+            np.allclose(np.diff(x), dx, rtol=0, atol=abs(dx) * 1e-6)
+            and np.allclose(np.diff(y), dy, rtol=0, atol=abs(dy) * 1e-6)
+        ):
+            return None
+
+        crs = cube.attrs.get("crs")
+        if crs is None:
+            crs = getattr(getattr(cube, "rio", None), "crs", None)
+        if crs is None:
+            return None
+        # Legacy cubes store a CRS *name* ("WGS 84 / UTM zone 35N"); normalise
+        # to something odc.geo can parse (see get_data.crs_attr_string).
+        from .get_data import crs_attr_string
+
+        crs = crs_attr_string(crs)
+
+        from affine import Affine
+        from odc.geo.geobox import GeoBox
+
+        # x/y are pixel centres -> the affine's origin is half a pixel out.
+        affine = Affine(
+            dx, 0.0, float(x[0]) - dx / 2.0,
+            0.0, dy, float(y[0]) - dy / 2.0,
+        )
+        return GeoBox((int(y.size), int(x.size)), affine, crs)
+    except Exception:
+        # Grid recovery is an optimisation of correctness, not a hard
+        # requirement: never let it block a build.
+        return None
+
+
+def _require_same_grid(stac_new, stac_existing, what):
+    """Refuse to merge two cubes that do not share one spatial grid.
+
+    Both merges in :func:`update_stac` - along ``band`` and along ``time`` -
+    are only meaningful pixel-for-pixel. ``xr.concat`` does NOT enforce that:
+    its default ``join="outer"`` UNIONS mismatched y/x axes instead, producing
+    a cube roughly twice as large in each direction with the two inputs sitting
+    in different quarters of it and NaN everywhere else. That is silent data
+    corruption - the update report still says the dates were integrated - so
+    the mismatch is turned into an error here.
+    """
+    if np.array_equal(stac_new.x.values, stac_existing.x.values) and np.array_equal(
+        stac_new.y.values, stac_existing.y.values
+    ):
+        return
+    raise ValueError(
+        f"{what} aborted: the fresh query's spatial grid ("
+        f"{stac_new.sizes.get('y', '?')} x {stac_new.sizes.get('x', '?')} px) "
+        f"does not match the existing cube's grid ("
+        f"{stac_existing.sizes.get('y', '?')} x "
+        f"{stac_existing.sizes.get('x', '?')} px), so the two cannot be merged "
+        "pixel-for-pixel. This usually means the cube was clipped with a "
+        "polygon, coregistered, reprojected or resampled after creation, or "
+        "that it was built by a version that placed the grid differently. "
+        "Rebuild the cube over the full date range instead of updating it."
+    )
+
+
 def _reconcile_time_coords(stac_old, stac_new, q=False):
     """Drop per-scene (time,) coords that only ONE side of the time concat has.
 
@@ -128,10 +244,10 @@ def get_stac_parameters(stac_existing):
         # plain Python float from Zarr's JSON attrs, which has no .item())
         resolution = float(abs(stac_existing.y.resolution))
         # Spectral bands
-        spectral_bands = stac_existing.spectral_bands
+        spectral_bands = _as_str_list(stac_existing.spectral_bands)
         # Indices
         if hasattr(stac_existing, "indices"):
-            indices = stac_existing.indices
+            indices = _as_str_list(stac_existing.indices)
         else:
             indices = None
 
@@ -162,7 +278,9 @@ def get_stac_parameters(stac_existing):
         "crs": stac_existing.attrs.get("crs"),
         # Scene-metadata coordinate selection (None on cubes built without
         # it). Restored by update mode so new scenes carry the same coords.
-        "scene_metadata": stac_existing.attrs.get("scene_metadata"),
+        # _as_str_list: a cube built with exactly ONE metadata field stores it
+        # as a scalar string (see the helper).
+        "scene_metadata": _as_str_list(stac_existing.attrs.get("scene_metadata")),
         # How AOI-straddling tiles were handled ("mosaic"/"separate"). Update
         # mode refuses to touch a "separate" cube (sub-day per-tile times).
         "tile_handling": stac_existing.attrs.get("tile_handling", "mosaic"),
@@ -177,6 +295,12 @@ def get_stac_parameters(stac_existing):
         # Full stored time axis (day precision) - lets update mode subset the
         # fresh query to the missing dates before any masking work.
         "times": np.asarray(stac_existing.time.values),
+        # The cube's EXACT output grid (origin, pixel size, shape, CRS). Every
+        # re-query hands this straight to odc-stac instead of letting it derive
+        # a grid from the lon/lat bbox above, which does not reproduce the grid
+        # the cube was built on. None when it cannot be recovered - callers
+        # then fall back to the bbox. See geobox_from_cube.
+        "geobox": geobox_from_cube(stac_existing),
     }
 
     return stac_parameters
@@ -217,16 +341,7 @@ def update_stac(stac_existing, stac_updated, new_bands=None):
         )
 
         # The band merge is only valid on an identical spatial grid.
-        if not (
-            np.array_equal(stac_new.x.values, stac_existing.x.values)
-            and np.array_equal(stac_new.y.values, stac_existing.y.values)
-        ):
-            raise ValueError(
-                "Band addition aborted: the fresh query's spatial grid does "
-                "not match the existing cube's grid (was the cube clipped "
-                "with a polygon, coregistered or resampled after creation?). "
-                "Bands can only be added on the cube's original bbox grid."
-            )
+        _require_same_grid(stac_new, stac_existing, "Band addition")
 
         existing_times = stac_existing.time.values
         new_times = set(stac_new.time.values)
@@ -269,6 +384,11 @@ def update_stac(stac_existing, stac_updated, new_bands=None):
         stac_existing = stac_existing.sel(band=final_order)
 
     if missing_times:
+        # The time concat needs the SAME spatial grid on both sides. Unlike the
+        # band merge above, xr.concat does not object to a mismatch here - it
+        # unions the axes - so the check has to be explicit.
+        _require_same_grid(stac_missing, stac_existing, "Date update")
+
         # Both sides must carry the same per-scene (time,) coordinates or the
         # concat below raises; drop any one-sided leftover first (dropping
         # BEFORE .compute() also keeps a lazy coord from being materialized

@@ -37,10 +37,13 @@
     "tile_handling": "mosaic",
     "partial_scene_handling": "keep",
     "min_scene_coverage": 0.9,
+    "min_footprint_coverage": null,
     "aggregator": null,
     "stats": null,
     "keep_timeseries": true,
-    "compress": false,
-    "vrt": false
+    "compress": true,
+    "vrt": true,
+    "export_settings": true,
+    "statistics_csv": true
   }
 }

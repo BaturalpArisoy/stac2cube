@@ -1,15 +1,15 @@
-<VRTDataset rasterXSize="523" rasterYSize="281">
+<VRTDataset rasterXSize="511" rasterYSize="256">
   <SRS dataAxisToSRSAxisMapping="1,2">PROJCS["WGS 84 / UTM zone 35N",GEOGCS["WGS 84",DATUM["WGS_1984",SPHEROID["WGS 84",6378137,298.257223563,AUTHORITY["EPSG","7030"]],AUTHORITY["EPSG","6326"]],PRIMEM["Greenwich",0,AUTHORITY["EPSG","8901"]],UNIT["degree",0.0174532925199433,AUTHORITY["EPSG","9122"]],AUTHORITY["EPSG","4326"]],PROJECTION["Transverse_Mercator"],PARAMETER["latitude_of_origin",0],PARAMETER["central_meridian",27],PARAMETER["scale_factor",0.9996],PARAMETER["false_easting",500000],PARAMETER["false_northing",0],UNIT["metre",1,AUTHORITY["EPSG","9001"]],AXIS["Easting",EAST],AXIS["Northing",NORTH],AUTHORITY["EPSG","32635"]]</SRS>
-  <GeoTransform>666960.0, 10.0, 0.0, 4546790.0, 0.0, -10.0</GeoTransform>
+  <GeoTransform>667025.5755055754, 10.0, 0.0, 4546664.509343011, 0.0, -10.0</GeoTransform>
   <VRTRasterBand dataType="Float32" band="1">
     <Description>2024-04-01 blue</Description>
     <NoDataValue>nan</NoDataValue>
     <SimpleSource>
       <SourceFilename relativeToVRT="1">NETCDF:"test.nc":Time_Series</SourceFilename>
       <SourceBand>1</SourceBand>
-      <SourceProperties RasterXSize="523" RasterYSize="281" DataType="Float32" BlockXSize="523" BlockYSize="1"/>
-      <SrcRect xOff="0" yOff="0" xSize="523" ySize="281"/>
-      <DstRect xOff="0" yOff="0" xSize="523" ySize="281"/>
+      <SourceProperties RasterXSize="511" RasterYSize="256" DataType="Float32" BlockXSize="511" BlockYSize="1"/>
+      <SrcRect xOff="0" yOff="0" xSize="511" ySize="256"/>
+      <DstRect xOff="0" yOff="0" xSize="511" ySize="256"/>
     </SimpleSource>
   </VRTRasterBand>
   <VRTRasterBand dataType="Float32" band="2">
@@ -18,9 +18,9 @@
     <SimpleSource>
       <SourceFilename relativeToVRT="1">NETCDF:"test.nc":Time_Series</SourceFilename>
       <SourceBand>2</SourceBand>
-      <SourceProperties RasterXSize="523" RasterYSize="281" DataType="Float32" BlockXSize="523" BlockYSize="1"/>
-      <SrcRect xOff="0" yOff="0" xSize="523" ySize="281"/>
-      <DstRect xOff="0" yOff="0" xSize="523" ySize="281"/>
+      <SourceProperties RasterXSize="511" RasterYSize="256" DataType="Float32" BlockXSize="511" BlockYSize="1"/>
+      <SrcRect xOff="0" yOff="0" xSize="511" ySize="256"/>
+      <DstRect xOff="0" yOff="0" xSize="511" ySize="256"/>
     </SimpleSource>
   </VRTRasterBand>
   <VRTRasterBand dataType="Float32" band="3">
@@ -29,9 +29,9 @@
     <SimpleSource>
       <SourceFilename relativeToVRT="1">NETCDF:"test.nc":Time_Series</SourceFilename>
       <SourceBand>3</SourceBand>
-      <SourceProperties RasterXSize="523" RasterYSize="281" DataType="Float32" BlockXSize="523" BlockYSize="1"/>
-      <SrcRect xOff="0" yOff="0" xSize="523" ySize="281"/>
-      <DstRect xOff="0" yOff="0" xSize="523" ySize="281"/>
+      <SourceProperties RasterXSize="511" RasterYSize="256" DataType="Float32" BlockXSize="511" BlockYSize="1"/>
+      <SrcRect xOff="0" yOff="0" xSize="511" ySize="256"/>
+      <DstRect xOff="0" yOff="0" xSize="511" ySize="256"/>
     </SimpleSource>
   </VRTRasterBand>
   <VRTRasterBand dataType="Float32" band="4">
@@ -40,9 +40,9 @@
     <SimpleSource>
       <SourceFilename relativeToVRT="1">NETCDF:"test.nc":Time_Series</SourceFilename>
       <SourceBand>4</SourceBand>
-      <SourceProperties RasterXSize="523" RasterYSize="281" DataType="Float32" BlockXSize="523" BlockYSize="1"/>
-      <SrcRect xOff="0" yOff="0" xSize="523" ySize="281"/>
-      <DstRect xOff="0" yOff="0" xSize="523" ySize="281"/>
+      <SourceProperties RasterXSize="511" RasterYSize="256" DataType="Float32" BlockXSize="511" BlockYSize="1"/>
+      <SrcRect xOff="0" yOff="0" xSize="511" ySize="256"/>
+      <DstRect xOff="0" yOff="0" xSize="511" ySize="256"/>
     </SimpleSource>
   </VRTRasterBand>
   <VRTRasterBand dataType="Float32" band="5">
@@ -51,9 +51,9 @@
     <SimpleSource>
       <SourceFilename relativeToVRT="1">NETCDF:"test.nc":Time_Series</SourceFilename>
       <SourceBand>5</SourceBand>
-      <SourceProperties RasterXSize="523" RasterYSize="281" DataType="Float32" BlockXSize="523" BlockYSize="1"/>
-      <SrcRect xOff="0" yOff="0" xSize="523" ySize="281"/>
-      <DstRect xOff="0" yOff="0" xSize="523" ySize="281"/>
+      <SourceProperties RasterXSize="511" RasterYSize="256" DataType="Float32" BlockXSize="511" BlockYSize="1"/>
+      <SrcRect xOff="0" yOff="0" xSize="511" ySize="256"/>
+      <DstRect xOff="0" yOff="0" xSize="511" ySize="256"/>
     </SimpleSource>
   </VRTRasterBand>
   <VRTRasterBand dataType="Float32" band="6">
@@ -62,9 +62,9 @@
     <SimpleSource>
       <SourceFilename relativeToVRT="1">NETCDF:"test.nc":Time_Series</SourceFilename>
       <SourceBand>6</SourceBand>
-      <SourceProperties RasterXSize="523" RasterYSize="281" DataType="Float32" BlockXSize="523" BlockYSize="1"/>
-      <SrcRect xOff="0" yOff="0" xSize="523" ySize="281"/>
-      <DstRect xOff="0" yOff="0" xSize="523" ySize="281"/>
+      <SourceProperties RasterXSize="511" RasterYSize="256" DataType="Float32" BlockXSize="511" BlockYSize="1"/>
+      <SrcRect xOff="0" yOff="0" xSize="511" ySize="256"/>
+      <DstRect xOff="0" yOff="0" xSize="511" ySize="256"/>
     </SimpleSource>
   </VRTRasterBand>
   <VRTRasterBand dataType="Float32" band="7">
@@ -73,9 +73,9 @@
     <SimpleSource>
       <SourceFilename relativeToVRT="1">NETCDF:"test.nc":Time_Series</SourceFilename>
       <SourceBand>7</SourceBand>
-      <SourceProperties RasterXSize="523" RasterYSize="281" DataType="Float32" BlockXSize="523" BlockYSize="1"/>
-      <SrcRect xOff="0" yOff="0" xSize="523" ySize="281"/>
-      <DstRect xOff="0" yOff="0" xSize="523" ySize="281"/>
+      <SourceProperties RasterXSize="511" RasterYSize="256" DataType="Float32" BlockXSize="511" BlockYSize="1"/>
+      <SrcRect xOff="0" yOff="0" xSize="511" ySize="256"/>
+      <DstRect xOff="0" yOff="0" xSize="511" ySize="256"/>
     </SimpleSource>
   </VRTRasterBand>
   <VRTRasterBand dataType="Float32" band="8">
@@ -84,9 +84,9 @@
     <SimpleSource>
       <SourceFilename relativeToVRT="1">NETCDF:"test.nc":Time_Series</SourceFilename>
       <SourceBand>8</SourceBand>
-      <SourceProperties RasterXSize="523" RasterYSize="281" DataType="Float32" BlockXSize="523" BlockYSize="1"/>
-      <SrcRect xOff="0" yOff="0" xSize="523" ySize="281"/>
-      <DstRect xOff="0" yOff="0" xSize="523" ySize="281"/>
+      <SourceProperties RasterXSize="511" RasterYSize="256" DataType="Float32" BlockXSize="511" BlockYSize="1"/>
+      <SrcRect xOff="0" yOff="0" xSize="511" ySize="256"/>
+      <DstRect xOff="0" yOff="0" xSize="511" ySize="256"/>
     </SimpleSource>
   </VRTRasterBand>
   <VRTRasterBand dataType="Float32" band="9">
@@ -95,9 +95,9 @@
     <SimpleSource>
       <SourceFilename relativeToVRT="1">NETCDF:"test.nc":Time_Series</SourceFilename>
       <SourceBand>9</SourceBand>
-      <SourceProperties RasterXSize="523" RasterYSize="281" DataType="Float32" BlockXSize="523" BlockYSize="1"/>
-      <SrcRect xOff="0" yOff="0" xSize="523" ySize="281"/>
-      <DstRect xOff="0" yOff="0" xSize="523" ySize="281"/>
+      <SourceProperties RasterXSize="511" RasterYSize="256" DataType="Float32" BlockXSize="511" BlockYSize="1"/>
+      <SrcRect xOff="0" yOff="0" xSize="511" ySize="256"/>
+      <DstRect xOff="0" yOff="0" xSize="511" ySize="256"/>
     </SimpleSource>
   </VRTRasterBand>
   <VRTRasterBand dataType="Float32" band="10">
@@ -106,9 +106,9 @@
     <SimpleSource>
       <SourceFilename relativeToVRT="1">NETCDF:"test.nc":Time_Series</SourceFilename>
       <SourceBand>10</SourceBand>
-      <SourceProperties RasterXSize="523" RasterYSize="281" DataType="Float32" BlockXSize="523" BlockYSize="1"/>
-      <SrcRect xOff="0" yOff="0" xSize="523" ySize="281"/>
-      <DstRect xOff="0" yOff="0" xSize="523" ySize="281"/>
+      <SourceProperties RasterXSize="511" RasterYSize="256" DataType="Float32" BlockXSize="511" BlockYSize="1"/>
+      <SrcRect xOff="0" yOff="0" xSize="511" ySize="256"/>
+      <DstRect xOff="0" yOff="0" xSize="511" ySize="256"/>
     </SimpleSource>
   </VRTRasterBand>
   <VRTRasterBand dataType="Float32" band="11">
@@ -117,9 +117,9 @@
     <SimpleSource>
       <SourceFilename relativeToVRT="1">NETCDF:"test.nc":Time_Series</SourceFilename>
       <SourceBand>11</SourceBand>
-      <SourceProperties RasterXSize="523" RasterYSize="281" DataType="Float32" BlockXSize="523" BlockYSize="1"/>
-      <SrcRect xOff="0" yOff="0" xSize="523" ySize="281"/>
-      <DstRect xOff="0" yOff="0" xSize="523" ySize="281"/>
+      <SourceProperties RasterXSize="511" RasterYSize="256" DataType="Float32" BlockXSize="511" BlockYSize="1"/>
+      <SrcRect xOff="0" yOff="0" xSize="511" ySize="256"/>
+      <DstRect xOff="0" yOff="0" xSize="511" ySize="256"/>
     </SimpleSource>
   </VRTRasterBand>
   <VRTRasterBand dataType="Float32" band="12">
@@ -128,9 +128,9 @@
     <SimpleSource>
       <SourceFilename relativeToVRT="1">NETCDF:"test.nc":Time_Series</SourceFilename>
       <SourceBand>12</SourceBand>
-      <SourceProperties RasterXSize="523" RasterYSize="281" DataType="Float32" BlockXSize="523" BlockYSize="1"/>
-      <SrcRect xOff="0" yOff="0" xSize="523" ySize="281"/>
-      <DstRect xOff="0" yOff="0" xSize="523" ySize="281"/>
+      <SourceProperties RasterXSize="511" RasterYSize="256" DataType="Float32" BlockXSize="511" BlockYSize="1"/>
+      <SrcRect xOff="0" yOff="0" xSize="511" ySize="256"/>
+      <DstRect xOff="0" yOff="0" xSize="511" ySize="256"/>
     </SimpleSource>
   </VRTRasterBand>
   <VRTRasterBand dataType="Float32" band="13">
@@ -139,9 +139,9 @@
     <SimpleSource>
       <SourceFilename relativeToVRT="1">NETCDF:"test.nc":Time_Series</SourceFilename>
       <SourceBand>13</SourceBand>
-      <SourceProperties RasterXSize="523" RasterYSize="281" DataType="Float32" BlockXSize="523" BlockYSize="1"/>
-      <SrcRect xOff="0" yOff="0" xSize="523" ySize="281"/>
-      <DstRect xOff="0" yOff="0" xSize="523" ySize="281"/>
+      <SourceProperties RasterXSize="511" RasterYSize="256" DataType="Float32" BlockXSize="511" BlockYSize="1"/>
+      <SrcRect xOff="0" yOff="0" xSize="511" ySize="256"/>
+      <DstRect xOff="0" yOff="0" xSize="511" ySize="256"/>
     </SimpleSource>
   </VRTRasterBand>
   <VRTRasterBand dataType="Float32" band="14">
@@ -150,9 +150,9 @@
     <SimpleSource>
       <SourceFilename relativeToVRT="1">NETCDF:"test.nc":Time_Series</SourceFilename>
       <SourceBand>14</SourceBand>
-      <SourceProperties RasterXSize="523" RasterYSize="281" DataType="Float32" BlockXSize="523" BlockYSize="1"/>
-      <SrcRect xOff="0" yOff="0" xSize="523" ySize="281"/>
-      <DstRect xOff="0" yOff="0" xSize="523" ySize="281"/>
+      <SourceProperties RasterXSize="511" RasterYSize="256" DataType="Float32" BlockXSize="511" BlockYSize="1"/>
+      <SrcRect xOff="0" yOff="0" xSize="511" ySize="256"/>
+      <DstRect xOff="0" yOff="0" xSize="511" ySize="256"/>
     </SimpleSource>
   </VRTRasterBand>
   <VRTRasterBand dataType="Float32" band="15">
@@ -161,9 +161,9 @@
     <SimpleSource>
       <SourceFilename relativeToVRT="1">NETCDF:"test.nc":Time_Series</SourceFilename>
       <SourceBand>15</SourceBand>
-      <SourceProperties RasterXSize="523" RasterYSize="281" DataType="Float32" BlockXSize="523" BlockYSize="1"/>
-      <SrcRect xOff="0" yOff="0" xSize="523" ySize="281"/>
-      <DstRect xOff="0" yOff="0" xSize="523" ySize="281"/>
+      <SourceProperties RasterXSize="511" RasterYSize="256" DataType="Float32" BlockXSize="511" BlockYSize="1"/>
+      <SrcRect xOff="0" yOff="0" xSize="511" ySize="256"/>
+      <DstRect xOff="0" yOff="0" xSize="511" ySize="256"/>
     </SimpleSource>
   </VRTRasterBand>
   <VRTRasterBand dataType="Float32" band="16">
@@ -172,9 +172,9 @@
     <SimpleSource>
       <SourceFilename relativeToVRT="1">NETCDF:"test.nc":Time_Series</SourceFilename>
       <SourceBand>16</SourceBand>
-      <SourceProperties RasterXSize="523" RasterYSize="281" DataType="Float32" BlockXSize="523" BlockYSize="1"/>
-      <SrcRect xOff="0" yOff="0" xSize="523" ySize="281"/>
-      <DstRect xOff="0" yOff="0" xSize="523" ySize="281"/>
+      <SourceProperties RasterXSize="511" RasterYSize="256" DataType="Float32" BlockXSize="511" BlockYSize="1"/>
+      <SrcRect xOff="0" yOff="0" xSize="511" ySize="256"/>
+      <DstRect xOff="0" yOff="0" xSize="511" ySize="256"/>
     </SimpleSource>
   </VRTRasterBand>
   <VRTRasterBand dataType="Float32" band="17">
@@ -183,9 +183,9 @@
     <SimpleSource>
       <SourceFilename relativeToVRT="1">NETCDF:"test.nc":Time_Series</SourceFilename>
       <SourceBand>17</SourceBand>
-      <SourceProperties RasterXSize="523" RasterYSize="281" DataType="Float32" BlockXSize="523" BlockYSize="1"/>
-      <SrcRect xOff="0" yOff="0" xSize="523" ySize="281"/>
-      <DstRect xOff="0" yOff="0" xSize="523" ySize="281"/>
+      <SourceProperties RasterXSize="511" RasterYSize="256" DataType="Float32" BlockXSize="511" BlockYSize="1"/>
+      <SrcRect xOff="0" yOff="0" xSize="511" ySize="256"/>
+      <DstRect xOff="0" yOff="0" xSize="511" ySize="256"/>
     </SimpleSource>
   </VRTRasterBand>
   <VRTRasterBand dataType="Float32" band="18">
@@ -194,9 +194,9 @@
     <SimpleSource>
       <SourceFilename relativeToVRT="1">NETCDF:"test.nc":Time_Series</SourceFilename>
       <SourceBand>18</SourceBand>
-      <SourceProperties RasterXSize="523" RasterYSize="281" DataType="Float32" BlockXSize="523" BlockYSize="1"/>
-      <SrcRect xOff="0" yOff="0" xSize="523" ySize="281"/>
-      <DstRect xOff="0" yOff="0" xSize="523" ySize="281"/>
+      <SourceProperties RasterXSize="511" RasterYSize="256" DataType="Float32" BlockXSize="511" BlockYSize="1"/>
+      <SrcRect xOff="0" yOff="0" xSize="511" ySize="256"/>
+      <DstRect xOff="0" yOff="0" xSize="511" ySize="256"/>
     </SimpleSource>
   </VRTRasterBand>
   <VRTRasterBand dataType="Float32" band="19">
@@ -205,9 +205,9 @@
     <SimpleSource>
       <SourceFilename relativeToVRT="1">NETCDF:"test.nc":Time_Series</SourceFilename>
       <SourceBand>19</SourceBand>
-      <SourceProperties RasterXSize="523" RasterYSize="281" DataType="Float32" BlockXSize="523" BlockYSize="1"/>
-      <SrcRect xOff="0" yOff="0" xSize="523" ySize="281"/>
-      <DstRect xOff="0" yOff="0" xSize="523" ySize="281"/>
+      <SourceProperties RasterXSize="511" RasterYSize="256" DataType="Float32" BlockXSize="511" BlockYSize="1"/>
+      <SrcRect xOff="0" yOff="0" xSize="511" ySize="256"/>
+      <DstRect xOff="0" yOff="0" xSize="511" ySize="256"/>
     </SimpleSource>
   </VRTRasterBand>
   <VRTRasterBand dataType="Float32" band="20">
@@ -216,9 +216,9 @@
     <SimpleSource>
       <SourceFilename relativeToVRT="1">NETCDF:"test.nc":Time_Series</SourceFilename>
       <SourceBand>20</SourceBand>
-      <SourceProperties RasterXSize="523" RasterYSize="281" DataType="Float32" BlockXSize="523" BlockYSize="1"/>
-      <SrcRect xOff="0" yOff="0" xSize="523" ySize="281"/>
-      <DstRect xOff="0" yOff="0" xSize="523" ySize="281"/>
+      <SourceProperties RasterXSize="511" RasterYSize="256" DataType="Float32" BlockXSize="511" BlockYSize="1"/>
+      <SrcRect xOff="0" yOff="0" xSize="511" ySize="256"/>
+      <DstRect xOff="0" yOff="0" xSize="511" ySize="256"/>
     </SimpleSource>
   </VRTRasterBand>
   <VRTRasterBand dataType="Float32" band="21">
@@ -227,9 +227,9 @@
     <SimpleSource>
       <SourceFilename relativeToVRT="1">NETCDF:"test.nc":Time_Series</SourceFilename>
       <SourceBand>21</SourceBand>
-      <SourceProperties RasterXSize="523" RasterYSize="281" DataType="Float32" BlockXSize="523" BlockYSize="1"/>
-      <SrcRect xOff="0" yOff="0" xSize="523" ySize="281"/>
-      <DstRect xOff="0" yOff="0" xSize="523" ySize="281"/>
+      <SourceProperties RasterXSize="511" RasterYSize="256" DataType="Float32" BlockXSize="511" BlockYSize="1"/>
+      <SrcRect xOff="0" yOff="0" xSize="511" ySize="256"/>
+      <DstRect xOff="0" yOff="0" xSize="511" ySize="256"/>
     </SimpleSource>
   </VRTRasterBand>
   <VRTRasterBand dataType="Float32" band="22">
@@ -238,9 +238,9 @@
     <SimpleSource>
       <SourceFilename relativeToVRT="1">NETCDF:"test.nc":Time_Series</SourceFilename>
       <SourceBand>22</SourceBand>
-      <SourceProperties RasterXSize="523" RasterYSize="281" DataType="Float32" BlockXSize="523" BlockYSize="1"/>
-      <SrcRect xOff="0" yOff="0" xSize="523" ySize="281"/>
-      <DstRect xOff="0" yOff="0" xSize="523" ySize="281"/>
+      <SourceProperties RasterXSize="511" RasterYSize="256" DataType="Float32" BlockXSize="511" BlockYSize="1"/>
+      <SrcRect xOff="0" yOff="0" xSize="511" ySize="256"/>
+      <DstRect xOff="0" yOff="0" xSize="511" ySize="256"/>
     </SimpleSource>
   </VRTRasterBand>
   <VRTRasterBand dataType="Float32" band="23">
@@ -249,9 +249,9 @@
     <SimpleSource>
       <SourceFilename relativeToVRT="1">NETCDF:"test.nc":Time_Series</SourceFilename>
       <SourceBand>23</SourceBand>
-      <SourceProperties RasterXSize="523" RasterYSize="281" DataType="Float32" BlockXSize="523" BlockYSize="1"/>
-      <SrcRect xOff="0" yOff="0" xSize="523" ySize="281"/>
-      <DstRect xOff="0" yOff="0" xSize="523" ySize="281"/>
+      <SourceProperties RasterXSize="511" RasterYSize="256" DataType="Float32" BlockXSize="511" BlockYSize="1"/>
+      <SrcRect xOff="0" yOff="0" xSize="511" ySize="256"/>
+      <DstRect xOff="0" yOff="0" xSize="511" ySize="256"/>
     </SimpleSource>
   </VRTRasterBand>
   <VRTRasterBand dataType="Float32" band="24">
@@ -260,9 +260,9 @@
     <SimpleSource>
       <SourceFilename relativeToVRT="1">NETCDF:"test.nc":Time_Series</SourceFilename>
       <SourceBand>24</SourceBand>
-      <SourceProperties RasterXSize="523" RasterYSize="281" DataType="Float32" BlockXSize="523" BlockYSize="1"/>
-      <SrcRect xOff="0" yOff="0" xSize="523" ySize="281"/>
-      <DstRect xOff="0" yOff="0" xSize="523" ySize="281"/>
+      <SourceProperties RasterXSize="511" RasterYSize="256" DataType="Float32" BlockXSize="511" BlockYSize="1"/>
+      <SrcRect xOff="0" yOff="0" xSize="511" ySize="256"/>
+      <DstRect xOff="0" yOff="0" xSize="511" ySize="256"/>
     </SimpleSource>
   </VRTRasterBand>
 </VRTDataset>

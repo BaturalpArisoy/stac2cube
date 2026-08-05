@@ -671,6 +671,62 @@ def write_qgis_vrt(cube_path, var_name=None, vrt_path=None):
     return vrt_path
 
 
+def _resolve_geo_attr(stac, name):
+    """Find ``crs`` / ``transform`` for an object that may not carry it itself.
+
+    A cube built by :func:`get_stac_layers` is a DataArray with both on its own
+    ``attrs``, which is why this used to be a plain attribute lookup. Several
+    products are not: :func:`calculate_statistics` returns a Dataset whose
+    ``attrs`` are EMPTY because the georeferencing rode along on the variables
+    (``ds["Time_Series"].attrs``), so exporting one raised
+    ``AttributeError: 'Dataset' object has no attribute 'crs'`` and had to be
+    worked around by copying the attrs across by hand.
+
+    Order: the object's own attrs, then (for a Dataset) the first variable that
+    has the attribute, then the rio accessor as a last resort - it reads the
+    CF grid-mapping variable / coordinates, so it also covers a cube whose
+    attrs were dropped by an xarray operation. Raises with the reason when
+    nothing supplies it, rather than writing a cube with no georeferencing.
+    """
+    value = stac.attrs.get(name)
+    if value is not None:
+        return value
+
+    if isinstance(stac, xr.Dataset):
+        for var in stac.data_vars:
+            value = stac[var].attrs.get(name)
+            if value is not None:
+                return value
+
+    try:
+        if name == "crs":
+            # Kept as a STRING, like the attrs form: a rasterio/pyproj CRS
+            # object is not a serializable NetCDF attribute, and this value is
+            # written straight back into attrs["crs"] below.
+            crs_obj = stac.rio.crs
+            if crs_obj is None:
+                value = None
+            else:
+                code = crs_obj.to_epsg()
+                value = f"EPSG:{code}" if code else crs_obj.to_wkt()
+        else:
+            # recalc=True derives it from the x/y coordinates. It falls back to
+            # the identity affine when there is nothing to derive it from,
+            # which is not a georeference - treat that as "not found".
+            affine = stac.rio.transform(recalc=True)
+            value = None if affine == Affine.identity() else affine
+    except Exception:
+        value = None
+    if value is not None:
+        return value
+
+    raise ValueError(
+        f"export_stac could not determine the '{name}' of this cube: it is not "
+        f"in its attrs, in any of its variables' attrs, nor derivable from its "
+        f"coordinates. Pass {name}=... explicitly."
+    )
+
+
 def export_stac(
     stac,
     output,
@@ -718,8 +774,15 @@ def export_stac(
              "sidecar alongside it.",
     )
 
-    crs = crs or stac.crs
-    transform = transform or stac.transform
+    # Georeferencing: what the caller passed wins, otherwise it is read off the
+    # object. `is None`, NOT `or`: the stored transform is a 9-element ndarray,
+    # whose truthiness raises "The truth value of an array with more than one
+    # element is ambiguous", so `transform or ...` rejected a perfectly valid
+    # explicit transform.
+    if crs is None:
+        crs = _resolve_geo_attr(stac, "crs")
+    if transform is None:
+        transform = _resolve_geo_attr(stac, "transform")
 
     stac.attrs["transform"] = transform
     stac = stac.rio.write_crs(crs, inplace=True)

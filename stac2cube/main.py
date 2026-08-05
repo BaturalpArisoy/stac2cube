@@ -408,6 +408,7 @@ def get_stac_layers(
     partial_scene_handling="keep",
     min_scene_coverage=0.9,
     min_footprint_coverage=None,
+    geobox=None,
     q=None,
     compress=False,
     vrt=False,
@@ -419,6 +420,12 @@ def get_stac_layers(
     # before any argument is normalised below, so the file records what was
     # asked for rather than what it was rewritten into.
     _call_settings = dict(locals()) if export_settings else None
+    if _call_settings is not None:
+        # `geobox` is an internal grid hand-off between the cube tools (an odc
+        # GeoBox object, not JSON-representable). It is never something a user
+        # sets, and the config that reproduces it is `update=<cube>` - which is
+        # recorded - so it is dropped rather than stringified into the sidecar.
+        _call_settings.pop("geobox", None)
 
     # Reassign short names
     if mission == "s2":
@@ -431,6 +438,21 @@ def get_stac_layers(
         mission = "landsat_c2_l2"
     if mission == "cop_dem":
         mission = "cop_dem_glo_30"
+
+    # --- Topographic features -------------------------------------------------
+    # Not produced. The WhiteboxTools code (get_topo.calculate_topo) is present
+    # but was never wired into the build, and the branch that was supposed to
+    # call it referenced undefined names, so asking for these used to end in
+    # "NameError: name 'dem' is not defined" AFTER the download. Refused here,
+    # before any work, and with the reason - a cop_dem build without them
+    # returns the elevation band on its own.
+    if topographic_features:
+        raise ValueError(
+            "topographic_features (slope, aspect, d_inf_flow_accumulation, twi) "
+            "are not available: the derivation is not wired into the build. "
+            "A cop_dem_glo_30 cube currently holds the 'dem' elevation band "
+            "only - drop the parameter to build it."
+        )
 
     # --- Cloud shadow masking preconditions -----------------------------------
     # Shadows are projected FROM the detected clouds along the anti-solar
@@ -897,6 +919,11 @@ def get_stac_layers(
     # cube's stored projection in update mode (see the restore below), or None to
     # let get_stac choose it from the matched items.
     _pinned_crs = crs
+    # Full output grid handed to get_stac. Normally None (the grid is derived
+    # from the AOI); in update mode - and whenever a caller passes one, e.g. the
+    # cloud tools re-querying for a cube they are masking - it is the EXACT grid
+    # of the existing cube, so the new scenes are concat-compatible with it.
+    _pinned_geobox = geobox
 
     if update:
         stac_parameters = get_stac_parameters(update)
@@ -922,6 +949,17 @@ def get_stac_layers(
         # misalign the concat in update_stac. Legacy cubes store a CRS *name*
         # here; crs_attr_string normalises it (see _choose_target_crs).
         _pinned_crs = stac_parameters.get("crs")
+        # ... and its full grid, not just the projection. Pinning the CRS alone
+        # was not enough: the fresh query re-derived the EXTENT from the stored
+        # lon/lat bbox, which snaps to a resolution-aligned grid and therefore
+        # does not reproduce the AOI-pinned grid a cube built from a vector file
+        # sits on. The two then differed in origin and size, and the time concat
+        # in update_stac unioned them into a cube twice as large with ~25% valid
+        # pixels per date - silently. Recovered from the cube's own coordinates,
+        # so it is exact whatever the cube was built from (see geobox_from_cube).
+        # An explicit geobox= from the caller still wins.
+        if _pinned_geobox is None:
+            _pinned_geobox = stac_parameters.get("geobox")
         # geometry = stac_parameters["geometry"] # update-clip raster
         user_bands = bands  # bands passed alongside update = bands to ADD
         bands = stac_parameters["spectral_bands"]
@@ -937,7 +975,14 @@ def get_stac_layers(
             # Cube built without any spectral indices - nothing to restore.
             indices = []
         elif not isinstance(indices, list):
-            indices = indices.tolist()
+            # Same single-element collapse as the bands attr above: NetCDF
+            # stores a ONE-index list as a scalar string, which has no
+            # .tolist() at all (AttributeError), while two or more round-trip
+            # as an ndarray. ravel() normalises both, and the 0-d case yields a
+            # 1-element list instead of a bare string that would then be
+            # iterated per character.
+            indices = np.asarray(indices).ravel().tolist()
+        indices = [str(i) for i in indices]
 
         # --- Band addition ---------------------------------------------------
         # Bands passed alongside update are bands to ADD to the existing cube.
@@ -1131,6 +1176,7 @@ def get_stac_layers(
         crs=_pinned_crs,
         min_footprint_coverage=_min_footprint_cov,
         clip_raster=clip_raster,
+        geobox=_pinned_geobox,
         q=bool(q),
     )
     # Separate-tile cubes keep full-precision, per-tile timestamps so two tiles
@@ -1349,11 +1395,6 @@ def get_stac_layers(
     # if animation is True:
     #    generate_animation(stac)
 
-    #    if mission == 'cop_dem_glo_30':
-    #        dem = stac.isel(time=0).dem
-    #        dem = dem.expand_dims(dim={'band': ['dem']})
-    #        stac_topo_features = calculate_topo(dem, topographic_features)
-
     # Dataset -> DataArray
     if mission != "cop_dem_glo_30":
         bands = list(stac.data_vars.keys())
@@ -1366,7 +1407,22 @@ def get_stac_layers(
         stac.attrs["indices"] = indices
 
     if mission == "cop_dem_glo_30":
-        stac = xr.concat([dem, stac_topo_features], dim="band")
+        # Elevation only, as a (band, latitude, longitude) layer - COP-DEM is
+        # served in EPSG:4326, where odc-stac names the spatial dims
+        # latitude/longitude rather than y/x, and it is a single static
+        # "acquisition", so the time dimension is dropped here.
+        #
+        # The WhiteboxTools derivatives (slope, aspect, d_inf_flow_accumulation,
+        # twi) are NOT produced. get_topo.calculate_topo exists but has never
+        # been connected: this branch used to concatenate two names, `dem` and
+        # `stac_topo_features`, that were only ever assigned inside a
+        # commented-out block, so EVERY cop_dem build raised
+        # "NameError: name 'dem' is not defined". A topographic_features request
+        # is now refused up front (see the precondition in get_stac_layers)
+        # instead of being silently dropped here.
+        dem = stac.isel(time=0)["dem"]
+        bands = ["dem"]
+        stac = dem.expand_dims(dim={"band": bands})
         stac = stac.rename("Topographic_Features")
     else:
         stac = stac.transpose("time", "band", "y", "x")

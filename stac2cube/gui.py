@@ -12728,6 +12728,16 @@ def datacube_editor():
                         print("Applied:")
                         for m in msgs:
                             print(f"- {m}")
+                    # The update only extends the working cube in memory. Users
+                    # read "Update finished" as "written to disk" and stop here,
+                    # so spell out that the file is still the old one.
+                    print(
+                        "\nℹ️ Not written to disk yet. The new dates/bands are "
+                        "in the working result only, the loaded file is "
+                        "unchanged.\n"
+                        "Next: open 'Result' below to check the updated cube, "
+                        "then write it out with 'Export current result'."
+                    )
                 else:
                     print("✅ Update finished (no changes applied).")
 
@@ -14373,8 +14383,13 @@ def datacube_editor():
                     layer_select_w.options = []
                     layer_select_box.layout.display = "none"
                     _finalize_load(pseudo_path, merged, layers_found[0])
-                    print(f"\n✅ Mosaic ready: {layers_found[0]}. "
-                          "It is now the result you can export below.")
+                    print(
+                        f"\n✅ Mosaic ready: {layers_found[0]}."
+                        "\n\nℹ️ Not written to disk yet. The mosaic is the "
+                        "working result only, no file has been created.\n"
+                        "Next: open 'Result' below to check it, then write it "
+                        "out with 'Export current result'."
+                    )
                 else:
                     layer_select_w.options = _layer_dropdown_options(
                         merged, layers_found
@@ -14396,6 +14411,9 @@ def datacube_editor():
                         + ", ".join(layers_found)
                         + "\nPick one in the 'Layer' dropdown under Loading and "
                         "click 'Load selected layer' to start editing it."
+                        "\n\nℹ️ Not written to disk yet. The mosaic exists in "
+                        "this session only, so export it once the layer is "
+                        "loaded and ready."
                     )
             except Exception as e:
                 print(_friendly_error(e, "Mosaic data cubes"))

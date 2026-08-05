@@ -581,6 +581,10 @@ def get_shadow_layers(
             scl_ds, _, _ = get_stac(
                 "sentinel_2_l2a", bbox, res, daterange, ["scl"], None, None,
                 source=source, resampling="nearest",
+                # Load straight onto the cube's grid. _align_to_cube_grid below
+                # still runs, but it now has nothing to fix: a grid re-derived
+                # from the lon/lat bbox does not reproduce an AOI-pinned one.
+                geobox=params.get("geobox"),
             )
             scl = _match_days(scl_ds["scl"], cube_days, "SCL layer")
             scl = _align_to_cube_grid(scl, cube, res, "SCL layer")
@@ -598,6 +602,15 @@ def get_shadow_layers(
                 polygon=bbox,
                 daterange=daterange,
                 input_cube=input_cube if isinstance(input_cube, (str, os.PathLike)) else None,
+                # An IN-MEMORY cube is passed as input_cube=None (the reference
+                # timestamps come from _match_days below instead), so
+                # get_cloud_layers has no cube to recover the grid from and
+                # would derive one from `bbox` - which does not reproduce an
+                # AOI-pinned grid. The probability stack then misses
+                # _align_to_cube_grid's half-pixel tolerance and the whole
+                # shadow run dies. Update mode reaches this with every s2cloudless
+                # + shadow cube (main._mask_new_scenes_s2cloudless).
+                geobox=params.get("geobox"),
             )
             prob = prob_stack.sel(band="cloud_prob")
             prob = _match_days(prob, cube_days, "s2cloudless probability stack")

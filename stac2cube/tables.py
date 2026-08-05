@@ -252,9 +252,13 @@ def missions():
         "alias": "cop_dem",
         # "stac_catalog": "https://stac.terrabyte.lrz.de/public/api/",
         "default_resolution": False,
-        "bands": False,
+        # The elevation band is the whole cube: no band choice, no indices, and
+        # no topographic features. The slope/aspect/flow-accumulation/TWI
+        # derivation is not wired into the build (get_stac_layers refuses the
+        # parameter), so it is no longer listed here as if it were available.
+        "bands": ["dem"],
         "indices": False,
-        "topographic_features": ["slope", "aspect", "d_inf_flow_accumulation", "twi"],
+        "topographic_features": False,
         "max_cc": False,
         "clip_raster": [True, False],
         "cloud_masking": False,

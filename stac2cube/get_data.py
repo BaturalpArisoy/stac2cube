@@ -907,8 +907,19 @@ def get_stac(
     crs=None,
     min_footprint_coverage=None,
     clip_raster=None,
+    geobox=None,
     q: bool = False,
 ):
+    """``geobox``: an explicit odc ``GeoBox`` to load onto, used VERBATIM.
+
+    Supplied by every path that re-queries STAC for an existing cube (update
+    mode, the cloud tools, the shadow SCL fetch) so the new scenes land on that
+    cube's grid pixel-for-pixel. It fully specifies CRS, resolution, origin and
+    extent, so ``crs``/``resolution`` are ignored for the load itself (the
+    ``bbox`` derived from ``polygon`` is still what the catalogue is SEARCHED
+    with). None keeps the normal behaviour: pin the grid to the AOI for a real
+    geometry, or let odc-stac derive it from the lon/lat bbox.
+    """
     _source_aliases = {"e84": "element84", "tb": "terrabyte", "pc": "planetary_computer"}
     source = _source_aliases.get(source, source)
 
@@ -1054,6 +1065,11 @@ def get_stac(
     # chosen from the native CRSs of ALL matched items rather than from items[0].
     target_crs = _choose_target_crs(crs_counts, bbox, items=items, user_crs=crs, q=q)
 
+    # An explicit grid overrides the choice above: the cube being extended or
+    # masked already has a projection, and its scenes must land in that one.
+    if geobox is not None:
+        target_crs = crs_attr_string(geobox.crs)
+
     if mission == "sentinel_2_l2a":
         bands = list(dict.fromkeys(_S2_BNUM_TO_COMMON.get(b, b) for b in bands))
 
@@ -1101,11 +1117,23 @@ def get_stac(
     # then matches the polygon exactly.
     #
     # Only for real geometries. A bbox list is already lon/lat, so there is no
-    # projected rectangle to preserve - and update mode feeds the stored lon/lat
-    # bbox back in, so leaving that path untouched keeps updates grid-compatible
-    # with the cubes they extend.
+    # projected rectangle to preserve.
+    #
+    # A caller-supplied `geobox` wins over both: it IS the grid of an existing
+    # cube. Re-deriving one from that cube's stored lon/lat bbox does not
+    # reproduce it (the derivation snaps to a resolution-aligned grid, the
+    # pinning does not), which used to put updated dates on a different grid
+    # than the dates they were concatenated onto. See get_update.geobox_from_cube.
     _exact_geobox = None
-    if target_crs is not None and not isinstance(polygon, (list, tuple)):
+    if geobox is not None:
+        _exact_geobox = geobox
+        if not q:
+            print(
+                "Grid taken from the source cube: %d x %d px in %s"
+                % (geobox.width, geobox.height, target_crs),
+                flush=True,
+            )
+    elif target_crs is not None and not isinstance(polygon, (list, tuple)):
         try:
             from odc.geo.geobox import GeoBox
 
