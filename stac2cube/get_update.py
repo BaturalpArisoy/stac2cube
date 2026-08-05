@@ -50,6 +50,38 @@ def _as_str_list(value):
     return [str(v) for v in np.asarray(value).ravel().tolist()]
 
 
+def _pixel_size(cube):
+    """The cube's ground sample distance, in CRS units.
+
+    odc-stac stamps a ``resolution`` attribute on the y coordinate, which is
+    where this used to be read from unconditionally. That attribute does NOT
+    survive every operation a cube can go through: ``reproject_stac`` and
+    ``mosaic_cubes`` both hand back a cube whose y coord carries no
+    ``resolution`` (verified), and reading it then raised
+    ``AttributeError: 'DataArray' object has no attribute 'resolution'`` -
+    from get_stac_parameters, so an opaque crash for every caller of it
+    (update mode, the cloud tools, build_cloud_mask_cube, the shadow tool).
+
+    The spacing is a property of the coordinate array itself, so it is simply
+    measured when the attribute is absent - the same source
+    :func:`geobox_from_cube` already derives the grid from. The attribute is
+    still preferred where present so nothing changes for an ordinary cube.
+    """
+    res = cube["y"].attrs.get("resolution")
+    if res is None:
+        res = getattr(cube["y"], "resolution", None)
+    if res is not None:
+        return float(abs(res))
+
+    y = np.asarray(cube["y"].values, dtype="float64")
+    if y.size < 2:
+        raise ValueError(
+            "Cannot determine this cube's pixel size: its y axis has "
+            f"{y.size} pixel(s) and it carries no y.attrs['resolution']."
+        )
+    return float(abs((y[-1] - y[0]) / (y.size - 1)))
+
+
 def geobox_from_cube(cube):
     """Recover the EXACT output grid of a stored cube as an odc ``GeoBox``.
 
@@ -198,16 +230,35 @@ def _reconcile_time_coords(stac_old, stac_new, q=False):
 
 
 def get_stac_parameters(stac_existing):
-
+    # A cube opened from a PATH is closed again before returning: everything
+    # below is copied out of it (attrs, a bbox list, the time values, a
+    # GeoBox), so nothing in the result needs the file to stay open. Leaving
+    # the handle open was not merely untidy - on Windows an open NetCDF cannot
+    # be renamed over, which is exactly what an in-place update then has to do
+    # (see export_stac's swap). _opened is closed in the finally below.
+    _opened = None
     if isinstance(stac_existing, (str, os.PathLike)):
-        stac_existing = open_cube(stac_existing)
+        _opened = open_cube(stac_existing)
+        stac_existing = _opened
         if "Time_Series" in list(stac_existing.data_vars):
             stac_existing = stac_existing.Time_Series
         elif "Cloud_Stack" in list(stac_existing.data_vars):
             stac_existing = stac_existing.Cloud_Stack
         else:
-            _require_timeseries_layer(stac_existing)
+            try:
+                _require_timeseries_layer(stac_existing)
+            finally:
+                _opened.close()
 
+    try:
+        return _read_stac_parameters(stac_existing)
+    finally:
+        if _opened is not None:
+            _opened.close()
+
+
+def _read_stac_parameters(stac_existing):
+    """The body of :func:`get_stac_parameters`, on an in-memory cube."""
     # Polygon. np.asarray: NetCDF stores the attr as an ndarray, Zarr (JSON
     # attrs) returns a plain list - normalize before .tolist().
     bbox = np.asarray(stac_existing.bbox)
@@ -242,7 +293,7 @@ def get_stac_parameters(stac_existing):
         mission = stac_existing.mission
         # Resolution (float(): the attr is a numpy scalar from NetCDF but a
         # plain Python float from Zarr's JSON attrs, which has no .item())
-        resolution = float(abs(stac_existing.y.resolution))
+        resolution = _pixel_size(stac_existing)
         # Spectral bands
         spectral_bands = _as_str_list(stac_existing.spectral_bands)
         # Indices
