@@ -24,10 +24,9 @@ from .stac_processing import (
     persist_vars,
 )
 from .get_spectral_indices import calculate_spectral_index
-from .export_cfg import export_stac, export_to_cogs
+from .export_cfg import export_stac, export_to_cogs, same_export_target
 
 # from .get_topo import calculate_topo
-# from .time_series_tools import generate_animation
 from .clip import (
     clip_stac,
     compute_cloud_percentage,
@@ -397,7 +396,6 @@ def get_stac_layers(
     stats=None,
     keep_timeseries=True,
     topographic_features=None,
-    animation=None,
     update=None,
     source=None,
     resampling_method=None,
@@ -826,7 +824,6 @@ def get_stac_layers(
                     stats=stats,
                     keep_timeseries=keep_timeseries,
                     topographic_features=topographic_features,
-                    animation=animation,
                     update=update,
                     source=source,
                     resampling_method=resampling_method,
@@ -914,6 +911,9 @@ def get_stac_layers(
     _s2c_shadow = False
     _s2c_nir_dark = nir_dark_threshold
     _s2c_proj = shadow_proj_distance
+    # Bands to ADD to an existing cube (update mode only). Bound here so the
+    # export decision further down can read it on a fresh build too.
+    add_bands = []
 
     # Target projection handed to get_stac: the user's crs= on a fresh build, the
     # cube's stored projection in update mode (see the restore below), or None to
@@ -997,7 +997,13 @@ def get_stac_layers(
             for b in user_bands:
                 bl = str(b).lower()
                 if mission == "sentinel_2_l2a":
-                    bl = _S2_BNUM_TO_COMMON.get(bl, bl)
+                    # .upper(): the alias table is keyed by the band NUMBER as
+                    # ESA writes it ("B04"), so looking it up with the
+                    # already-lowercased name never hit and the S2 band-number
+                    # aliases a fresh build accepts were rejected here -
+                    # bands=["B04"] became a request for a band called "b04".
+                    # A common name ("red") is not in the table either way.
+                    bl = _S2_BNUM_TO_COMMON.get(bl.upper(), bl)
                 if bl in _stored:
                     if not q:
                         print(f"Band '{bl}' is already in the cube - skipping.")
@@ -1131,6 +1137,21 @@ def get_stac_layers(
                             "This cube was s2cloudless + shadow masked but its "
                             "stored bands lack 'nir', which shadow needs."
                         )
+            elif cs == "externally_masked":
+                # The cube was masked with a layer whose method cannot be named
+                # in the vocabulary above (e.g. a shadow-only mask, or a mask
+                # cube carrying no provenance). Guessing would mask the new
+                # scenes differently from the stored ones and nothing would say
+                # so, which is exactly the failure this status exists to stop.
+                raise ValueError(
+                    "This cube was masked with a cloud mask whose method is not "
+                    "recorded (cloud_status='externally_masked'), so update mode "
+                    "cannot reproduce the same masking on the new scenes - they "
+                    "would be masked differently from the stored ones, silently. "
+                    "Rebuild the cube over the wider date range with the masking "
+                    "you want, or update the UNMASKED cube first and re-apply the "
+                    "mask afterwards."
+                )
             else:  # clouds_not_detected
                 cloud_masking = False
         # NOTE: do NOT force output=update here anymore.
@@ -1391,10 +1412,6 @@ def get_stac_layers(
     if indices:
         stac_indices = calculate_spectral_index(stac, mission, indices)
 
-    # Add animation here
-    # if animation is True:
-    #    generate_animation(stac)
-
     # Dataset -> DataArray
     if mission != "cop_dem_glo_30":
         bands = list(stac.data_vars.keys())
@@ -1543,10 +1560,9 @@ def get_stac_layers(
 
         # AOI mask so a non-rectangular polygon clip is respected by every
         # metric below (a plain bbox needs none - the whole grid is the AOI).
-        # It keeps outside-polygon clouds out of the cloud-% footprint, and it
-        # is the DENOMINATOR of scene coverage, so both the SCL-based coverage
-        # and the band-0 fallback further down need it - hence it is built here,
-        # once, ahead of both instead of inside the cloud branch.
+        # It is the DENOMINATOR of scene coverage, so both the SCL-based
+        # coverage and the band-0 fallback further down need it - hence it is
+        # built here, once, ahead of both instead of inside the cloud branch.
         _aoi_mask = None
         if not (isinstance(polygon, (list, tuple)) and len(polygon) == 4):
             try:
@@ -1554,6 +1570,28 @@ def get_stac_layers(
                 _aoi_mask = _aoi_mask_from_geometries(stac, _pproj.geometry.values)
             except Exception:
                 _aoi_mask = None
+
+        # ---- Which area is the cloud percentage measured over? ---------------
+        # The pixels the cube actually HOLDS, so the number can be checked
+        # against the cube itself. That is the polygon only when the cube was
+        # clipped to it.
+        #
+        # The AOI mask exists because CLIPPING leaves everything outside the
+        # polygon as NaN, which the percentage would otherwise count as cloud.
+        # An UNCLIPPED cube has no such NaN - it holds data across its whole
+        # bounding box - so masking there does not fix an inflation, it measures
+        # a sub-area of the cube and reports it as the cube's own figure.
+        # Measured on a polygon filling 33% of its bounding box (2024-04-08):
+        # the unclipped cube reported 12% while 14.61% of its pixels were masked
+        # cloud, i.e. 15%; the clipped cube reported 12% and its pixels agreed.
+        # Both read 12% whatever the user did, because both were measuring the
+        # polygon. Now the clip changes the figure, because it changes the cube.
+        #
+        # Scene coverage deliberately keeps the AOI denominator: it answers "how
+        # much of the area you asked for did this scene image", and a scene that
+        # covers the whole polygon but only part of the surrounding box has
+        # covered the AOI - dropping it as partial would be wrong.
+        _pct_aoi_mask = _aoi_mask if clip_raster else None
 
         # _has_new_dates guard: in update mode with nothing new to add, these
         # passes (shadow projection, cloud%) read pixels eagerly and would
@@ -1707,7 +1745,7 @@ def get_stac_layers(
             # spike that killed kernels on large AOIs. Percentages are unchanged
             # (verified bit-identical); see compute_cloud_percentage.
             pct_lazy = compute_cloud_percentage(
-                stac, aoi_mask=_aoi_mask, cloud_mask=_pct_mask, lazy=True,
+                stac, aoi_mask=_pct_aoi_mask, cloud_mask=_pct_mask, lazy=True,
                 imaged_mask=imaged_bool,
             )
             cov_lazy = (
@@ -2067,10 +2105,32 @@ def get_stac_layers(
 
             print(stac, flush=True)
 
-        img = _export_result(
-            stac, output, _export_format, crs, transform, compress=compress,
-            vrt=vrt, q=bool(q),
+        # An update that found nothing new, writing back onto the file it was
+        # read from: that file ALREADY holds exactly what would be written, so
+        # rewriting it is pure cost - and it is the one case the writer cannot
+        # do in place while the source cube is still open, which would leave a
+        # timestamped duplicate and a warning for a no-op. Say so and skip.
+        # (A cube that is up to date therefore keeps its existing layout: to
+        # change compression or container, export it to a new path.)
+        _nothing_to_add = (
+            update is not None
+            and not add_bands
+            and not _has_new_dates
+            and isinstance(update, (str, os.PathLike))
+            and same_export_target(output, update)
         )
+        if _nothing_to_add:
+            if not q:
+                print(
+                    f"Cube is already up to date - {output} left unchanged.",
+                    flush=True,
+                )
+            img = stac
+        else:
+            img = _export_result(
+                stac, output, _export_format, crs, transform, compress=compress,
+                vrt=vrt, q=bool(q),
+            )
         # Settings JSON beside the finished export (written last: a failed
         # build must not leave a config claiming a cube that is not there).
         if export_settings:

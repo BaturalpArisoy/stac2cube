@@ -5,6 +5,7 @@ from .get_update import geobox_from_cube, _require_same_grid
 from s2cloudless import S2PixelCloudDetector
 import numpy as np
 import xarray as xr
+import re
 import sys
 from tqdm.auto import tqdm
 from .export_cfg import export_stac, open_cube, normalize_stack_name
@@ -674,6 +675,87 @@ def get_cloud_layers(
     return cloud_only_stack
 
 
+# Recorded when a cube was masked with something whose method cannot be named
+# in the vocabulary update mode reproduces (see _status_from_mask_layer). It is
+# refused by update rather than guessed at - a wrong guess would mask the new
+# scenes differently from the stored ones, silently.
+EXTERNAL_MASK_STATUS = "externally_masked"
+
+
+def _parse_shadow_params(attrs):
+    """The ``shadow_params`` provenance string of a Cloud_Stack, as a dict.
+
+    :func:`stac2cube.shadow_masking.get_shadow_layers` writes it as
+    ``"cloud_source=scl, threshold=None, nir_dark_threshold=0.18,
+    proj_distance_km=1.0, ..."``. Returns {} when there is nothing to read.
+    """
+    text = str((attrs or {}).get("shadow_params") or "")
+    out = {}
+    for part in text.split(","):
+        if "=" not in part:
+            continue
+        key, _, value = part.partition("=")
+        out[key.strip()] = value.strip()
+    return out
+
+
+def _status_from_mask_layer(mask_layer, cloud):
+    """The ``cloud_status`` (and any shadow params) a mask layer implies.
+
+    ``cloud_status`` is not documentation: ``get_stac_layers(update=...)`` reads
+    it back and reproduces THAT strategy on the newly fetched scenes. A cube
+    that was masked but still records ``clouds_detected`` (= keep-clouds) gets
+    UNMASKED new scenes concatenated onto masked stored ones, with nothing to
+    warn anybody. Measured on a real cube: two new scenes at 100% cloud with
+    zero masked pixels, sitting beside stored scenes whose clouds were removed.
+
+    The band name carries the method:
+
+      ``cloud_mask_scl``   -> the SCL classification mask
+      ``cloud_mask_<N>``   -> s2cloudless at threshold N (self-encoding, which
+                              is what update parses the threshold back out of)
+      ``cloud_mask`` / ``cloudshadow_mask`` -> a get_shadow_layers stack, whose
+                              own ``shadow_params`` attribute records which
+                              cloud source and threshold produced it
+
+    Returns ``(status, shadow_attrs)``, or ``(None, {})`` when the method
+    cannot be named - a ``shadow_mask``-only masking, for instance, removes
+    shadows and KEEPS clouds, which no build setting reproduces.
+    """
+    name = str(mask_layer).strip().lower()
+
+    if name == "cloud_mask_scl":
+        return "scl_masked", {}
+
+    m = re.fullmatch(r"cloud_mask_(\d+)", name)
+    if m:
+        return f"cloud_mask_{int(m.group(1))}", {}
+
+    if name in ("cloud_mask", "cloudshadow_mask"):
+        params = _parse_shadow_params(getattr(cloud, "attrs", {}))
+        source = params.get("cloud_source", "")
+        with_shadow = name == "cloudshadow_mask"
+        shadow = {}
+        if with_shadow:
+            for key, src in (
+                ("nir_dark_threshold", "nir_dark_threshold"),
+                ("shadow_proj_distance", "proj_distance_km"),
+            ):
+                try:
+                    shadow[key] = float(params[src])
+                except (KeyError, TypeError, ValueError):
+                    return None, {}   # incomplete provenance: do not guess
+        if source == "scl":
+            return ("scl_shadow_masked" if with_shadow else "scl_masked"), shadow
+        try:
+            thr = int(float(params.get("threshold")))
+        except (TypeError, ValueError):
+            return None, {}
+        return f"cloud_mask_{thr}", shadow
+
+    return None, {}
+
+
 def mask_stac_clouds(stac, cloud, mask_layer, output=None, compress=False,
                      vrt=False, cloud_status=None, shadow_attrs=None,
                      extra_attrs=None):
@@ -727,8 +809,21 @@ def mask_stac_clouds(stac, cloud, mask_layer, output=None, compress=False,
         # Record how this cube was masked so update mode can reproduce it on new
         # scenes (self-encoding threshold, e.g. cloud_status="cloud_mask_50";
         # shadow_attrs carry the shadow params for the s2cloudless+shadow combo).
-        if cloud_status is not None:
-            masked_stac.attrs["cloud_status"] = cloud_status
+        #
+        # Derived from the mask layer when the caller did not say: the default
+        # used to be "leave whatever the source cube recorded", so a cube masked
+        # through the standalone tool or either GUI panel still claimed
+        # clouds_detected - keep-clouds - and its next update appended UNMASKED
+        # scenes beside the masked ones (see _status_from_mask_layer). Masking
+        # always changes the strategy, so it must always restate it.
+        if cloud_status is None:
+            cloud_status, _derived = _status_from_mask_layer(mask_layer, cloud)
+            if cloud_status is None:
+                cloud_status = EXTERNAL_MASK_STATUS
+            elif _derived:
+                # An explicit shadow_attrs still wins over the derived one.
+                shadow_attrs = {**_derived, **(shadow_attrs or {})}
+        masked_stac.attrs["cloud_status"] = cloud_status
         if shadow_attrs:
             for _k, _v in shadow_attrs.items():
                 masked_stac.attrs[_k] = _v

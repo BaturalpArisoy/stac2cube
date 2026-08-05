@@ -1,4 +1,5 @@
 from .vector_refiner import polygon_2_gdf
+import re
 import numpy as np
 import xarray as xr
 
@@ -663,6 +664,29 @@ def reproject_stac(stac, crs, resolution=None, resampling="nearest", q=False):
     return out
 
 
+_S2CLOUDLESS_STATUS = re.compile(r"^cloud_mask_\d+$")
+
+
+def _clouds_were_removed(stac):
+    """True when this cube's cloud pixels are NaN, so NaN identifies them.
+
+    Only then can a cloud percentage be recounted from the cube's own pixels.
+    On a KEEP-CLOUDS cube (``cloud_status='clouds_detected'``) the clouds are
+    still there as ordinary reflectance and nothing marks them, so counting NaN
+    returns 0 for every scene - which is what the clip refresh below used to
+    write over the real percentages (measured: a cube whose scenes were 100%
+    cloudy came back as 0% across the board).
+
+    ``externally_masked`` is deliberately excluded: something removed pixels,
+    but not necessarily clouds (a shadow-only mask removes shadows), so NaN
+    does not mean cloud there either.
+    """
+    status = str(stac.attrs.get("cloud_status") or "").strip().lower()
+    return status in ("scl_masked", "scl_shadow_masked") or bool(
+        _S2CLOUDLESS_STATUS.match(status)
+    )
+
+
 def clip_stac(stac, polygon, crs=None, bbox_crs="EPSG:4326"):
     """
     polygon:
@@ -735,21 +759,41 @@ def clip_stac(stac, polygon, crs=None, bbox_crs="EPSG:4326"):
     stac.attrs["crs"] = crs
     stac.attrs["transform"] = transform
 
-    # If this cube was cloud-masked (carries a cloud_percentage coord), the value
-    # is now stale: clipping changed the extent. Recompute it against the clipped
-    # AOI so the percentage reflects clouds *inside the clip only*. The rasterized
-    # AOI mask keeps pixels outside a non-rectangular polygon from being counted
-    # as cloud.
+    # If this cube was cloud-MASKED (carries a cloud_percentage coord and its
+    # clouds are NaN), the value is now stale: clipping changed the extent.
+    # Recompute it against the clipped AOI so the percentage reflects clouds
+    # *inside the clip only*. The rasterized AOI mask keeps pixels outside a
+    # non-rectangular polygon from being counted as cloud. Verified against the
+    # SCL mask on both a plain and an already-clipped cube (6% -> 9% and 11%,
+    # matching the truth for the clipped area in each case).
+    #
+    # A KEEP-CLOUDS cube cannot be recounted this way and keeps its stored
+    # values, which then describe the area the cube was BUILT over rather than
+    # the clip - recorded in cloud_percentage_scope and stated once, because a
+    # stale real measurement is still a measurement while the alternative here
+    # was a fabricated 0% for every scene. Getting the true number back needs
+    # the scene classification, which the cube does not carry; that is a
+    # re-query, not a clip.
     if "cloud_percentage" in stac.coords:
-        try:
-            aoi_mask = _aoi_mask_from_geometries(stac, pproj.geometry.values)
-            pct = compute_cloud_percentage(stac, aoi_mask=aoi_mask)
-            if pct is not None:
-                stac = stac.assign_coords(
-                    cloud_percentage=("time", np.asarray(pct.data))
-                )
-        except Exception:
-            # Never let a percentage refresh break the actual clip result.
-            pass
+        if _clouds_were_removed(stac):
+            try:
+                aoi_mask = _aoi_mask_from_geometries(stac, pproj.geometry.values)
+                pct = compute_cloud_percentage(stac, aoi_mask=aoi_mask)
+                if pct is not None:
+                    stac = stac.assign_coords(
+                        cloud_percentage=("time", np.asarray(pct.data))
+                    )
+                    stac.attrs.pop("cloud_percentage_scope", None)
+            except Exception:
+                # Never let a percentage refresh break the actual clip result.
+                pass
+        else:
+            stac.attrs["cloud_percentage_scope"] = "pre_clip_aoi"
+            print(
+                "Note: this cube's clouds were detected but kept, so the cloud "
+                "percentages cannot be recounted from its pixels. They are left "
+                "as measured over the area the cube was built for, not the clip.",
+                flush=True,
+            )
 
     return stac

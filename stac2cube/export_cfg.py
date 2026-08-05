@@ -1,5 +1,8 @@
 import contextlib
+import gc
 import os
+import shutil
+import weakref
 import numpy as np
 import dask
 from dask.diagnostics import ProgressBar
@@ -177,6 +180,52 @@ def _frame_chunked_netcdf(path):
     return xr.open_dataset(path, chunks={})
 
 
+# Every cube handed out by open_cube, keyed by its normalised path and held
+# WEAKLY so tracking never keeps a Dataset (or its file handle) alive. Read by
+# _release_readers when an in-place overwrite is blocked by one of them - see
+# _swap_into_place.
+_OPEN_CUBES = {}
+
+
+def _cube_key(path):
+    return os.path.normcase(os.path.realpath(str(path)))
+
+
+def _track_open_cube(path, ds):
+    """Remember that ``ds`` reads from ``path``; returns ``ds`` unchanged."""
+    try:
+        key = _cube_key(path)
+        refs = [r for r in _OPEN_CUBES.get(key, []) if r() is not None]
+        refs.append(weakref.ref(ds))
+        _OPEN_CUBES[key] = refs
+    except TypeError:
+        pass          # not weak-referenceable: tracking is best-effort
+    return ds
+
+
+def _close_open_cubes(path):
+    """Close every still-live cube opened from ``path``. Returns True if any was.
+
+    Closing the OPENER is what actually frees the handle: a DataArray derived
+    from it (what update_stac hands back) keeps the file open, and calling
+    close() on that derived object does nothing (measured: handles 1 -> 1,
+    against 2 -> 0 when the opener itself is closed). xarray reopens the file
+    transparently if the derived object is read again, so this frees the handle
+    without breaking anything the caller still holds.
+    """
+    closed = False
+    for ref in _OPEN_CUBES.pop(_cube_key(path), []):
+        ds = ref()
+        if ds is None:
+            continue
+        try:
+            ds.close()
+            closed = True
+        except Exception:
+            pass
+    return closed
+
+
 def open_cube(path, chunks=None):
     """Open a cube from disk, dispatching on the path extension.
 
@@ -244,10 +293,12 @@ def open_cube(path, chunks=None):
         _restore_array_attrs(out.attrs)
         for var in out.variables.values():
             _restore_array_attrs(var.attrs)
-        return normalize_stack_name(out)
+        return _track_open_cube(path, normalize_stack_name(out))
     if isinstance(chunks, str) and chunks == "frames":
-        return normalize_stack_name(_frame_chunked_netcdf(path))
-    return normalize_stack_name(xr.open_dataset(path, chunks=chunks))
+        return _track_open_cube(path, normalize_stack_name(_frame_chunked_netcdf(path)))
+    return _track_open_cube(
+        path, normalize_stack_name(xr.open_dataset(path, chunks=chunks))
+    )
 
 
 def _is_dask_backed(obj) -> bool:
@@ -727,6 +778,177 @@ def _resolve_geo_attr(stac, name):
     )
 
 
+def same_export_target(a, b) -> bool:
+    """Do two paths name the same file / store on disk?
+
+    Normalised rather than compared as text: the update flow reaches the same
+    cube as an absolute path, a relative one and (on Windows) in either case.
+    ``os.path.samefile`` is not used because it needs both to exist.
+    """
+    if not a or not b:
+        return False
+    return os.path.normcase(os.path.realpath(str(a))) == os.path.normcase(
+        os.path.realpath(str(b))
+    )
+
+
+def _timestamped_path(output):
+    """``cube.nc`` -> ``cube_20260805_143012.nc``; a Zarr store keeps ``.zarr``."""
+    from datetime import datetime
+
+    p = Path(str(output))
+    stamp = datetime.now().strftime("_%Y%m%d_%H%M%S")
+    return str(p.with_name(p.stem + stamp + p.suffix))
+
+
+def _temp_export_path(output):
+    """A sibling of ``output`` to write into before swapping it in.
+
+    Same DIRECTORY, so the swap is a rename within one filesystem rather than a
+    copy, and the same EXTENSION, so a '.zarr' target's temp is itself a '.zarr'
+    - a temp named 'cube.zarr.tmp' is written as NetCDF by the dispatch below
+    and renaming that into place produces a store nothing can open (measured).
+    """
+    p = Path(str(output))
+    return str(p.with_name(f"{p.stem}.writing-{os.getpid()}{p.suffix}"))
+
+
+def _remove_export_target(path, is_zarr):
+    """Delete a file or store if it is there, without complaining if it is not."""
+    if is_zarr:
+        shutil.rmtree(path, ignore_errors=True)
+    elif os.path.exists(path):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+def _warn_export_diverted(requested, actual):
+    """Say that the cube is NOT in the file that was asked for.
+
+    Deliberately not gated on ``q``: the quiet contexts (SLURM, the GUI) are
+    exactly the ones where this used to pass unnoticed, and the consequence -
+    the user's cube silently not being updated - is worth one line of output.
+    """
+    print(
+        f"WARNING: could not overwrite {requested} - it is still open in this "
+        f"or another process. The cube was written to {actual} instead and the "
+        f"original file is UNCHANGED. Close whatever is holding it and rename "
+        f"the new file over it, or export again.",
+        flush=True,
+    )
+
+
+def _release_readers(objects, path):
+    """Close any of ``objects`` that is reading from ``path``. Returns True if
+    something was closed.
+
+    Only ever called when the alternative is NOT writing the file at all (see
+    :func:`_swap_into_place`): an in-place update hands back a cube still
+    backed by the file it is replacing, and on Windows that open handle blocks
+    the rename. By the time this runs the new cube is already complete on disk,
+    so the object's remaining job is to be returned - and what it would read is
+    the content that is being replaced anyway.
+    """
+    closed = _close_open_cubes(path)
+    for obj in objects:
+        if obj is None:
+            continue
+        sources = [getattr(obj, "encoding", {}).get("source")]
+        variables = getattr(obj, "variables", None)
+        if variables is not None:
+            sources += [v.encoding.get("source") for v in variables.values()]
+        if any(s and same_export_target(s, path) for s in sources):
+            try:
+                obj.close()
+                closed = True
+            except Exception:
+                pass
+
+    # Closing every xarray object that reads the file is NOT enough: xarray
+    # keeps the underlying netCDF4 handle in a process-global LRU cache
+    # (backends.file_manager.FILE_CACHE) that outlives the Dataset it was
+    # opened for. Measured on an in-place band addition: two handles on the
+    # target, one owned by an object, one by the cache, and the collected
+    # Dataset had already been garbage-collected while its handle stayed open.
+    # Evicting the cache closes it; xarray reopens any file it still needs on
+    # the next read, so nothing the caller holds is broken by this.
+    try:
+        from xarray.backends.file_manager import FILE_CACHE
+
+        if len(FILE_CACHE):
+            FILE_CACHE.clear()
+            closed = True
+    except Exception:
+        pass
+
+    if closed:
+        gc.collect()
+    return closed
+
+
+def _swap_into_place(temp, output, is_zarr, release=None):
+    """Move a finished temp export onto ``output``; return the path holding it.
+
+    ``output`` is never removed until the replacement is in place, so a failure
+    at any point leaves the ORIGINAL cube intact. That is the property this
+    whole detour exists for - see the note in :func:`export_stac`.
+
+    ``release`` is called once if the first rename is refused: it closes any
+    reader of ``output`` we were handed, which is what an in-place update needs
+    (the cube it returns is still backed by the file being replaced).
+    """
+    if not is_zarr:
+        for attempt in range(2):
+            try:
+                os.replace(temp, output)
+                return output
+            except PermissionError:
+                # A reader that has been dropped but not yet collected still
+                # holds the handle; on Windows that is enough to block the
+                # rename. Release ours, collect, and try once more.
+                if release is not None and attempt == 0:
+                    release()
+                gc.collect()
+        fallback = _timestamped_path(output)
+        os.replace(temp, fallback)
+        _warn_export_diverted(output, fallback)
+        return fallback
+
+    # A Zarr store is a DIRECTORY: move the old one aside, put the new one in
+    # its place, and only then delete the old one. Deleting first is what
+    # destroyed a store written onto itself - the writer removed the very
+    # chunks it was still lazily reading from.
+    aside = f"{output}.replaced-{os.getpid()}"
+    shutil.rmtree(aside, ignore_errors=True)
+    try:
+        os.rename(output, aside)
+    except OSError:
+        # Zarr keeps no persistent handles, so this is rare - but if something
+        # does hold the directory, release our readers and try once more before
+        # giving up on the target (same courtesy as the NetCDF branch).
+        if release is not None:
+            release()
+        try:
+            os.rename(output, aside)
+        except OSError:
+            fallback = _timestamped_path(output)
+            os.rename(temp, fallback)
+            _warn_export_diverted(output, fallback)
+            return fallback
+    try:
+        os.rename(temp, output)
+    except OSError:
+        os.rename(aside, output)          # put the original back, untouched
+        fallback = _timestamped_path(output)
+        os.rename(temp, fallback)
+        _warn_export_diverted(output, fallback)
+        return fallback
+    shutil.rmtree(aside, ignore_errors=True)
+    return output
+
+
 def export_stac(
     stac,
     output,
@@ -760,6 +982,19 @@ def export_stac(
     so for a lazy input it stays lazy (this was already true of the Zarr path).
     Callers that want the values in memory should ``.compute()`` the result -
     or, cheaper, re-open the file that was just written.
+
+    OVERWRITING an existing cube goes through a sibling temp file/store which
+    is only swapped in once the write has finished, so writing a cube onto the
+    path it was READ from is safe - the source is still there to be read while
+    the replacement is built, and a failure at any point leaves the original
+    untouched. Costs one extra file in the output directory for the duration of
+    the write, and nothing at all when the target does not exist yet.
+
+    If the target cannot be replaced (on Windows a file that is still open
+    cannot be renamed over), the new cube is kept under
+    ``<stem>_<timestamp><ext>`` and a WARNING naming both paths is printed -
+    NOT suppressed by ``q``, because the file the caller asked for is then not
+    the file that holds the cube.
     """
     if not isinstance(stac, (xr.DataArray, xr.Dataset)):
         raise TypeError(
@@ -796,20 +1031,39 @@ def export_stac(
     else:
         ds = stac
 
+    # --- Write beside the target, then swap it in ----------------------------
+    # Nothing that already exists at `output` is touched until the new cube is
+    # COMPLETE on disk. Writing straight to the target destroyed it in the one
+    # case that matters most - a cube read from the very path being written:
+    #
+    #   * Zarr deleted the store before the lazy read OF that store happened,
+    #     so the result was all no-data (measured: 100% NaN on a plain
+    #     re-export, 66.7% through update mode, with no error either time);
+    #   * NetCDF could not delete a file that is open on Windows, and silently
+    #     redirected the write to a timestamped sibling while every report
+    #     still said the dates and bands had gone in.
+    #
+    # A sibling temp fixes both: the source is still there to be read from
+    # while it is written, and a failure anywhere leaves the original alone.
+    # The cost is transient - one extra file/store in the output directory for
+    # the duration of the write - and only when there is something to protect.
+    target_exists = os.path.isdir(output) if is_zarr else os.path.exists(output)
+    write_path = _temp_export_path(output) if target_exists else output
+    if target_exists:
+        _remove_export_target(write_path, is_zarr)   # leftover from a crash
+
     if is_zarr:
-        _write_zarr(ds, output, overwrite, q=q)
+        try:
+            _write_zarr(ds, write_path, overwrite, q=q)
+        except BaseException:
+            if target_exists:
+                _remove_export_target(write_path, is_zarr)
+            raise
+        if target_exists:
+            output = _swap_into_place(write_path, output, is_zarr)
         if not q:
             print(f"Export is done: {output}")
         return stac
-
-    if overwrite and os.path.exists(output):
-        try:
-            os.remove(output)
-        except PermissionError:
-            from datetime import datetime
-
-            suffix = datetime.now().strftime("_%Y%m%d_%H%M%S")
-            output = str(Path(output).with_stem(Path(output).stem + suffix))
 
     # NetCDF used to be written from a fully materialized array: the whole cube
     # was .compute()d first, which peaks at ~2x its size (dask holds every
@@ -830,13 +1084,24 @@ def export_stac(
         # _stream_chunks); uncompressed per-slice streaming is already both
         # cheaper and faster than materializing.
         ds = _stream_chunks(ds)
-    if _is_dask_backed(ds):
-        # Keeps the familiar progress bar: the compute now happens inside
-        # to_netcdf, on the same dask scheduler ProgressBar hooks.
-        with _progress(q):
-            ds.to_netcdf(output)
-    else:
-        ds.to_netcdf(output)
+    try:
+        if _is_dask_backed(ds):
+            # Keeps the familiar progress bar: the compute now happens inside
+            # to_netcdf, on the same dask scheduler ProgressBar hooks.
+            with _progress(q):
+                ds.to_netcdf(write_path)
+        else:
+            ds.to_netcdf(write_path)
+    except BaseException:
+        if target_exists:
+            _remove_export_target(write_path, is_zarr)
+        raise
+
+    if target_exists:
+        output = _swap_into_place(
+            write_path, output, is_zarr,
+            release=lambda: _release_readers([stac, ds], output),
+        )
 
     if not q:
         print(f"Export is done: {output}")

@@ -1071,7 +1071,13 @@ def get_stac(
         target_crs = crs_attr_string(geobox.crs)
 
     if mission == "sentinel_2_l2a":
-        bands = list(dict.fromkeys(_S2_BNUM_TO_COMMON.get(b, b) for b in bands))
+        # Band-number aliases resolve whatever case they are written in: the
+        # table is keyed as ESA writes them ("B04"), so an exact lookup accepted
+        # "B04" and rejected "b04" with "No such band/alias". A common name
+        # ("red") is not in the table in either case and passes through.
+        bands = list(
+            dict.fromkeys(_S2_BNUM_TO_COMMON.get(str(b).upper(), b) for b in bands)
+        )
 
     if cloud_masking is True:
         if mission == "sentinel_2_l2a" and "scl" not in bands:
