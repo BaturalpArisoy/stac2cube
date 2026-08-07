@@ -209,10 +209,67 @@ def _dilate_mask_t(mask: torch.Tensor, radius_px: int) -> torch.Tensor:
     return m_dil[0, 0] > 0
 
 
+def _fill_nan_nearest(arr: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    """
+    Replace every masked pixel of a (band, y, x) array with the value of the
+    nearest unmasked pixel, band by band.
+
+    This is the input-side half of the NaN handling. Feeding the model
+    ``NaN -> 0`` puts a reflectance cliff (0.2 -> 0.0) at every cloud hole and
+    along the clip outline; the CNN's 41-px receptive field and the Fourier
+    hard constraint then smear that cliff into the *valid* data next to it.
+    Measured on a simulated clip boundary (RGBN model, 51% masked): the valid
+    pixel touching the mask came out 0.046 off the value it has when the same
+    scene is super-resolved without any mask - 85% of the scene's own standard
+    deviation - and the contamination stayed above 0.001 for ~20 output pixels.
+    Extending the data instead of zeroing it drops that to 0.0027, a 17x
+    improvement, which is why the mask dilation (``nan_pixel_buffer``) no
+    longer has to hide a wide ring of ruined pixels.
+
+    The filled values only ever act as *context* for the model: every masked
+    pixel is written back to NaN after inference.
+    """
+    from scipy import ndimage
+
+    out = arr.copy()
+    # indices of the closest unmasked pixel for every pixel in the grid
+    yi, xi = ndimage.distance_transform_edt(
+        mask, return_distances=False, return_indices=True
+    )
+    src_y, src_x = yi[mask], xi[mask]
+    for c in range(out.shape[0]):
+        # source and destination pixel sets are disjoint, so this is safe in place
+        out[c][mask] = out[c][src_y, src_x]
+    return out
+
+
 # ==========================================================
 # Optimized replacement for sen2sr.predict_large
 # ==========================================================
 PATCH_SIZE = 128  # SEN2SRLite hard-constraint masks are baked for 128-px patches
+
+# Replicate-padding added to every side of the LR image before inference and
+# removed again afterwards, in INPUT pixels.
+#
+# Everything in the SEN2SR stack treats "outside the tensor" as zero: the CNN's
+# convolutions zero-pad, the Fourier hard constraint wraps the patch around, and
+# - by far the worst - sen2sr's `resample_sentinel2_bands` and referencex4 run
+# `F.interpolate(..., mode="bilinear", antialias=True)`, whose kernel is not
+# renormalised at the tensor border. Inside the image that is invisible because
+# the 32-px patch overlap discards every patch border, but the outer border of
+# the whole image has no neighbour to overwrite it. Measured on the SEN2SR
+# example chip with the full_spectral model, the outermost output pixel ring
+# came out systematically DARK: swir22 -0.115 on a band mean of 0.254 (-45%),
+# swir16 -0.084, rededge2 -0.070, nir08 -0.045 - i.e. a dark rim on exactly the
+# six 20-m bands, the ones that go through those interpolate calls. The four
+# native 10-m bands were unaffected (< 0.003). "20to10" shows the same rim, ~10x
+# milder. Padding the input and cropping the pad away afterwards moves that rim
+# into throwaway pixels: the bias drops to +0.002 or less on every band, and the
+# mean absolute error over the outer 24 output pixels falls 2-4x.
+#
+# Replicate ("edge") beat mirror ("reflect") padding at every distance in both
+# models, and the numbers were already converged at 8 input px; 16 is margin.
+EDGE_PAD_LR = 16
 
 
 def _patch_positions(dim: int, chunk: int, step: int) -> list[int]:
@@ -288,11 +345,17 @@ def predict_large_batched(
             if output is None:
                 res_n = result.shape[-1] // PATCH_SIZE
                 skip = overlap * res_n // 2
-                output = torch.zeros(
-                    (result.shape[1], H * res_n, W * res_n),
-                    dtype=torch.float32,
-                    device="cpu",
-                )
+                # Allocated OUTSIDE inference mode on purpose: a tensor created
+                # inside it is an "inference tensor" that PyTorch refuses to
+                # update in place later, which would break the caller's NaN
+                # fill. Cloning afterwards would instead double the peak memory
+                # of the largest array in the whole pipeline.
+                with torch.inference_mode(False):
+                    output = torch.zeros(
+                        (result.shape[1], H * res_n, W * res_n),
+                        dtype=torch.float32,
+                        device="cpu",
+                    )
 
             result = result.cpu()  # single transfer for the whole batch
             for k, (y, x) in enumerate(batch_pos):
@@ -320,8 +383,9 @@ def superresolve_single_time(
     model_band_order,
     old_res=10.0,
     new_res=2.5,
-    nan_pixel_buffer=8,
-    edge_crop_px=8,
+    nan_pixel_buffer=0,
+    edge_crop_px=0,
+    edge_pad_px=EDGE_PAD_LR,
     batch_size=8,
     autocast_dtype=None,
 ):
@@ -329,9 +393,14 @@ def superresolve_single_time(
     Super-resolve a SINGLE time slice.
 
     Order:
-      1) SR full image
-      2) Crop edges in HR (edge_crop_px)
-      3) Apply NaN buffer in HR (nan_pixel_buffer)
+      1) Extend the NaN pixels with their nearest valid neighbour, so the model
+         sees no reflectance cliff at cloud holes or the clip outline
+      2) Replicate-pad the image by edge_pad_px so the model's own border
+         artifacts land outside the real extent
+      3) SR
+      4) Crop the pad away - the output covers exactly the input extent
+      5) Optional extra edge crop (edge_crop_px, off by default)
+      6) Restore NaN over the masked pixels, dilated by nan_pixel_buffer
     """
     import torch
     import torch.nn.functional as F
@@ -352,30 +421,43 @@ def superresolve_single_time(
     new_order = list(model_band_order)
     da_reordered = da.sel(band=new_order).transpose("band", "y", "x")
 
-    # --- pad each axis independently to at least one 128-px patch ---
-    # (the batched predictor handles non-square inputs, so no square padding:
-    #  that used to waste up to ~2.5x compute on elongated AOIs)
-    ny, nx = da_reordered.sizes["y"], da_reordered.sizes["x"]
-    pad_y = max(PATCH_SIZE - ny, 0)
-    pad_x = max(PATCH_SIZE - nx, 0)
-    pad_dict = {
-        "y": (pad_y // 2, pad_y - pad_y // 2),
-        "x": (pad_x // 2, pad_x - pad_x // 2),
-    }
-
     # ============================================================
-    # 1) READ ONCE, BUILD LR NAN/CLOUD MASK + INFERENCE INPUT
+    # 1) READ ONCE, BUILD LR NAN/CLOUD MASK
     # ============================================================
     arr_lr = da_reordered.to_numpy().astype(np.float32, copy=False)
-    arr_lr = np.pad(
-        arr_lr, ((0, 0), pad_dict["y"], pad_dict["x"]), constant_values=0.0
-    )
+    ny, nx = arr_lr.shape[1], arr_lr.shape[2]
+
+    # A pixel is masked if ANY band is missing there: the bands are written back
+    # to NaN together, so they must also be given context together.
     mask_lr = np.isnan(arr_lr).any(axis=0)
 
     # ============================================================
-    # 2) INFERENCE
+    # 2) EXTEND THE DATA INTO THE NaN AREAS (context only)
     # ============================================================
-    X = torch.from_numpy(arr_lr).to(device)
+    if mask_lr.any() and not mask_lr.all():
+        arr_lr = _fill_nan_nearest(arr_lr, mask_lr)
+
+    # ============================================================
+    # 3) PAD: edge_pad_px on every side, plus whatever is still missing to
+    #    reach one full 128-px patch on each axis. Replicate, never zeros -
+    #    a zero border is exactly the artifact this is here to avoid.
+    #    (Each axis is padded independently; the batched predictor handles
+    #    non-square inputs, so squaring would only waste compute.)
+    # ============================================================
+    p = max(int(edge_pad_px), 0)
+    extra_y = max(PATCH_SIZE - (ny + 2 * p), 0)
+    extra_x = max(PATCH_SIZE - (nx + 2 * p), 0)
+    pad_y = (p + extra_y // 2, p + extra_y - extra_y // 2)
+    pad_x = (p + extra_x // 2, p + extra_x - extra_x // 2)
+    if any(pad_y + pad_x):
+        arr_lr = np.pad(arr_lr, ((0, 0), pad_y, pad_x), mode="edge")
+
+    # ============================================================
+    # 4) INFERENCE
+    # ============================================================
+    X = torch.from_numpy(np.ascontiguousarray(arr_lr)).to(device)
+    # only reachable for an all-NaN slice (nothing to extend from) or for a
+    # stray inf; ordinary gaps were filled above
     X = torch.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
 
     superX = predict_large_batched(
@@ -387,37 +469,25 @@ def superresolve_single_time(
     )
 
     # ============================================================
-    # 3) UPSAMPLE LR MASK TO HR (stays on `device` until applied)
+    # 5) CROP THE PADDING BACK OFF
+    #    The result now covers exactly the input extent, so the output
+    #    transform is just the input one at `scale` sub-pixels.
     # ============================================================
     scale = int(round(old_res / new_res))  # 10m -> 2.5m => 4
+    y0 = pad_y[0] * scale
+    x0 = pad_x[0] * scale
+    superX = superX[:, y0:y0 + ny * scale, x0:x0 + nx * scale]
+    cropped_tf = transform * Affine.scale(1 / scale, 1 / scale)
+
+    # ============================================================
+    # 6) UPSAMPLE THE LR MASK TO HR (on the un-padded grid)
+    # ============================================================
     mask_lr_t = torch.from_numpy(mask_lr.astype(np.float32))[None, None, :, :].to(device)
     mask_hr_t = F.interpolate(mask_lr_t, scale_factor=scale, mode="nearest")
     mask_hr = mask_hr_t[0, 0].bool()
 
     # ============================================================
-    # 4) BUILD FULL HR TRANSFORM
-    # ============================================================
-    pad_y_top_hr = pad_dict["y"][0] * scale
-    pad_x_left_hr = pad_dict["x"][0] * scale
-
-    scaled_tf = transform * Affine.scale(1 / scale, 1 / scale)
-    full_tf = scaled_tf * Affine.translation(-pad_x_left_hr, -pad_y_top_hr)
-
-    # ============================================================
-    # 5) CROP PADDING BACK TO ORIGINAL HR EXTENT
-    # ============================================================
-    orig_h_lr = da_reordered.sizes["y"]
-    orig_w_lr = da_reordered.sizes["x"]
-
-    y0, y1 = pad_y_top_hr, pad_y_top_hr + orig_h_lr * scale
-    x0, x1 = pad_x_left_hr, pad_x_left_hr + orig_w_lr * scale
-
-    superX = superX[:, y0:y1, x0:x1]
-    mask_hr = mask_hr[y0:y1, x0:x1]
-    cropped_tf = full_tf * Affine.translation(x0, y0)
-
-    # ============================================================
-    # 6) EDGE CROP IN HR (BEFORE NAN BUFFER)
+    # 7) OPTIONAL EXTRA EDGE CROP (off by default - see super_resolve_cube)
     # ============================================================
     if edge_crop_px > 0:
         H = superX.shape[1]
@@ -428,7 +498,7 @@ def superresolve_single_time(
             cropped_tf = cropped_tf * Affine.translation(edge_crop_px, edge_crop_px)
 
     # ============================================================
-    # 7) APPLY NAN BUFFER IN HR (AFTER EDGE CROP)
+    # 8) RESTORE NaN OVER THE MASKED PIXELS (dilated by nan_pixel_buffer)
     # ============================================================
     if nan_pixel_buffer > 0:
         mask_hr = _dilate_mask_t(mask_hr, radius_px=int(nan_pixel_buffer))
@@ -437,7 +507,7 @@ def superresolve_single_time(
     superX.masked_fill_(mask_hr.cpu().unsqueeze(0), float("nan"))
 
     # ============================================================
-    # 8) BUILD FINAL XARRAY OUTPUT (already cropped)
+    # 9) BUILD FINAL XARRAY OUTPUT (already cropped)
     # ============================================================
     arr = superX.numpy()
     var_name = da.name or "Time_Series"
@@ -490,7 +560,8 @@ def super_resolve_cube(
     input_path,
     output_path: str | None = None,
     var_name="Time_Series",
-    nan_pixel_buffer: int | None = None,  # NaN-mask dilation in OUTPUT pixels; None = per-mode default
+    nan_pixel_buffer: int = 0,      # extra NaN-mask dilation, in OUTPUT pixels
+    edge_crop_px: int = 0,          # extra crop off every side, in OUTPUT pixels
     model_type: str | None = None,  # None | "rgbn" | "full_spectral" | "20to10"
     model_dir: str | None = None,   # folder containing the 'model' dir (e.g. interactive/)
     batch_size: int | None = None,  # patches per forward pass; None = auto
@@ -515,11 +586,34 @@ def super_resolve_cube(
         built at 10-m resolution). The 10-m bands pass through unchanged; the
         output grid is identical to the input grid (no pixel-size change).
 
+    Extent:
+      The output covers exactly the same ground as the input - same corner
+      coordinates, same footprint, only a finer grid. Earlier versions shrank
+      the cube by 8 output pixels (20 m) on every side to hide the model's
+      border artifacts; those are now dealt with by padding the model's input
+      instead (see EDGE_PAD_LR), so nothing is thrown away.
+
     nan_pixel_buffer:
-      Radius (in OUTPUT pixels) by which the NaN/cloud mask is dilated to
-      remove SR halo artifacts around masked areas. None (default) picks 8 for
-      the 2.5-m modes and 2 for "20to10" - the same 20-m physical buffer in
-      both cases.
+      Extra radius, in OUTPUT pixels, by which the NaN mask is dilated before
+      it is written back over the result. 0 (default) keeps every pixel that
+      was present in the input.
+
+      This used to default to 8 (2 for "20to10") because the model was fed
+      ``NaN -> 0``, which put a reflectance cliff at every cloud hole and along
+      the clip outline and ruined a wide ring of otherwise good pixels around
+      it. The model is now fed the nearest valid value instead, which cuts the
+      contamination of the neighbouring valid pixel by ~17x (see
+      _fill_nan_nearest) - down to the level of an ordinary image border - so
+      the ring no longer needs hiding. Raise it if you want a safety margin
+      around cloud masks anyway, e.g. because the mask itself is known to be a
+      pixel or two too tight.
+
+    edge_crop_px:
+      Extra pixels trimmed off each side of the output, 0 by default. The
+      padding described under "Extent" already removes the systematic border
+      artifact; this is here for callers who want a hard margin regardless.
+      Note it shrinks the cube: 8 here means 8 OUTPUT pixels, i.e. 20 m per
+      side in the 2.5-m modes.
 
     batch_size:
       Number of 128x128 patches super-resolved per model call. None picks a
@@ -714,21 +808,14 @@ def super_resolve_cube(
     # ---------------------------
     # select bands + model input order + model path + resolutions
     # ---------------------------
-    # The 2.5-m modes upscale the grid 4x; edge_crop_px=8 output px = 2 input
-    # px cropped to remove boundary artifacts. "20to10" keeps the grid size
-    # (the six 20-m bands gain detail on the existing 10-m grid), so the same
-    # 2-input-px crop is edge_crop_px=2.
+    # The 2.5-m modes upscale the grid 4x; "20to10" keeps the grid size (the six
+    # 20-m bands gain detail on the existing 10-m grid). Neither crops anything
+    # off the edges any more - the model's border artifact is handled by
+    # padding its input, not by discarding output (see EDGE_PAD_LR).
     old_res = 10.0
-    if model_type_used == "20to10":
-        new_res = 10.0
-        edge_crop_px = 2
-        default_nan_buffer = 2
-    else:
-        new_res = 2.5
-        edge_crop_px = 8
-        default_nan_buffer = 8
-    if nan_pixel_buffer is None:
-        nan_pixel_buffer = default_nan_buffer
+    new_res = 10.0 if model_type_used == "20to10" else 2.5
+    nan_pixel_buffer = max(int(nan_pixel_buffer or 0), 0)
+    edge_crop_px = max(int(edge_crop_px or 0), 0)
 
     if model_type_used == "rgbn":
         _validate_required_bands(spectral_set, RGBN_REQUIRED, model_type_used)
