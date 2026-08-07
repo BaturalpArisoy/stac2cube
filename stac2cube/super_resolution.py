@@ -1,11 +1,13 @@
+# Annotations stay strings at runtime so torch.Tensor / torch.nn.Module in the
+# signatures below do not drag torch in when this module is merely imported.
+# Nothing in the package introspects __annotations__.
+from __future__ import annotations
+
 import os
 import io
 import sys
 import ast
 import contextlib
-import mlstac
-import torch
-import torch.nn.functional as F
 import xarray as xr
 import numpy as np
 import rioxarray
@@ -184,6 +186,9 @@ def dilate_mask_2d(mask: np.ndarray, radius_px: int) -> np.ndarray:
     if radius_px <= 0:
         return mask
 
+    import torch
+    import torch.nn.functional as F
+
     m = torch.from_numpy(mask.astype(np.float32))[None, None, :, :]  # (1,1,H,W)
     k = 2 * radius_px + 1
     m_dil = F.max_pool2d(m, kernel_size=k, stride=1, padding=radius_px)
@@ -194,6 +199,10 @@ def _dilate_mask_t(mask: torch.Tensor, radius_px: int) -> torch.Tensor:
     """Dilate a 2D boolean mask tensor by `radius_px` pixels on its own device."""
     if radius_px <= 0:
         return mask
+
+    import torch
+    import torch.nn.functional as F
+
     m = mask.to(torch.float32)[None, None, :, :]
     k = 2 * radius_px + 1
     m_dil = F.max_pool2d(m, kernel_size=k, stride=1, padding=radius_px)
@@ -233,6 +242,8 @@ def predict_large_batched(
 
     Returns the super-resolved image as a float32 CPU tensor (C_out, H*r, W*r).
     """
+    import torch
+
     device = X.device
     _, H, W = X.shape
     step = PATCH_SIZE - overlap
@@ -322,6 +333,9 @@ def superresolve_single_time(
       2) Crop edges in HR (edge_crop_px)
       3) Apply NaN buffer in HR (nan_pixel_buffer)
     """
+    import torch
+    import torch.nn.functional as F
+
     da = da.sel(band=bands_to_use)
     da.rio.set_spatial_dims("x", "y", inplace=True)
 
@@ -553,6 +567,9 @@ def super_resolve_cube(
       unchanged from the input - 10 on a standard cube - for "20to10"). Every
       other attribute is inherited from the input cube.
     """
+
+    import mlstac
+    import torch
 
     # ---------------------------
     # local helpers (kept inside for copy/paste simplicity)

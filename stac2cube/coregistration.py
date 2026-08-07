@@ -13,8 +13,8 @@ from .export_cfg import (
     normalize_stack_name,
     resolve_stack_var,
 )
-from arosics import COREG
-from geoarray import GeoArray
+# arosics/geoarray are imported inside the two functions that use them, so
+# importing the package does not pay for them.
 from rasterio.transform import Affine
 from rasterio.enums import Resampling
 import warnings
@@ -455,6 +455,8 @@ def _estimate_windows(ref_geoArr, tgt_geoArr, candidates, band_idx, min_win_px):
 
     Returns (xs, ys, reliabilities) as float arrays (possibly empty).
     """
+    from arosics import COREG
+
     xs, ys, rel = [], [], []
     with _suppress_arosics_warnings():
         for _label, wp in candidates:
@@ -773,6 +775,8 @@ def _estimate_shifts_pass(
       dropped: [(time, reason), ...]
       stats: {time -> consensus dict}
     """
+    from geoarray import GeoArray
+
     shifts, stats, dropped = {}, {}, []
 
     if mode == "composite":
@@ -1339,7 +1343,7 @@ def coregister_cube(
 # ----------------------------------------------------------------------
 import ipywidgets as widgets
 from IPython.display import display
-import plotly.graph_objects as go
+# plotly is imported inside spectral_profiler, its only user.
 
 
 def _load_stac(path, stack_name="Time_Series"):
@@ -1402,6 +1406,8 @@ def spectral_profiler(
     before_path, after_path, band="ndvi",
     stack_name="Time_Series", rgb_time="first"
 ):
+    import plotly.graph_objects as go
+
     stac_b = _load_stac(before_path, stack_name)
     stac_a = _load_stac(after_path, stack_name)
 

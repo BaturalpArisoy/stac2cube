@@ -2,7 +2,6 @@ from .main import get_stac_layers
 from .get_update import get_stac_parameters
 from .get_update import find_missing_times
 from .get_update import geobox_from_cube, _require_same_grid
-from s2cloudless import S2PixelCloudDetector
 import numpy as np
 import xarray as xr
 import re
@@ -445,6 +444,8 @@ def get_cloud_layers(
             raise ValueError("The probability map is up to date. Nothing to update!")
 
     # --- Cloud Probability Calculation ---
+    from s2cloudless import S2PixelCloudDetector
+
     # Set the parameters for the cloud detector.
     # Default threshold (0.7) for computing cloud probability.
     average_over = 4
@@ -890,6 +891,8 @@ def mask_from_probability(
     # continuous field and would blur/grow a hard SCL mask, so those timesteps
     # are taken straight through as (prob == 100). Every threshold reproduces
     # the SCL decision identically, so the threshold value is irrelevant there.
+    from s2cloudless import S2PixelCloudDetector
+
     scl_time = None
     if "mask_method" in prob_da.coords:
         _mm = np.asarray(prob_da.coords["mask_method"].values).astype(str)

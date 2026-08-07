@@ -47,7 +47,8 @@ import warnings
 
 import numpy as np
 import xarray as xr
-import cv2
+# cv2 is imported inside the two helpers that use it - see the note on lazy
+# imports; it is not needed to import the module.
 
 from .get_data import get_stac, get_solar_geometry
 from .get_update import get_stac_parameters
@@ -142,6 +143,8 @@ def _cv2_disk(radius):
     """Disk structuring element, built exactly like s2cloudless.utils.cv2_disk
     (a filled cv2.circle), so the smoothing below matches the cloud pipeline's
     kernels bit-for-bit."""
+    import cv2
+
     return cv2.circle(
         np.zeros((radius * 2 + 1, radius * 2 + 1), dtype=np.uint8),
         (radius, radius), radius, color=1, thickness=-1,
@@ -159,6 +162,8 @@ def _smooth_binary_mask(mask, average_over, dilation_size):
     smoothing for shadows: speckle is removed, outlines follow the detected
     shape instead of ballooning it.
     """
+    import cv2
+
     out = mask.astype(np.float32)
     if average_over:
         disk = _cv2_disk(average_over).astype(np.float32)

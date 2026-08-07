@@ -2,11 +2,11 @@ import os
 import numpy as np
 import pandas as pd
 import xarray as xr
-import matplotlib.pyplot as plt
 import ipywidgets as widgets
 
 from IPython.display import display, clear_output
-from matplotlib.ticker import FuncFormatter, MaxNLocator
+# pyplot and its ticker helpers are imported inside the two interactive viewers
+# that draw with them; nothing else in the module needs matplotlib.
 from PIL import Image, ImageDraw, ImageFont
 import re
 
@@ -1024,6 +1024,9 @@ def interactive_time_view(
     Note that hiding the labels is cosmetic only - the image stays
     georeferenced and zoom/pan still operate in projected coordinates.
     """
+    import matplotlib.pyplot as plt
+    from matplotlib.ticker import FuncFormatter, MaxNLocator
+
     renderer = str(renderer).lower().strip()
     if renderer in ("plotly", "zoom", "interactive"):
         renderer = "interactive"
@@ -1775,8 +1778,10 @@ def interactive_cloud_overlay_view(
     (the GUI handler validates and slices them to the common dates before call).
     """
     import matplotlib as mpl
+    import matplotlib.pyplot as plt
     from matplotlib.colors import Normalize
     from matplotlib.cm import ScalarMappable
+    from matplotlib.ticker import FuncFormatter, MaxNLocator
 
     if "band" not in cloud.dims:
         raise ValueError("Cloud cube has no 'band' dimension.")
