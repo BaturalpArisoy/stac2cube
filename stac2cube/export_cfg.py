@@ -2,6 +2,7 @@ import contextlib
 import gc
 import os
 import shutil
+import time
 import weakref
 import numpy as np
 import dask
@@ -239,6 +240,20 @@ def open_cube(path, chunks=None):
     reading a cube from disk wants. Zarr stores are already written one scene
     per chunk, so the flag needs no equivalent there.
 
+    ``chunks="eager"`` says "I am going to read all of this anyway": the store
+    is opened WITHOUT dask, so materializing it fills one buffer instead of
+    computing every chunk and then concatenating them into a second full-size
+    array. Measured on a 239 MB cube: peak RSS 449 MB (1.88x) the normal way
+    against 284 MB (1.19x) here - the remainder is the decompression buffers a
+    compressed store needs, which no amount of bookkeeping avoids. Values,
+    dtype, coordinates and attributes come back identical.
+
+    It is opt-in on purpose, and NOT what ``chunks=None`` does: the default
+    keeps Zarr dask-backed, which is what makes a cube far larger than memory
+    workable at all. Use it only where the whole cube is about to be loaded -
+    at those call sites there is no laziness left to lose. NetCDF ignores it
+    (it already reads into a single buffer).
+
     This is the single entry point every pipeline component uses to read a
     cube from a path, so NetCDF and Zarr cubes are interchangeable everywhere.
     Note one storage-level difference: Zarr attributes are JSON, so attrs
@@ -259,7 +274,11 @@ def open_cube(path, chunks=None):
                 "ignore", message=".*does not have a Zarr V3 specification.*"
             )
             warnings.filterwarnings("ignore", message=".*[Cc]onsolidated metadata.*")
-            ds = xr.open_zarr(path)
+            # chunks=None is xarray's "do not use dask"; anything else keeps
+            # the store's own chunking, which is the default here.
+            ds = xr.open_zarr(
+                path, chunks=None if chunks == "eager" else "auto"
+            )
         # open_zarr leaves non-dimension coordinates (e.g. cloud_percentage)
         # dask-backed; a dask boolean coord cannot be used as a drop-indexer
         # (cloud_filter's .where(..., drop=True) raises). Coordinates are tiny,
@@ -296,6 +315,10 @@ def open_cube(path, chunks=None):
         return _track_open_cube(path, normalize_stack_name(out))
     if isinstance(chunks, str) and chunks == "frames":
         return _track_open_cube(path, normalize_stack_name(_frame_chunked_netcdf(path)))
+    # "eager" is a Zarr concern: a NetCDF opened without chunks already reads
+    # into a single buffer (measured 1.00x), which is exactly what it asks for.
+    if chunks == "eager":
+        chunks = None
     return _track_open_cube(
         path, normalize_stack_name(xr.open_dataset(path, chunks=chunks))
     )
@@ -373,6 +396,50 @@ def _strip_netcdf_encoding(ds):
             "fletcher32", "preferred_chunks", "compression",
         ):
             var.encoding.pop(stale, None)
+
+
+#: CF axis markers that rioxarray stamps on the x/y coordinates. They carry no
+#: georeferencing of their own - the projection lives in the ``spatial_ref``
+#: grid mapping (full WKT + GeoTransform) that every variable points at - but
+#: their presence changes which reader QGIS picks for the file, and the one it
+#: then picks lays the raster down rotated 90 degrees.
+_CF_AXIS_ATTRS = ("axis", "long_name", "standard_name")
+
+
+def _strip_cf_axis_attrs(ds):
+    """Drop the CF axis markers from the x/y coordinates before a write.
+
+    ``rioxarray`` adds ``axis``/``long_name``/``standard_name`` to x and y
+    whenever it (re)writes the CRS, which happens inside ``rio.clip`` and
+    ``rio.reproject``. A freshly BUILT cube never gets them, so the same
+    pipeline was emitting two different flavours of NetCDF: plain builds
+    without the markers, clipped and reprojected cubes with them.
+
+    That difference is not cosmetic. Confirmed by an A/B test on one cube
+    written both ways: with the markers QGIS places the raster rotated 90
+    degrees counter-clockwise, without them it lands correctly. GDAL's own
+    raster path reads both identically and correctly (same size, same
+    GeoTransform, same rows), so the markers are what tips QGIS into
+    interpreting the file as a CF/mesh dataset instead - and that route does
+    not honour the grid mapping the same way.
+
+    Nothing that reads these cubes needs the markers: the projection is fully
+    described by ``spatial_ref`` plus the ``grid_mapping`` attribute, which is
+    what GDAL, QGIS, xarray and rioxarray all actually use, and what the
+    always-correct plain builds have carried all along. ``units`` is kept.
+
+    Returns a dataset that is safe to write; the caller's object is not
+    touched (the coordinates are only copied when there is something to drop).
+    """
+    if not any(a in ds[c].attrs for c in ("x", "y") if c in ds.coords
+               for a in _CF_AXIS_ATTRS):
+        return ds
+    ds = ds.copy()
+    for c in ("x", "y"):
+        if c in ds.coords:
+            for a in _CF_AXIS_ATTRS:
+                ds[c].attrs.pop(a, None)
+    return ds
 
 
 def _set_zarr_shuffle(ds):
@@ -676,10 +743,31 @@ def write_qgis_vrt(cube_path, var_name=None, vrt_path=None):
         # On-disk dtype, which is what GDAL will see - not the decoded one. A
         # packed cube stores int16 but decodes to float.
         dtype = np.dtype(da.encoding.get("dtype", da.dtype))
-        gdal_type = GDAL_TYPES.get(dtype.name, "Float32")
+        src_type = GDAL_TYPES.get(dtype.name, "Float32")
         nodata = da.encoding.get("_FillValue", da.attrs.get("_FillValue"))
         if nodata is None and dtype.kind == "f":
             nodata = float("nan")
+
+        # CF packing (super_resolution's pack_to_int16). GDAL's netCDF driver
+        # exposes scale_factor/add_offset as band metadata but does NOT apply
+        # them on read, and QGIS renders the raw integers - so a packed cube
+        # opened through a plain VRT shows packing codes, not reflectance, and
+        # two cubes packed over different value ranges disagree wildly on the
+        # very same pixel (one can even come out entirely negative, because the
+        # sign of the code follows add_offset). Undo the packing IN the VRT with
+        # a ComplexSource, which GDAL evaluates as src * ScaleRatio +
+        # ScaleOffset, and hand the band out as float.
+        scale = da.encoding.get("scale_factor", da.attrs.get("scale_factor"))
+        offset = da.encoding.get("add_offset", da.attrs.get("add_offset"))
+        packed = scale is not None or offset is not None
+        if packed:
+            scale = 1.0 if scale is None else float(scale)
+            offset = 0.0 if offset is None else float(offset)
+            # The unpacked band is float, so its own no-data becomes NaN and the
+            # stored fill (e.g. -32768) is what has to be masked out at source.
+            src_nodata, nodata, gdal_type = nodata, float("nan"), "Float32"
+        else:
+            src_nodata, gdal_type = None, src_type
 
         wkt = CRS.from_user_input(ds.rio.crs or ds.attrs["crs"]).to_wkt("WKT1_GDAL")
         gt = ds.rio.transform().to_gdal()
@@ -698,22 +786,30 @@ def write_qgis_vrt(cube_path, var_name=None, vrt_path=None):
         '  <GeoTransform>' + ', '.join(repr(float(v)) for v in gt)
         + '</GeoTransform>',
     ]
+    tag = "ComplexSource" if packed else "SimpleSource"
     for i, name in enumerate(names, start=1):
         out.append(f'  <VRTRasterBand dataType="{gdal_type}" band="{i}">')
         out.append(f'    <Description>{escape(str(name))}</Description>')
         if nodata is not None:
             out.append(f'    <NoDataValue>{float(nodata)!r}</NoDataValue>')
-        out.append('    <SimpleSource>')
+        out.append(f'    <{tag}>')
         out.append('      <SourceFilename relativeToVRT='
                    f'{quoteattr("1" if same_dir else "0")}>'
                    f'{escape(src_name)}</SourceFilename>')
         out.append(f'      <SourceBand>{i}</SourceBand>')
         out.append(f'      <SourceProperties RasterXSize="{nx}" '
-                   f'RasterYSize="{ny}" DataType="{gdal_type}" '
+                   f'RasterYSize="{ny}" DataType="{src_type}" '
                    f'BlockXSize="{nx}" BlockYSize="1"/>')
         out.append(f'      <SrcRect xOff="0" yOff="0" xSize="{nx}" ySize="{ny}"/>')
         out.append(f'      <DstRect xOff="0" yOff="0" xSize="{nx}" ySize="{ny}"/>')
-        out.append('    </SimpleSource>')
+        if packed:
+            # Order matters to GDAL: NODATA is tested against the RAW source
+            # value, before the scaling below is applied.
+            if src_nodata is not None:
+                out.append(f'      <NODATA>{float(src_nodata)!r}</NODATA>')
+            out.append(f'      <ScaleOffset>{offset!r}</ScaleOffset>')
+            out.append(f'      <ScaleRatio>{scale!r}</ScaleRatio>')
+        out.append(f'    </{tag}>')
         out.append('  </VRTRasterBand>')
     out.append('</VRTDataset>')
 
@@ -911,6 +1007,11 @@ def _swap_into_place(temp, output, is_zarr, release=None):
                 if release is not None and attempt == 0:
                     release()
                 gc.collect()
+                # A lock we do NOT own - a virus scanner or the OS indexer
+                # touching a file that was written a moment ago - clears in
+                # milliseconds, but an immediate retry is too quick to see it
+                # go. Paid only on this failure path.
+                time.sleep(0.2)
         fallback = _timestamped_path(output)
         os.replace(temp, fallback)
         _warn_export_diverted(output, fallback)
@@ -930,6 +1031,7 @@ def _swap_into_place(temp, output, is_zarr, release=None):
         # giving up on the target (same courtesy as the NetCDF branch).
         if release is not None:
             release()
+        time.sleep(0.2)
         try:
             os.rename(output, aside)
         except OSError:
@@ -1030,6 +1132,12 @@ def export_stac(
         ds = stac.to_dataset(name=name)
     else:
         ds = stac
+
+    # Clipped and reprojected cubes come out of rioxarray carrying CF axis
+    # markers on x/y that a plain build never has, and QGIS lays those files
+    # down rotated 90 degrees. Same treatment for both containers so a cube
+    # does not change meaning when it is written as Zarr instead of NetCDF.
+    ds = _strip_cf_axis_attrs(ds)
 
     # --- Write beside the target, then swap it in ----------------------------
     # Nothing that already exists at `output` is touched until the new cube is

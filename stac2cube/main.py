@@ -1364,13 +1364,17 @@ def get_stac_layers(
         #
         #   * the eager cloud% / coverage pass, unless it is deferred to the
         #     writer (then it shares the export's read - see _defer_pct);
-        #   * the cube itself, when clouds are REMOVED (the masking `where` puts
-        #     the class layer in the cube's own graph; keep-clouds drops it);
+        #   * the cube itself, ALWAYS: the class layer is in the cube's own
+        #     graph through the "was this pixel imaged" mask that keeps swath
+        #     gaps out of the data (see cloud_mask), and additionally through
+        #     the cloud `where` when clouds are removed. It used to be counted
+        #     only for the latter, which under-counted a keep-clouds build by
+        #     one and let it re-read the band;
         #   * the binary mask cube, when written or handed back;
         #   * the shadow projection, which reads it eagerly on its own.
         _scl_consumers = (
             (0 if _defer_pct else 1)
-            + (0 if keep_clouds else 1)
+            + 1
             + (1 if (cloud_mask_output or return_cloud_mask) else 0)
             + (1 if shadow_masking else 0)
         )
@@ -1548,6 +1552,12 @@ def get_stac_layers(
         # polygon = gpd.GeoDataFrame(index=[0], geometry=[poly]) # update-clip raster
         # polygon.set_crs(stac.crs, inplace=True) # update-clip raster
         stac = clip_stac(stac, polygon, crs)  # delete write_crs in clip_stac
+        # The clip moved the origin and shrank the extent, so the transform
+        # captured right after get_stac no longer describes this cube. It is
+        # what gets written into attrs["transform"] and handed to export_stac
+        # further down, so refresh it here or a clipped build advertises the
+        # grid it had before the clip.
+        transform = stac.rio.transform()
 
     # Finalizing
     if not aggregator or _defer_agg:

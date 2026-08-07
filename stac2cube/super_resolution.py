@@ -13,7 +13,13 @@ from affine import Affine
 from tqdm.auto import tqdm
 
 from .get_spectral_indices import calculate_spectral_index
-from .export_cfg import open_cube, is_zarr_path, _write_zarr, resolve_stack_var
+from .export_cfg import (
+    open_cube,
+    is_zarr_path,
+    _write_zarr,
+    _strip_cf_axis_attrs,
+    resolve_stack_var,
+)
 
 
 @contextlib.contextmanager
@@ -1014,6 +1020,12 @@ def super_resolve_cube(
     # the output ungeoreferenced. Eager (non-dask) write on purpose: writing a
     # dask-backed variable to netCDF4/HDF5 is not thread-safe (causes "NetCDF: HDF
     # error") and is far slower here.
+    # An SR cube builds its own x/y from the output affine, so it normally has
+    # no CF axis markers to begin with - but a source cube that carries them
+    # can pass them along, and they make QGIS lay the raster down rotated (see
+    # export_cfg._strip_cf_axis_attrs). Same guard as the other writers.
+    ds_out = _strip_cf_axis_attrs(ds_out)
+
     if write_zarr:
         # Same writer as export_stac: strips NetCDF-only encoding keys (keeps
         # grid_mapping), rechunks per (time, band) slice and streams via dask.

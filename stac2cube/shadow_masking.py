@@ -360,7 +360,9 @@ def add_shadow_masks_to_cloud_stack(
     cloud_path = None
     if isinstance(cloud, (str, os.PathLike)):
         cloud_path = str(cloud)
-        with open_cube(cloud_path) as ds:
+        # Loaded in full on the next line - see the open_cube note on
+        # chunks="eager" (a dask-backed read peaks at ~1.9x, this at ~1.2x).
+        with open_cube(cloud_path, chunks="eager") as ds:
             stack_full = ds["Cloud_Stack"].load()
     else:
         stack_full = cloud["Cloud_Stack"] if isinstance(cloud, xr.Dataset) else cloud

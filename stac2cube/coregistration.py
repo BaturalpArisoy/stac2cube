@@ -8,6 +8,7 @@ from .export_cfg import (
     is_zarr_path,
     _write_zarr,
     _set_compression,
+    _strip_cf_axis_attrs,
     write_qgis_vrt,
     normalize_stack_name,
     resolve_stack_var,
@@ -208,6 +209,11 @@ def _write_coreg_output(out_ds, out_path, compress=False, vrt=False):
     always applies its own codec, and a VRT cannot read a Zarr store's pixels
     back, so both are ignored on that path.
     """
+    # Co-registration warps through rioxarray, which stamps CF axis markers on
+    # x/y; those make QGIS lay the raster down rotated (see
+    # export_cfg._strip_cf_axis_attrs), so drop them here as export_stac does.
+    out_ds = _strip_cf_axis_attrs(out_ds)
+
     if is_zarr_path(out_path):
         _write_zarr(out_ds, out_path, overwrite=True)
         return

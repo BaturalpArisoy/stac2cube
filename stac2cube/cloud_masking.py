@@ -435,7 +435,10 @@ def get_cloud_layers(
         crs = transform = bbox = None
 
     if update:
-        with open_cube(update) as ds:
+        # chunks="eager": the whole stack is loaded on the next line, so there
+        # is no laziness to lose and a dask-backed read would peak at ~1.9x its
+        # size instead of ~1.2x (see open_cube).
+        with open_cube(update, chunks="eager") as ds:
             stac_existing = ds["Cloud_Stack"].load()
         stac, missing_times = find_missing_times(stac_existing, stac)
         if not missing_times:
@@ -1246,7 +1249,8 @@ def update_cloud_mask_cube(mask, daterange, output=None, q=False):
     """
     existing = mask
     if isinstance(mask, (str, os.PathLike)):
-        with open_cube(mask) as _ds:
+        # Loaded in full below - see the open_cube note on chunks="eager".
+        with open_cube(mask, chunks="eager") as _ds:
             if "Cloud_Stack" not in _ds.data_vars:
                 raise ValueError(
                     "update_cloud_mask_cube needs a Cloud_Stack cube. "

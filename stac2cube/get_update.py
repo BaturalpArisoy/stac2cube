@@ -168,16 +168,67 @@ def _require_same_grid(stac_new, stac_existing, what):
         stac_new.y.values, stac_existing.y.values
     ):
         return
+
+    def _grid(da):
+        """Size AND origin. Reporting only the shape made an origin-shifted
+        pair read as '130 x 110 does not match 130 x 110'."""
+        text = f"{da.sizes.get('y', '?')} x {da.sizes.get('x', '?')} px"
+        try:
+            return text + f" at ({float(da.x.values[0]):.2f}, {float(da.y.values[0]):.2f})"
+        except Exception:
+            return text
+
+    # How far apart are they, really? A shape mismatch is obvious, but two
+    # grids of the same shape can differ by anything from tens of metres (the
+    # snapped-vs-pinned origin this guard was written for) down to float dust
+    # left by rebuilding the affine and regenerating the coordinates - measured
+    # 9.3e-10 m, i.e. 9.4e-11 of a pixel, on a cube reprojected to a non-round
+    # pixel size. Both are refused, because xr.concat aligns on the coordinate
+    # VALUES and would union even a sub-nanometre difference into a cube twice
+    # the size - but the user deserves to know which of the two they are
+    # looking at, and "does not match" with two identical-looking grids beside
+    # it is not an explanation.
+    _detail = ""
+    try:
+        if (stac_new.sizes["x"], stac_new.sizes["y"]) == (
+            stac_existing.sizes["x"], stac_existing.sizes["y"]
+        ):
+            _dx = float(
+                np.abs(np.asarray(stac_new.x.values, dtype="float64")
+                       - np.asarray(stac_existing.x.values, dtype="float64")).max()
+            )
+            _dy = float(
+                np.abs(np.asarray(stac_new.y.values, dtype="float64")
+                       - np.asarray(stac_existing.y.values, dtype="float64")).max()
+            )
+            _res = abs(float(stac_existing.x.values[1] - stac_existing.x.values[0]))
+            _px = max(_dx, _dy) / _res if _res else float("nan")
+            if _px < 1e-6:
+                _detail = (
+                    f" They are the same grid to {max(_dx, _dy):.2e} m "
+                    f"({_px:.1e} of a pixel) but not bit-identical, which is "
+                    "enough for the merge to align them side by side instead "
+                    "of on top of each other. A cube whose pixel size is not a "
+                    "round number (anything reprojected, coregistered or "
+                    "super-resolved) does not survive the grid round-trip "
+                    "exactly."
+                )
+            else:
+                _detail = (
+                    f" They are offset by up to {max(_dx, _dy):.2f} m "
+                    f"({_px:.2f} pixels)."
+                )
+    except Exception:
+        pass
+
     raise ValueError(
-        f"{what} aborted: the fresh query's spatial grid ("
-        f"{stac_new.sizes.get('y', '?')} x {stac_new.sizes.get('x', '?')} px) "
-        f"does not match the existing cube's grid ("
-        f"{stac_existing.sizes.get('y', '?')} x "
-        f"{stac_existing.sizes.get('x', '?')} px), so the two cannot be merged "
-        "pixel-for-pixel. This usually means the cube was clipped with a "
-        "polygon, coregistered, reprojected or resampled after creation, or "
-        "that it was built by a version that placed the grid differently. "
-        "Rebuild the cube over the full date range instead of updating it."
+        f"{what} aborted: the fresh query's spatial grid ({_grid(stac_new)}) "
+        f"does not match the existing cube's grid ({_grid(stac_existing)}), so "
+        f"the two cannot be merged pixel-for-pixel.{_detail} This usually means "
+        "the cube was clipped with a polygon, coregistered, reprojected or "
+        "resampled after creation, or that it was built by a version that "
+        "placed the grid differently. Rebuild the cube over the full date "
+        "range instead of updating it."
     )
 
 

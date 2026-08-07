@@ -697,17 +697,23 @@ def clip_stac(stac, polygon, crs=None, bbox_crs="EPSG:4326"):
     bbox_crs:
       - CRS of bbox coordinates (defaults to EPSG:4326)
     """
-    # Decide target CRS
-    crs = stac.crs if crs is None else crs
-
-    # Preserve original transform before clip (clip changes extent).
-    # A freshly built cube hasn't had attrs["transform"] set yet (main.py writes
-    # it AFTER this clip call), so fall back to the live grid transform. A
-    # loaded/exported cube already carries the attr, so the Editor/ARD clip path
-    # behaves exactly as before.
-    transform = stac.attrs.get("transform")
-    if transform is None:
-        transform = stac.rio.transform()
+    # Decide target CRS. attrs["crs"] first, then the written spatial_ref: this
+    # used to be a bare `stac.crs` attribute lookup, which raised
+    # "AttributeError: 'DataArray' object has no attribute 'crs'" on any cube
+    # that carries its projection only as the grid-mapping coordinate. That is
+    # reachable - rioxarray's write_crs() DELETES attrs["crs"] (verified), and
+    # get_stac_layers' stats branch calls it after re-applying the cube attrs,
+    # so a composite cube returned in memory has no attrs["crs"] at all.
+    if crs is None:
+        crs = stac.attrs.get("crs")
+    if crs is None:
+        crs = getattr(getattr(stac, "rio", None), "crs", None)
+    if crs is None:
+        raise ValueError(
+            "This cube declares no projection (no attrs['crs'] and no written "
+            "spatial_ref coordinate), so it cannot be clipped - the polygon "
+            "has nothing to be projected into. Pass crs=... explicitly."
+        )
 
     # If bbox list/tuple -> build a GeoDataFrame; else use your existing polygon loader
     is_bbox = (
@@ -755,9 +761,16 @@ def clip_stac(stac, polygon, crs=None, bbox_crs="EPSG:4326"):
 
     stac = stac.rio.clip(pproj.geometry.values, crs=crs, drop=True)
 
-    # Store CRS + original transform back as attrs
+    # Record the grid the cube is NOW on. This used to re-attach the transform
+    # captured BEFORE the clip, so a clipped cube advertised an origin it did
+    # not sit on - measured 21 px east and 27 px north out on a middle-half
+    # clip. The coordinates and the CF GeoTransform written into the file were
+    # always correct (rioxarray derives those from x/y), so a GIS never saw it;
+    # what was wrong is the self-describing attribute, and it travelled into
+    # every export and into the shadow / cloud tools, which read
+    # attrs["transform"] and stamp it onto their own products.
     stac.attrs["crs"] = crs
-    stac.attrs["transform"] = transform
+    stac.attrs["transform"] = stac.rio.transform()
 
     # If this cube was cloud-MASKED (carries a cloud_percentage coord and its
     # clouds are NaN), the value is now stale: clipping changed the extent.
