@@ -130,37 +130,22 @@ It should print a build ending in `+cu121` and `CUDA available: True`.
 
 ## How to run
 ### Interactive User Interface on Jupyter Notebook (recommended):
-The **recommended** way to run stac2cube is through the interactive GUI tools in the [User Interface Tools](https://github.com/BaturalpArisoy/stac2cube/tree/main/interactive/User_Interface_Tools.ipynb) notebook. It bundles the full workflow in one place, requires no manual coding. <br> Just set the parameters and enjoy your coffee while your data cube is being built :) <br>
+The **recommended** way to run stac2cube is through the interactive GUI tools in the [User Interface Tools](https://github.com/BaturalpArisoy/stac2cube/tree/main/interactive/User_Interface_Tools.ipynb) notebook. It bundles the full workflow in one place and requires no manual coding. <br> Just set the parameters and enjoy your coffee while your data cube is being built :) <br>
 
-1) Data Cube Builder (see example below)
-2) Data Cube Editor
-3) Analysis Ready Data Cube Tools (Probabilistic Cloud Masking, Co-registration and Super-resolution)<br><br>
+1) **Data Cube Builder** - area, date range, bands and indices, the STAC catalogue to pull from, cloud masking, scene filters and temporal composites. Exports to NetCDF, Zarr or GeoTIFFs, and the settings of any cube can be copied out as a JSON config to re-run later or as an HPC job.
+    - Available missions: **Sentinel-2 L2A, Sentinel-2 L1C, Sentinel-1 RTC**
+2) **Data Cube Editor** - clip, reproject, slice, filter and mosaic an existing cube, inspect it with the time viewer and animations, and **extend it with new dates or bands** without rebuilding it from scratch.
+3) **Analysis Ready Data Cube Tools** - probabilistic cloud masking, cloud shadow masking, co-registration and super-resolution.<br><br>
 
 <img src="assets/data_cube_builder_GUI.png" alt="gui_editor">
 
-### Step-by-step Interactive Notebooks
-For a more detailed walkthrough of stac2cube features, including background, processing steps, and storage, see the well-documented notebooks in the [tutorials folder](https://github.com/BaturalpArisoy/stac2cube/tree/main/interactive/tutorials).
-
-Each step is documented by the numbers and the general explanation is given below:
-
-1. **Initial Data Cube**
-    - Collects images from STAC catalogs for the selected mission based on users parameters.
-    - Generates multi-dimensional data cubes, suitable for time-series.
-    - The data cubes can be **updated** anytime without generating them from the scratch.
-    - Available missions: **Sentinel-2 L2A, Sentinel-2 L1C, Sentinel-1 RTC, Landsat C2 L2, COP DEM Glo-30 (single time)**
-2. **Cloud Mask Data Cube**
-    - The result contains cloud probability maps and user defined binary cloud mask layers of time-series.
-    - When selected, clouds from the initial data cube are automatically masked out.
-    - Can be updated anytime.
-3. **Co-register Data Cube**
-    - Fix the global X/Y shift between consecutive Sentinel-2 items.
-    - IMPORTANT: Please read notes in the notebook for better quality results.
-4. **Super-resolve Data Cube**
-    - Super resolves both 10-meters and 20-meters bands to 2.5-meters. ["blue", "green", "red", "nir", "nir08", "rededge1", "rededge2", "rededge3", "swir16", "swir22"] for the entire Sentinel-2 data cube time-series.
+### Step-by-step notebooks
+If you want to script stac2cube or see what the interface does in the background, the [tutorials folder](https://github.com/BaturalpArisoy/stac2cube/tree/main/interactive/tutorials) documents the Python API function by function: building and updating cubes, cloud and shadow masking, co-registration, super-resolution, and comparing scene availability across catalogues. The interface covers the same ground with less setup, so start there unless you specifically need the code.
 
 
 ## How to run on HPC
-A documentation file on how to use stac2cube features on terrabyte's HPC for compute-intensive processes and for faster processing time can be found in the [slurm folder](https://github.com/BaturalpArisoy/stac2cube/tree/main/slurm). Reading step by step is actually pretty simple.
+A documentation file on how to use stac2cube features on terrabyte's HPC for compute-intensive processes and for faster processing time can be found in the [slurm folder](https://github.com/BaturalpArisoy/stac2cube/tree/main/slurm). Reading step by step is actually pretty simple.<br><br>
+**One Tip**: You can copy settings from User Interface and directly paste to .json file to run fast and easy!
 
 ## Access and Licensing Details for STAC Catalogs
 
