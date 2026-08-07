@@ -215,6 +215,32 @@ def cloud_mask(stac, mission, keep_clouds=False, keep_layer=False):
     else:
         out = stac.where(~cloud_bool)
 
+    # ---- Pixels that were never imaged are NOT data -------------------------
+    # odc-stac fills the part of the grid an acquisition does not cover with the
+    # asset's declared nodata. element84 and terrabyte declare 0, and the
+    # reflectance scaling turns that into a hard 0.0 - a finite value
+    # indistinguishable from a very dark measurement. Planetary Computer
+    # declares none and already yields NaN, so the same AOI and date used to
+    # come back with different pixel semantics per source (verified: e84 67.6%
+    # exactly-0 and 0% NaN, PC 0% exactly-0 and 67.3% NaN, both reporting the
+    # same 0.324 scene coverage).
+    #
+    # Measured on an AOI spanning two MGRS tiles, on a day when only one tile
+    # was acquired: 67.6% of the cube was 0.0 in every band while the only real
+    # observations were masked as cloud, so the scene's mean read 0.0000 with
+    # not one real pixel behind it, and a temporal composite over the cube was
+    # wrong on 73.3% of its pixels (mean red 0.065 against 0.126, worst pixel
+    # off by 0.41 reflectance). NDVI meanwhile came out NaN there (0/0), so the
+    # bands claimed data while the index said no-data.
+    #
+    # Applied whether or not the clouds are removed: a keep-clouds cube is
+    # still not observing anything inside a swath gap. Sentinel-2 only - SCL
+    # class 0 is a verified no-data marker, while the Landsat fill-bit
+    # derivation above has never been checked against a real scene, and masking
+    # a cube with a wrong footprint would delete real data instead of fill.
+    if mission == "sentinel_2_l2a":
+        out = out.where(imaged_bool)
+
     # Drop the cloud/classification band if it exists (it is not spectral
     # data) - unless the user explicitly asked to keep it in the cube.
     if not keep_layer and layer_name is not None and layer_name in out:
@@ -256,6 +282,56 @@ def build_scl_mask_cube(stac, cloud_bool):
     return cm
 
 
+def _mask_declared_nodata(stac, mission):
+    """Turn each band's declared fill value into real no-data, before scaling.
+
+    odc-stac fills the part of the grid an acquisition does not cover - and any
+    read it was told to skip (``fail_on_error=False``) - with the asset's
+    declared nodata, and stamps that value on the variable as
+    ``attrs["nodata"]``. element84 and terrabyte declare **0**, which the
+    reflectance scaling then turns into a hard ``0.0``: finite, and
+    indistinguishable from a very dark measurement. Planetary Computer declares
+    none, so odc loads float and fills with NaN already - which is why the same
+    AOI and date came back with different pixel semantics per source (measured
+    on a two-tile AOI: e84 uint16 with 67.6% exactly-0 and no NaN, PC float32
+    with 67.2% NaN and no zeros, both reporting the same scene coverage).
+
+    Comparing BEFORE the scaling is what makes it correct: the cdse/terrabyte
+    path subtracts the 1000 DN offset, after which the fill is -0.1, not 0.
+
+    This is the half of the problem that no cloud mask can reach - a build with
+    ``cloud_masking=False`` has no SCL to consult (see ``cloud_mask``, which
+    applies the same no-data rule from the classification layer when it is
+    there). The two overlap on a cloud-detecting build, harmlessly.
+
+    Sentinel-2 L2A only. ESA defines 0 as NO_DATA in that product, so nothing
+    real is lost; the other missions' fill conventions are not verified here,
+    and masking on a wrong one would delete data rather than remove fill.
+
+    Categorical layers are left alone: their own class code 0 already means
+    "no data", both ``cloud_mask`` and the shadow tool read them that way, and
+    promoting a uint8 SCL to float32 would quadruple the band the builder
+    persists for reuse.
+    """
+    if mission != "sentinel_2_l2a" or not isinstance(stac, xr.Dataset):
+        return stac
+    for name in list(stac.data_vars):
+        nodata = stac[name].attrs.get("nodata")
+        if nodata is None:
+            continue          # nothing declared (planetary_computer) - already NaN
+        attrs = dict(stac[name].attrs)
+        # Cast first, then compare: `where` on a uint16 band would go through
+        # float64 and double the in-flight chunk. 0 is exact in float32.
+        band = stac[name].astype("float32")
+        band = band.where(band != np.float32(nodata))
+        # The attribute described the array we just replaced; leaving it would
+        # tell rioxarray's clip to fill this cube's NaN back to that value.
+        attrs.pop("nodata", None)
+        band.attrs = attrs
+        stac[name] = band
+    return stac
+
+
 def scale_factor(stac, mission, baselines, source=None):
     # Categorical layers (SCL class codes, bit-packed QA words) must keep
     # their raw values: reflectance gain/offset would destroy them (e.g. the
@@ -268,6 +344,10 @@ def scale_factor(stac, mission, baselines, source=None):
             if name in stac.data_vars:
                 categorical[name] = stac[name].astype("float32")
                 stac = stac.drop_vars(name)
+
+    # No-data first: the fill is a RAW DN, and the scaling below would turn it
+    # into an ordinary-looking reflectance.
+    stac = _mask_declared_nodata(stac, mission)
 
     stac = _scale_values(stac, mission, baselines, source)
 
