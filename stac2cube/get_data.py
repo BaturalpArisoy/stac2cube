@@ -14,6 +14,7 @@ from odc.stac import stac_load
 import planetary_computer
 import os
 import re
+import math
 import datetime
 from collections import Counter, defaultdict
 
@@ -324,6 +325,167 @@ _CATALOGUES = {
         "sentinel-1-rtc",
     ),
 }
+
+
+# --- Native pixel spacing, and the grid every cube is snapped to -------------
+# Metres per pixel as the provider actually delivers each band. This is also the
+# step the provider's own pixel grid is laid out on, which is what makes it the
+# right thing to snap a cube's grid origin to.
+#
+# Canonical: the GUI's band tables derive from this, so there is one place to
+# edit when a mission is added. Sentinel-1 RTC is already listed even though the
+# rest of its support is still to come.
+_NATIVE_BAND_RESOLUTION = {
+    "sentinel_2_l2a": {
+        "coastal": 60, "blue": 10, "green": 10, "red": 10,
+        "rededge1": 20, "rededge2": 20, "rededge3": 20,
+        "nir": 10, "nir08": 20, "nir09": 60, "cirrus": 60,
+        "swir16": 20, "swir22": 20,
+        "scl": 20, "aot": 10, "wvp": 10,
+    },
+    "sentinel_2_l1c": {
+        "coastal": 60, "blue": 10, "green": 10, "red": 10,
+        "rededge1": 20, "rededge2": 20, "rededge3": 20,
+        "nir": 10, "nir08": 20, "nir09": 60, "cirrus": 60,
+        "swir16": 20, "swir22": 20,
+    },
+    # GRD-derived RTC is delivered on a 10 m grid; both polarisations share it.
+    "sentinel_1_rtc": {"vv": 10, "vh": 10},
+    "landsat_c2_l2": {
+        "coastal": 30, "blue": 30, "green": 30, "red": 30, "nir": 30,
+        "swir1": 30, "swir2": 30, "thermal": 30, "qa_pixel": 30,
+    },
+    "cop_dem_glo_30": {"data": 30},
+}
+
+
+def native_band_resolution(mission: str) -> dict:
+    """Native pixel spacing in metres, per band, for ``mission`` (may be empty)."""
+    return dict(_NATIVE_BAND_RESOLUTION.get(mission, {}))
+
+
+def grid_snap_unit(mission, bands=None, resolution=None) -> float | None:
+    """Step, in CRS units, that a cube's grid origin is snapped to.
+
+    Why snap at all: a grid whose origin sits on an arbitrary real number - the
+    corner of whatever AOI happened to be drawn - does not line up with the
+    provider's own pixel grid, nor with the next cube built from a different
+    AOI. With "nearest" resampling each such cube then rounds its pixels to a
+    different source pixel, so two cubes over the same ground come out displaced
+    from each other by up to half a pixel (measured: 4.65 m E-W and 1.48 m N-S
+    between two of the project's own test AOIs). Earth Engine warns about
+    exactly this ("may result in an image that is shifted relative to another
+    image with the same pixel size"), cubo snaps, stackstac snaps, and odc-geo
+    snaps by default - stac2cube was the outlier because it passed ``tight=True``,
+    which odc documents as "turns off pixel snapping".
+
+    The step is the smallest one that lines up BOTH the requested output grid and
+    the native grid of the coarsest band asked for, i.e. lcm(resolution, coarsest
+    native spacing):
+
+      * RGBN Sentinel-2 at 10 m          -> 10  (as GEE / cubo / odc)
+      * ten-band Sentinel-2 at 10 m      -> 20  (the 20 m bands need it - see below)
+      * any cube including a 60 m band   -> 60
+      * Landsat at 30 m, Sentinel-1 at 10 m -> 30 / 10
+
+    Snapping to 20 rather than 10 whenever a 20 m band is present is not
+    cosmetic: SEN2SR recovers the true 20 m values by decimating the 10 m grid at
+    even indices, so a grid whose phase puts the 2x2 replication blocks on odd
+    indices lands those bands one 10 m pixel off the 10 m ones inside the model.
+    Verified by feeding the model both phases - the output is bit-identical, so
+    one of them must be misplaced.
+
+    Returns None when nothing sensible can be snapped to (unknown resolution, or
+    a native spacing that does not divide into the request without forcing a
+    wastefully coarse grid), in which case the caller leaves the grid alone.
+    """
+    if resolution is None:
+        return None
+    try:
+        res = float(resolution)
+    except (TypeError, ValueError):
+        return None
+    if not (res > 0) or not np.isfinite(res):
+        return None
+
+    native = _NATIVE_BAND_RESOLUTION.get(mission, {})
+    coarsest = 0.0
+    if native:
+        wanted = [str(b).lower() for b in (bands or [])]
+        spacings = [native[b] for b in wanted if b in native] or list(native.values())
+        coarsest = float(max(spacings))
+
+    # The step is ALWAYS a whole multiple of the output resolution. That keeps
+    # any two cubes an integer number of pixels apart even when they snapped to
+    # different steps (say one with 20 m bands and one without), so they still
+    # overlay exactly - only their extents differ by a pixel or two.
+    unit = res
+    # Line both grids up when they are commensurable. Non-integer or awkward
+    # combinations (e.g. 25 m out of 20 m bands, whose lcm is 300) would cost
+    # more extent than the alignment is worth, so fall back to the output
+    # resolution alone, which still puts every cube from every AOI on one grid.
+    if coarsest > 0 and float(res).is_integer() and float(coarsest).is_integer():
+        step = int(np.lcm(int(res), int(coarsest)))
+        if step <= 10 * res:
+            unit = float(step)
+    return float(unit)
+
+
+def aoi_bounds_in_crs(gdf, target_crs, divisions=200, max_vertices=1_000_000):
+    """Bounds of an AOI in ``target_crs`` that actually cover its edges.
+
+    A polygon's edges are straight lines in the CRS the polygon is stored in.
+    Projecting only its vertices and taking their bounding box therefore misses
+    however far the edges BOW between them, and a cube built from those bounds
+    clips ground the user selected. Measured on a lon/lat rectangle straddling
+    the UTM central meridian, where the bow is worst: the southern edge of a
+    2-degree box runs 481 m past the box through its corners, and a 6-degree box
+    4.3 km. Away from the central meridian the bow is 0.0 m, which is why
+    ordinary AOIs never showed it.
+
+    Splitting long edges before the transform removes it. Polygons that are
+    already densely vertexed have no segment long enough to split and come
+    through untouched (verified on a 1275-vertex AOI), and very large ones skip
+    the step entirely - they cannot have long edges in the first place.
+
+    This is the single place both AOI kinds are measured: ``get_stac`` wraps a
+    bbox list into a one-row GeoDataFrame and calls this too, so a rectangle
+    drawn on the map, the same rectangle imported as a file, and the same
+    numbers typed as a bbox all produce the same bounds by construction.
+
+    Note every imported polygon reaches here in EPSG:4326 - ``read_polygon_file``
+    reprojects on the way in - so the edges being densified are lon/lat edges. A
+    polygon supplied directly as a GeoDataFrame keeps its own CRS and is
+    densified in that instead, which is the right thing for the same reason.
+    """
+    geom = gdf.geometry if hasattr(gdf, "geometry") else gdf
+    try:
+        minx, miny, maxx, maxy = (float(v) for v in geom.total_bounds)
+        step = max(maxx - minx, maxy - miny) / float(divisions)
+        if step > 0 and int(geom.count_coordinates().sum()) <= max_vertices:
+            geom = geom.segmentize(step)
+    except Exception:
+        # A missing segmentize (older geopandas) or an odd geometry must never
+        # block a build; the un-densified bounds are what this always used.
+        pass
+    return tuple(float(v) for v in geom.to_crs(target_crs).total_bounds)
+
+
+def snap_bounds(bounds, unit):
+    """Grow ``bounds`` outward to the next multiple of ``unit`` on every side.
+
+    Outward, never inward: the AOI stays fully covered. Costs at most one pixel
+    of extent per side (measured 1-2 px per axis on real AOIs).
+    """
+    if not unit or unit <= 0:
+        return tuple(float(v) for v in bounds)
+    left, bottom, right, top = (float(v) for v in bounds)
+    return (
+        math.floor(left / unit) * unit,
+        math.floor(bottom / unit) * unit,
+        math.ceil(right / unit) * unit,
+        math.ceil(top / unit) * unit,
+    )
 
 
 def crs_attr_string(crs_like):
@@ -1113,23 +1275,31 @@ def get_stac(
     if mission == "sentinel_2_l1c":
         items = _dedup_s2_l1c_items(items, bbox, q=q)
 
-    # --- Pin the output grid to the AOI itself --------------------------------
-    # Passing bbox= (lon/lat) together with crs= makes odc-stac project that
-    # lon/lat box into the target CRS, take the ENCLOSING rectangle, and snap it
-    # to a resolution-aligned grid. Both steps only ever grow the cube - measured
-    # 50-140 m per side at 41 N - so AOIs that were deliberately built disjoint
-    # come back as overlapping cubes. Building the GeoBox straight from the AOI's
-    # bounds in the target CRS with tight=True removes both effects, and the cube
-    # then matches the polygon exactly.
+    # --- Build the output grid from the AOI, on a snapped origin ---------------
+    # Two things have to be right here, and they used to fight each other.
     #
-    # Only for real geometries. A bbox list is already lon/lat, so there is no
-    # projected rectangle to preserve.
+    # EXTENT. Passing bbox= (lon/lat) together with crs= makes odc-stac project
+    # that lon/lat box into the target CRS and take the ENCLOSING rectangle,
+    # which only ever grows the cube - measured 50-140 m per side at 41 N - so
+    # AOIs deliberately built disjoint came back overlapping. Deriving the bounds
+    # from the AOI's own vertices in the target CRS avoids that, and the cube
+    # then matches the polygon.
     #
-    # A caller-supplied `geobox` wins over both: it IS the grid of an existing
-    # cube. Re-deriving one from that cube's stored lon/lat bbox does not
-    # reproduce it (the derivation snaps to a resolution-aligned grid, the
-    # pinning does not), which used to put updated dates on a different grid
-    # than the dates they were concatenated onto. See get_update.geobox_from_cube.
+    # ORIGIN. That derivation used tight=True, which odc documents as "turns off
+    # pixel snapping", so the origin landed on whatever real number the AOI
+    # corner happened to be. Two cubes from different AOIs then sat on grids
+    # offset by a fraction of a pixel, and with "nearest" each rounded to a
+    # different source pixel - up to half a pixel of relative displacement (see
+    # grid_snap_unit). The fix is to keep the AOI-derived bounds and snap them
+    # outward to a grid step, which costs 1-2 px of extent instead of 50-140 m.
+    #
+    # BOTH INPUT KINDS go through this now. A bbox list used to skip it entirely
+    # and fall through to odc-stac's own bbox handling, so the same area typed as
+    # a bbox and drawn as a rectangle produced different grids.
+    #
+    # A caller-supplied `geobox` still wins over everything: it IS the grid of an
+    # existing cube, and updated dates must land on it exactly. See
+    # get_update.geobox_from_cube.
     _exact_geobox = None
     if geobox is not None:
         _exact_geobox = geobox
@@ -1139,24 +1309,42 @@ def get_stac(
                 % (geobox.width, geobox.height, target_crs),
                 flush=True,
             )
-    elif target_crs is not None and not isinstance(polygon, (list, tuple)):
+    elif target_crs is not None:
         try:
             from odc.geo.geobox import GeoBox
 
-            _g = polygon if isinstance(polygon, gpd.GeoDataFrame) else None
-            if _g is None:
-                from .vector_refiner import read_polygon_file
+            if isinstance(polygon, (list, tuple)):
+                # A bbox IS a polygon, so make it one and measure it the same
+                # way. Anything else guarantees the two kinds of AOI drift.
+                from shapely.geometry import box as _shapely_box
 
-                _g = read_polygon_file(polygon)
-            _b = _g.to_crs(target_crs).total_bounds
+                _g = gpd.GeoDataFrame(
+                    geometry=[_shapely_box(*[float(v) for v in bbox])],
+                    crs="EPSG:4326",
+                )
+            else:
+                _g = polygon if isinstance(polygon, gpd.GeoDataFrame) else None
+                if _g is None:
+                    from .vector_refiner import read_polygon_file
+
+                    _g = read_polygon_file(polygon)
+            _b = aoi_bounds_in_crs(_g, target_crs)
+
+            # canonical_bands, not bands: the latter has already been remapped to
+            # per-source asset keys (CDSE's "B04_10m", element84's B-numbers),
+            # which the native-spacing table does not speak.
+            _unit = grid_snap_unit(mission, canonical_bands, resolution)
+            _snapped = snap_bounds(
+                (float(_b[0]), float(_b[1]), float(_b[2]), float(_b[3])), _unit
+            )
             _exact_geobox = GeoBox.from_bbox(
-                (float(_b[0]), float(_b[1]), float(_b[2]), float(_b[3])),
-                crs=target_crs, resolution=resolution, tight=True,
+                _snapped, crs=target_crs, resolution=resolution, tight=True,
             )
             if not q:
                 print(
                     "Grid pinned to the AOI: %d x %d px at %g m in %s"
-                    % (_exact_geobox.width, _exact_geobox.height, resolution, target_crs),
+                    % (_exact_geobox.width, _exact_geobox.height, resolution, target_crs)
+                    + (", aligned to a %g m grid" % _unit if _unit else ""),
                     flush=True,
                 )
         except Exception as exc:      # never block a build over grid pinning

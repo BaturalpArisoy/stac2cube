@@ -741,37 +741,19 @@ def _enlarge_polygon_for_coreg(polygon, resolution=None):
 
 
 def _band_resolution_map(mission_name: str):
-    if mission_name in {"sentinel_2_l2a", "sentinel_2_l1c"}:
-        return {
-            "coastal": "60m",
-            "blue": "10m",
-            "green": "10m",
-            "red": "10m",
-            "rededge1": "20m",
-            "rededge2": "20m",
-            "rededge3": "20m",
-            "nir": "10m",
-            "nir08": "20m",
-            "nir09": "60m",
-            "cirrus": "60m",
-            "swir16": "20m",
-            "swir22": "20m",
-            "scl": "20m",
-        }
-    elif mission_name == "sentinel_1_rtc":
-        return {"vh": "10m", "vv": "10m"}
-    elif mission_name == "landsat_c2_l2":
-        return {
-            "coastal": "30m",
-            "blue": "30m",
-            "green": "30m",
-            "red": "30m",
-            "nir": "30m",
-            "swir1": "30m",
-            "swir2": "30m",
-            "thermal": "30m",
-        }
-    return {}
+    """Native pixel spacing per band, as "10m"/"20m"/... for display.
+
+    Derived from get_data._NATIVE_BAND_RESOLUTION so this table and the one the
+    build path snaps the grid to cannot drift apart.
+    """
+    from .get_data import native_band_resolution
+
+    skip = {"aot", "wvp", "qa_pixel", "data"}   # not offered as selectable bands
+    return {
+        band: f"{int(res)}m"
+        for band, res in native_band_resolution(mission_name).items()
+        if band not in skip
+    }
 
 
 def _band_options_with_resolution(mission_name: str, band_list):

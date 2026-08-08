@@ -1,5 +1,6 @@
 from .vector_refiner import polygon_2_gdf
 import re
+import math
 import numpy as np
 import xarray as xr
 
@@ -414,7 +415,17 @@ def _reproject_grid(stac, src_crs, target_crs, resolution=None):
     chosen so the warped raster has roughly the same pixel count as the source -
     i.e. approximately the input resolution, NOT exactly. Pass a number (CRS
     units, metres here) to pin it.
+
+    The origin is snapped to a whole multiple of the pixel size, the same rule
+    the build path uses (see get_data.grid_snap_unit). Without it
+    ``calculate_default_transform`` puts the corner on wherever the warped
+    bounds happen to land, so reprojecting two cubes of the same area into the
+    same CRS gave two grids offset by a fraction of a pixel, and they no longer
+    overlaid each other. Only whole multiples of the pixel size are used here -
+    a reprojected cube has no provider grid left to align to, so there is
+    nothing coarser worth snapping to.
     """
+    from affine import Affine
     from rasterio.warp import calculate_default_transform
 
     left, bottom, right, top = stac.rio.bounds()
@@ -425,7 +436,7 @@ def _reproject_grid(stac, src_crs, target_crs, resolution=None):
             raise ValueError(f"resolution={resolution!r} must be a positive number.")
         kwargs["resolution"] = (res, res)
 
-    return calculate_default_transform(
+    transform, width, height = calculate_default_transform(
         src_crs,
         target_crs,
         int(stac.sizes["x"]),
@@ -436,6 +447,18 @@ def _reproject_grid(stac, src_crs, target_crs, resolution=None):
         top,
         **kwargs,
     )
+
+    # Grow outward to the snapped origin so nothing is cropped, then re-derive
+    # the size from the snapped corner.
+    px, py = abs(transform.a), abs(transform.e)
+    if px > 0 and py > 0:
+        x0 = math.floor(transform.c / px) * px
+        y0 = math.ceil(transform.f / py) * py
+        width += int(round((transform.c - x0) / px))
+        height += int(round((y0 - transform.f) / py))
+        transform = Affine(transform.a, transform.b, x0, transform.d, transform.e, y0)
+
+    return transform, width, height
 
 
 def _reproject_band_groups(stac, resampling):
