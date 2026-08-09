@@ -100,6 +100,7 @@ from .shadow_masking import *
 from .get_statistics import *
 from .get_update import *
 from .mosaic import *
+from .aoi_tiler import *
 from .tables import *
 from .coregistration import *
 from .super_resolution import *

@@ -57,6 +57,7 @@ from .auxiliary import export_cube_statistics
 from .auxiliary import _default_csv_path as _statistics_csv_path
 from .main import settings_sidecar_path
 from .mosaic import mosaic_cubes, mosaic_layers
+from .aoi_tiler import tile_aoi
 
 from .get_data import (
     SCENE_METADATA_AVAILABILITY,
@@ -1193,6 +1194,47 @@ def datacube_builder(missions_func=missions):
         indent=False,
     )
 
+    # --- AOI Tiler ------------------------------------------------------------
+    # Cuts the area into equal rectangles and points Polygon at the result, which
+    # the existing multi-feature batch path turns into one cube per tile.
+    # Deliberately a Checkbox rather than just a button: tiling and clipping are
+    # mutually exclusive (see _sync_tiler_clip_exclusion) and an exclusion needs
+    # an on/off state on both sides, not a fire-once action on one of them.
+    tiler_enable_w = widgets.Checkbox(
+        value=False,
+        description="Split the area into equal tiles",
+        indent=False,
+    )
+    # continuous_update=False so the count below commits on Enter or focus loss.
+    # With the default, typing "12" is seen as "1" then "12" and the label
+    # flickers through a piece count the user never asked for.
+    tiler_rows_w = widgets.BoundedIntText(
+        value=2, min=1, max=100, description="Rows:",
+        continuous_update=False, disabled=True,
+        layout=widgets.Layout(width="150px"),
+        style={"description_width": "55px"},
+    )
+    tiler_cols_w = widgets.BoundedIntText(
+        value=2, min=1, max=100, description="Columns:",
+        continuous_update=False, disabled=True,
+        layout=widgets.Layout(width="170px"),
+        style={"description_width": "75px"},
+    )
+    tiler_run_btn = widgets.Button(
+        description="Split area into tiles",
+        icon="th",
+        button_style="info",
+        disabled=True,
+        tooltip="Write the tiles to a file and use it as the new polygon",
+        layout=widgets.Layout(width="220px"),
+    )
+    tiler_count_html = widgets.HTML("")
+    # Result of the last run, shown INSIDE the panel. The Status card at the
+    # bottom of the page also gets the full report, but it is far enough away
+    # that a user who clicks the button sees nothing happen except the polygon
+    # path quietly changing.
+    tiler_result_html = widgets.HTML("", layout=widgets.Layout(display="none"))
+
     max_cc_w = widgets.IntText(
         value=100,
         description="Max CC:",
@@ -1667,6 +1709,10 @@ def datacube_builder(missions_func=missions):
     # preset, and re-selecting a mission re-applies the active preset.
     _cloud_preset_state = {"n": 1}
     _cloud_caps = {"masking": True, "max_cc": True}
+    # Whether the CHOSEN MISSION can clip at all. Kept separate from the
+    # tiler's exclusion so the two reasons for greying the clip box out do not
+    # overwrite each other - see _sync_tiler_clip_exclusion.
+    _clip_caps = {"supported": True}
 
     def _set_cloud_params_disabled(disabled):
         """Grey (or free) the raw cloud widgets together. Mission capability is a
@@ -6211,11 +6257,12 @@ def datacube_builder(missions_func=missions):
         _clip_supported = (not clip_cfg["disabled"]) and (
             True in [v for _, v in clip_cfg["options"]]
         )
-        if _clip_supported:
-            clip_raster_w.disabled = False
-        else:
+        _clip_caps["supported"] = bool(_clip_supported)
+        if not _clip_supported:
             clip_raster_w.value = False
-            clip_raster_w.disabled = True
+        # The tiler can grey the box out for a second, unrelated reason, so the
+        # enabled state is settled in one place rather than assigned here.
+        _sync_tiler_clip_exclusion()
 
         # Cloud masking availability (mission capability). The disabled/greyed
         # state and values are governed by the active cloud preset, re-applied at
@@ -7278,6 +7325,319 @@ def datacube_builder(missions_func=missions):
     _update_clip_warning()
 
     # -------------------------------------------------------------------------
+    # AOI Tiler: cut the area into equal tiles, one data cube each.
+    #
+    # The tiler REPLACES the polygon with a multi-feature file of rectangles,
+    # which the build's existing batch path turns into one cube per feature. It
+    # writes nothing else and changes no other parameter.
+    #
+    # Tiling and clipping are mutually exclusive, both ways. Once the outline
+    # has become rectangles, "clip to the outline" could only clip each cube to
+    # its own edge - a no-op that would leave the tick claiming something that
+    # no longer happens - and clipping first would throw away the shape the
+    # tiler needs to decide which tiles are empty.
+    # -------------------------------------------------------------------------
+    # Path this tiler last produced. While Polygon still points at it, tiling is
+    # switched off and locked: a second run would tile the TILES, cutting each
+    # rectangle into a grid of its own. Picking any other polygon unlocks it.
+    _tiler_state = {"tiled_path": None}
+
+    def _polygon_is_our_own_tiles():
+        done = _tiler_state["tiled_path"]
+        return bool(done) and (polygon_w.value or "").strip() == done
+
+    def _sync_tiler_clip_exclusion(*_):
+        tile_on = bool(tiler_enable_w.value)
+        clip_on = bool(clip_raster_w.value)
+
+        # Two independent reasons to grey out clipping: the mission cannot do it
+        # at all, or the tiler owns the polygon. Resolved together, so neither
+        # can silently re-enable the other's lock.
+        clip_raster_w.disabled = (not _clip_caps["supported"]) or tile_on
+        tiler_enable_w.disabled = clip_on or _polygon_is_our_own_tiles()
+
+        for w in (tiler_rows_w, tiler_cols_w, tiler_run_btn):
+            w.disabled = not tile_on
+        _update_tiler_count()
+
+    def _update_tiler_count(*_):
+        """Live 'rows x columns = N tiles', so the multiplication is never a
+        surprise the user only discovers after the build starts."""
+        if not tiler_enable_w.value:
+            tiler_count_html.value = ""
+            return
+        rows, cols = int(tiler_rows_w.value), int(tiler_cols_w.value)
+        n = rows * cols
+        if n < 2:
+            tiler_count_html.value = (
+                "<div style='font-size:12px; color:#92400e; background:#fffbeb; "
+                "border:1px solid #fde68a; border-radius:6px; padding:6px 8px;'>"
+                "1 row x 1 column is the area you already have. Raise "
+                "<b>Rows</b> or <b>Columns</b> to split it."
+                "</div>"
+            )
+            return
+        # The "can be lower" caveat is only ever true for a real outline. The
+        # tiler cuts the AOI's BOUNDING BOX, so a bounding-box input tiles into
+        # rectangles that are all inside it by construction and none can be
+        # empty; only a polygon can leave a corner tile holding nothing (an
+        # L-shape, a diagonal corridor).
+        try:
+            is_bbox = isinstance(_parse_polygon_input(polygon_w.value), list)
+        except Exception:
+            is_bbox = False
+        caveat = "" if is_bbox else (
+            " Tiles that hold no part of your area are dropped, so the final "
+            "count can be lower."
+        )
+        tiler_count_html.value = (
+            f"{_INFO_BOX}"
+            f"<b>{rows} rows x {cols} columns = {n} tiles</b>, one data cube each "
+            f"(batch processing).{caveat}"
+            "</div>"
+        )
+
+    def _tiler_target_crs(polygon):
+        """The projection the tiles must be drawn in: the build's own.
+
+        Output Projection wins when it is set. Otherwise the catalogue is probed
+        exactly as "Detect projections" does and the answer is WRITTEN back into
+        Output Projection. That write is the point: a tile grid drawn in one CRS
+        and built in another arrives rotated, its bounding boxes grow, and
+        neighbouring cubes end up overlapping. Pinning the value makes the two
+        unable to disagree.
+
+        Returns (crs, pinned_by_us).
+        """
+        chosen = (crs_user_w.value or "").strip()
+        if chosen:
+            return chosen, False
+
+        entries = probe_native_crs(
+            mission_dd.value,
+            polygon,
+            source=source_w.value,
+            daterange=_resolve_daterange(),
+        )
+        if not entries:
+            raise ValueError(
+                "No scenes were found for this area, so the projection the cubes "
+                "would be built in cannot be determined. Check the area and the "
+                "date range, or set Output Projection yourself."
+            )
+        crs_user_w.value = entries[0]["crs"]
+        return entries[0]["crs"], True
+
+    def _tiler_output_path(polygon, rows, cols):
+        """Where the tiles are written: next to the source file, or into
+        ./polygons for a bbox, which has no file to sit beside.
+
+        The grid goes in the name (``aoi_tiled_2_2.gpkg``) so a folder of tile
+        files stays readable, and so re-tiling the same area at a different
+        grid does not overwrite the previous one.
+        """
+        if not isinstance(polygon, (list, tuple)):
+            src = Path(str(polygon))
+            return str(src.with_name(f"{src.stem}_tiled_{rows}_{cols}.gpkg"))
+
+        out_dir = Path("polygons")
+        try:
+            out_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            out_dir = Path(tempfile.gettempdir())
+        stamp = _datetime.now().strftime("%Y%m%d_%H%M%S")
+        return str((out_dir / f"bbox_{stamp}_tiled_{rows}_{cols}.gpkg").resolve())
+
+    def _tiler_feature_count(polygon):
+        """How many features the input file holds, or 1 for a bbox.
+
+        A multi-feature file ALREADY means one cube per feature here, and the
+        tiler would merge those features into a single outline before cutting
+        it - silently replacing the user's batch with an unrelated grid and
+        covering the gaps between the features. Counted so that can be refused
+        rather than discovered later.
+        """
+        if isinstance(polygon, (list, tuple)):
+            return 1
+        try:
+            import geopandas as gpd
+
+            return len(gpd.read_file(polygon))
+        except Exception:
+            return 1  # unreadable files fail later, with a better message
+
+    def _set_tiler_result(html, tone="green"):
+        colours = {
+            "green": ("#166534", "#f0fdf4", "#bbf7d0"),
+            "red": ("#991b1b", "#fef2f2", "#fecaca"),
+        }
+        fg, bg, border = colours[tone]
+        tiler_result_html.value = (
+            f"<div style='font-size:12px; color:{fg}; background:{bg}; "
+            f"border:1px solid {border}; border-radius:6px; padding:6px 8px;'>"
+            f"{html}</div>"
+        )
+        tiler_result_html.layout.display = ""
+
+    def _on_tiler_run_clicked(_btn):
+        try:
+            polygon = _parse_polygon_input(polygon_w.value)
+            if polygon is None:
+                raise ValueError(
+                    "Set a polygon file or bounding box first - there is nothing "
+                    "to split yet."
+                )
+            n_features = _tiler_feature_count(polygon)
+            if n_features > 1:
+                raise ValueError(
+                    f"This file holds {n_features} features, which already "
+                    "builds one data cube per feature (batch processing). "
+                    "Tiling would merge them into a single outline and cut its "
+                    "bounding box, so the tiles would not match the features "
+                    "and the empty space between them would be downloaded too. "
+                    "Tile a single-feature area instead."
+                )
+            rows, cols = int(tiler_rows_w.value), int(tiler_cols_w.value)
+            if rows * cols < 2:
+                raise ValueError(
+                    "1 row x 1 column is the area you already have. Raise Rows "
+                    "or Columns to actually split it."
+                )
+            # Tile edges have to land on whole pixels, or neighbouring cubes sit
+            # on different pixel grids and can only be mosaicked by resampling.
+            resolution = None if resolution_w.disabled else int(resolution_w.value or 0)
+            if not resolution:
+                raise ValueError(
+                    "Resolution is needed (Advanced Parameters): tile edges must "
+                    "land on whole pixels, or the cubes end up on grids that do "
+                    "not line up."
+                )
+
+            tiler_run_btn.disabled = True
+            _show_status("Splitting the area into tiles...")
+            target_crs, pinned = _tiler_target_crs(polygon)
+            out_path = _tiler_output_path(polygon, rows, cols)
+
+            gdf = tile_aoi(
+                polygon,
+                n_pieces=(rows, cols),
+                resolution=resolution,
+                crs=target_crs,
+                out=out_path,
+                q=True,
+            )
+
+            previous = polygon_w.value
+            new_polygon = _normalize_ui_path(out_path)
+            # Recorded BEFORE the assignment: setting polygon_w fires the
+            # observer, which re-runs the exclusion sync, which has to already
+            # know this path is the tiler's own output so it locks the tiler
+            # instead of offering a second run over the tiles.
+            _tiler_state["tiled_path"] = new_polygon
+            polygon_w.value = new_polygon
+            tiler_enable_w.value = False   # one run per polygon; also unlocks clip
+
+            dropped = rows * cols - len(gdf)
+            lines = [
+                f"✅ Area split into {len(gdf)} tiles ({rows} rows x {cols} columns)."
+            ]
+            if dropped:
+                lines.append(
+                    f"   {dropped} tile(s) held no part of your area and were dropped."
+                )
+            lines.append(
+                f"   Tile size: {int(gdf.width_px.min())} x {int(gdf.height_px.min())}"
+                f" to {int(gdf.width_px.max())} x {int(gdf.height_px.max())} pixels"
+                f" at {resolution} m."
+            )
+            lines.append(f"   Saved to: {out_path}")
+            lines.append(
+                f"   Polygon now points at it, so the build will produce "
+                f"{len(gdf)} data cubes (batch processing)."
+            )
+            if pinned:
+                lines.append(
+                    f"   Output Projection set to {target_crs} so the tiles are "
+                    "not reprojected during the build."
+                )
+            lines.append(f"   Your previous polygon, to go back: {previous}")
+            _show_status("\n".join(lines))
+
+            _set_tiler_result(
+                f"✅ <b>Area tiled into {len(gdf)} pieces</b> "
+                f"({rows} rows x {cols} columns"
+                + (f", {dropped} empty tile(s) dropped" if dropped else "")
+                + ").<br>"
+                f"Saved to <code>{out_path}</code> and <b>set as the new "
+                "polygon</b>, so the build will produce "
+                f"<b>{len(gdf)} data cubes</b> (batch processing)."
+                + (f"<br>Output Projection set to <b>{target_crs}</b> so the "
+                   "tiles are not reprojected." if pinned else "")
+            )
+        except Exception as e:
+            msg = _friendly_error(e, "Splitting the area into tiles")
+            _show_status(msg)
+            _set_tiler_result(f"❌ {msg}", tone="red")
+        finally:
+            tiler_run_btn.disabled = not tiler_enable_w.value
+
+    def _on_clip_toggled(change):
+        # Untick before the sync disables the other box: a disabled checkbox can
+        # still be set programmatically, but leaving it ticked-and-greyed would
+        # read as "this is on and locked" rather than "this is off".
+        if change.get("new"):
+            tiler_enable_w.value = False
+        _sync_tiler_clip_exclusion()
+
+    def _on_tiler_toggled(change):
+        if change.get("new"):
+            clip_raster_w.value = False
+        _sync_tiler_clip_exclusion()
+
+    clip_raster_w.observe(_on_clip_toggled, names="value")
+    tiler_enable_w.observe(_on_tiler_toggled, names="value")
+    tiler_rows_w.observe(lambda change: _update_tiler_count(), names="value")
+    tiler_cols_w.observe(lambda change: _update_tiler_count(), names="value")
+    def _on_polygon_changed_for_tiler(*_):
+        # A new polygon retires the previous run: the old success box no longer
+        # describes what is in the box above it, and the tiler unlocks so the
+        # new area can be tiled in turn.
+        if not _polygon_is_our_own_tiles():
+            tiler_result_html.layout.display = "none"
+        _sync_tiler_clip_exclusion()
+
+    # Also re-renders the count label, whose wording depends on whether the
+    # input is a bounding box or a real outline.
+    polygon_w.observe(_on_polygon_changed_for_tiler, names="value")
+    tiler_run_btn.on_click(_on_tiler_run_clicked)
+    _sync_tiler_clip_exclusion()
+
+    tiler_box = _subpanel(
+        [
+            widgets.HTML(
+                "<div style='font-size:13px; font-weight:600; color:#374151; "
+                "margin:0 0 2px 0;'>AOI Tiler</div>"
+            ),
+            widgets.HTML(
+                "<div style='font-size:12px; color:#6b7280; margin:0 0 2px 0;'>"
+                "Cut the area into equal tiles and build one data cube per tile. "
+                "Use it when a single cube over the whole area would be too big "
+                "to build, move or process."
+                "</div>"
+            ),
+            tiler_enable_w,
+            widgets.HBox(
+                [tiler_rows_w, tiler_cols_w],
+                layout=widgets.Layout(gap="10px", margin="2px 0"),
+            ),
+            tiler_count_html,
+            widgets.HBox([tiler_run_btn], layout=widgets.Layout(margin="2px 0")),
+            tiler_result_html,
+        ],
+        accent="violet",
+    )
+
+    # -------------------------------------------------------------------------
     # "Check area coverage": the last block of the Polygon group. Reads the STAC
     # catalogue (metadata only, no pixels) over the chosen area and date range and
     # shows which orbits see the area, how much of it each one covers per date, and
@@ -7690,6 +8050,13 @@ def datacube_builder(missions_func=missions):
                         ],
                         accent="amber",
                     ),
+                    _line_divider(),
+                    # --- AOI Tiler: splits the area, REPLACES the polygon -----
+                    # Last in the group on purpose: everything above defines the
+                    # area, this optionally cuts it up. It also has to sit after
+                    # Output shape, because tiling and clipping lock each other
+                    # out and the user should meet the clip choice first.
+                    tiler_box,
                     _line_divider(),
                     # --- Optional coverage check: reads the catalogue, sets nothing ---
                     widgets.HBox(
@@ -8835,6 +9202,14 @@ def datacube_builder(missions_func=missions):
             "indices": indices_w,
             "index_checkboxes": _index_rows,
             "clip_raster": clip_raster_w,
+            # AOI Tiler. Deliberately NOT part of the settings JSON: it is a
+            # pre-build action, not a build parameter, and what it produces (the
+            # tiled polygon file, the pinned crs, clip_raster off) is already
+            # captured by the widgets those settings come from.
+            "tiler_enable": tiler_enable_w,
+            "tiler_rows": tiler_rows_w,
+            "tiler_cols": tiler_cols_w,
+            "tiler_run_btn": tiler_run_btn,
             "max_cc": max_cc_w,
             "cloud_masking": cloud_masking_w,
             "keep_clouds": keep_clouds_w,
