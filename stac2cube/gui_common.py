@@ -359,7 +359,7 @@ GUI_CSS = """
 }
 
 /* Sub-panel: a lighter, warm off-white card used to visually box a related set
-   of fields (e.g. the Option 1 / Option 2 / Output shape blocks inside the
+   of fields (e.g. the Option 1 / Option 2 / Clip Raster blocks inside the
    Polygon group). It sits on top of the olive group background (#eef0e3) and
    reads as a separate raised panel thanks to the lighter fill, thin border and
    a coloured left accent bar. Accent colour is set by a modifier class. */
@@ -388,6 +388,16 @@ GUI_CSS = """
 .stac2cube-group-turquoise { border-left-color: #14b8a6; }
 .stac2cube-group-violet    { border-left-color: #8b5cf6; }
 .stac2cube-group-blue      { border-left-color: #3b82f6; }
+
+/* A field group NESTED inside another group (Advanced Options, inside Polygon)
+   sits on its parent's olive fill, so the default group background makes it
+   vanish - same colour on same colour, with only a pale grey hairline between.
+   Give it the sub-panel's lighter card fill instead, so it reads as a raised
+   panel and lines up with the sub-panels it sits beneath. */
+.stac2cube-group-nested {
+    background: #fcfbf5;
+    border-color: #d7dbc4;
+}
 
 /* Keep accordion panels and nested widget boxes from overflowing the card
    (.p-* names are ipywidgets 7, .jupyter-widget-Collapse* are ipywidgets 8). */

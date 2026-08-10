@@ -57,7 +57,7 @@ from .auxiliary import export_cube_statistics
 from .auxiliary import _default_csv_path as _statistics_csv_path
 from .main import settings_sidecar_path
 from .mosaic import mosaic_cubes, mosaic_layers
-from .aoi_tiler import tile_aoi
+from .aoi_tiler import aoi_from_point, read_point_file, tile_aoi
 
 from .get_data import (
     SCENE_METADATA_AVAILABILITY,
@@ -1234,6 +1234,65 @@ def datacube_builder(missions_func=missions):
     # that a user who clicks the button sees nothing happen except the polygon
     # path quietly changing.
     tiler_result_html = widgets.HTML("", layout=widgets.Layout(display="none"))
+
+    # --- Centre point and size ------------------------------------------------
+    # Grows a rectangle of a given PIXEL size around a coordinate, the way cubo
+    # does, and writes it into the Area box above. Several points produce one
+    # feature each, which the build turns into one cube per point.
+    area_source_w = widgets.ToggleButtons(
+        options=[("Off", "off"), ("Draw on a map", "map"),
+                 ("Centre point", "point")],
+        value="off",
+        style={"button_width": "auto"},
+    )
+    point_lat_w = widgets.FloatText(
+        value=41.0421, description="Latitude:", continuous_update=False,
+        layout=widgets.Layout(width="210px"),
+        style={"description_width": "70px"},
+    )
+    point_lon_w = widgets.FloatText(
+        value=29.0173, description="Longitude:", continuous_update=False,
+        layout=widgets.Layout(width="220px"),
+        style={"description_width": "80px"},
+    )
+    point_many_w = widgets.Checkbox(
+        value=False, description="Several points (one data cube each)",
+        indent=False,
+    )
+    point_list_w = widgets.Textarea(
+        placeholder="41.0421, 29.0173\n41.1100, 29.2200",
+        continuous_update=False,
+        layout=widgets.Layout(width="100%", height="90px", display="none"),
+    )
+    # Height x Width rather than one "edge size": rectangles come for free and
+    # the row matches the tiler's Rows x Columns, which sits just below it.
+    point_height_w = widgets.BoundedIntText(
+        value=128, min=1, max=20000, description="Height:",
+        continuous_update=False,
+        layout=widgets.Layout(width="170px"),
+        style={"description_width": "70px"},
+    )
+    point_width_w = widgets.BoundedIntText(
+        value=128, min=1, max=20000, description="Width:",
+        continuous_update=False,
+        layout=widgets.Layout(width="160px"),
+        style={"description_width": "60px"},
+    )
+    browse_point_btn = widgets.Button(
+        description="Load points from a file",
+        icon="folder-open",
+        tooltip="Fill the coordinates from a point file (any projection)",
+        layout=widgets.Layout(width="220px"),
+    )
+    browse_point_btn.style.button_color = "#f3f4f6"
+    point_run_btn = widgets.Button(
+        description="Create area from point",
+        icon="crosshairs",
+        button_style="info",
+        layout=widgets.Layout(width="240px"),
+    )
+    point_size_html = widgets.HTML("")
+    point_result_html = widgets.HTML("", layout=widgets.Layout(display="none"))
 
     max_cc_w = widgets.IntText(
         value=100,
@@ -2509,8 +2568,12 @@ def datacube_builder(missions_func=missions):
     polygon_fc = None
     output_fc = None
     gif_out_fc = None
+    point_fc = None
 
     polygon_fc_box = widgets.VBox(
+        [], layout=widgets.Layout(display="none", width="100%")
+    )
+    point_fc_box = widgets.VBox(
         [], layout=widgets.Layout(display="none", width="100%")
     )
     output_fc_box = widgets.VBox(
@@ -2554,6 +2617,23 @@ def datacube_builder(missions_func=missions):
                 [output_fc], layout=widgets.Layout(display="none", width="100%")
             )
 
+            # Points for "Centre point and size". Same formats as the polygon
+            # chooser - whatever holds points is usually the same file type.
+            point_fc = _CubeFileChooser(
+                path=str(Path(".").resolve()),
+                filename="",
+                title="Select a file of points",
+                show_only_dirs=False,
+                select_default=False,
+            )
+            point_fc.filter_pattern = [
+                "*.gpkg", "*.geojson", "*.json", "*.shp", "*.kml", "*.kmz",
+            ]
+            point_fc.use_dir_icons = True
+            point_fc_box = widgets.VBox(
+                [point_fc], layout=widgets.Layout(display="none", width="100%")
+            )
+
             gif_out_fc = _CubeFileChooser(
                 path=str(Path(".").resolve()),
                 filename="",
@@ -2571,6 +2651,7 @@ def datacube_builder(missions_func=missions):
             polygon_fc = None
             output_fc = None
             gif_out_fc = None
+            point_fc = None
             polygon_fc_box = widgets.VBox(
                 [], layout=widgets.Layout(display="none", width="100%")
             )
@@ -2578,6 +2659,9 @@ def datacube_builder(missions_func=missions):
                 [], layout=widgets.Layout(display="none", width="100%")
             )
             gif_out_fc_box = widgets.VBox(
+                [], layout=widgets.Layout(display="none", width="100%")
+            )
+            point_fc_box = widgets.VBox(
                 [], layout=widgets.Layout(display="none", width="100%")
             )
 
@@ -7135,7 +7219,7 @@ def datacube_builder(missions_func=missions):
         indent=False,
     )
     use_drawn_btn = widgets.Button(
-        description="Use drawn area",
+        description="Use drawn feature(s)",
         button_style="success",
         icon="check",
         layout=widgets.Layout(width="auto", min_width="220px", height="44px"),
@@ -7196,14 +7280,14 @@ def datacube_builder(missions_func=missions):
             else:
                 draw_box.children = [
                     widgets.HTML(
-                        "<div style='font-size:12px; color:#6b7280; margin:0 0 4px 0;'>"
-                        "• Use the tools at the <b>top-left</b> of the map to draw your area.<br>"
-                        "&nbsp;&nbsp;Tip: choose <b>“Draw a rectangle”</b> to maximize "
-                        "co-registration and super-resolution efficiency.<br>"
-                        "• Default background is <b>Satellite (Esri)</b> with <b>place "
-                        "names</b> on top. To change it, open the toolbar at the "
-                        "<b>top-right</b> of the map and click <b>Layers</b> (next to "
-                        "Toolbar button).</div>"
+                        f"{_INFO_BOX}"
+                        "Use the tools at the <b>top-left</b> of the map to draw your "
+                        "single feature or multiple features."
+                        "<ul style='margin:4px 0 0 18px; padding:0;'>"
+                        "<li>For <b>polygon(s)</b> - select "
+                        "<b>“Draw a rectangle”</b> or <b>“Draw a polygon”</b></li>"
+                        "<li>For <b>point(s)</b> - select <b>“Draw a marker”</b></li>"
+                        "</ul></div>"
                     ),
                     m,
                     widgets.HBox([use_drawn_btn], layout=widgets.Layout(gap="6px")),
@@ -7212,6 +7296,54 @@ def datacube_builder(missions_func=missions):
             state["draw_box_built"] = True
         draw_box.layout.display = ""
 
+    def _drawn_features(m):
+        """EVERY feature currently on the map, not just the last one.
+
+        leafmap offers several views of this and they are not equivalent:
+        ``draw_features`` is the full list, ``user_rois`` the same as a
+        FeatureCollection, and ``user_roi`` only the LAST shape drawn. This used
+        to read ``user_roi``, so a user who drew three boxes silently got one -
+        which is why the panel could not honestly offer multiple features.
+        Tried in order, so a leafmap version missing one still works.
+        """
+        feats = list(getattr(m, "draw_features", None) or [])
+        if not feats:
+            dc = getattr(m, "draw_control", None)
+            feats = list(getattr(dc, "data", None) or []) if dc is not None else []
+        if not feats:
+            rois = getattr(m, "user_rois", None)
+            if isinstance(rois, dict):
+                feats = list(rois.get("features") or [])
+        if not feats:
+            one = getattr(m, "user_roi", None)
+            feats = [one] if one else []
+        return [f for f in feats if f]
+
+    def _split_drawn(feats):
+        """Sort drawn features into (polygon features, [lon, lat] points, other types)."""
+        polys, points, other = [], [], []
+        for f in feats:
+            geom = f.get("geometry", f) if isinstance(f, dict) else None
+            gtype = (geom or {}).get("type")
+            if gtype in ("Polygon", "MultiPolygon"):
+                polys.append(
+                    f if (isinstance(f, dict) and f.get("type") == "Feature")
+                    else {"type": "Feature", "properties": {}, "geometry": geom}
+                )
+            elif gtype == "Point":
+                points.append(list(geom.get("coordinates") or []))
+            else:
+                other.append(gtype)
+        return polys, points, other
+
+    def _polygon_ring_bbox(feature):
+        geom = feature.get("geometry", feature)
+        coords = geom.get("coordinates")
+        ring = coords[0] if geom.get("type") == "Polygon" else coords[0][0]
+        xs = [pt[0] for pt in ring]
+        ys = [pt[1] for pt in ring]
+        return [min(xs), min(ys), max(xs), max(ys)]
+
     def _on_use_drawn_clicked(_):
         with draw_status:
             clear_output()
@@ -7219,74 +7351,99 @@ def datacube_builder(missions_func=missions):
             if m is None:
                 print("❌ The map isn't ready yet.")
                 return
-            roi = getattr(m, "user_roi", None)
-            if not roi:
+
+            feats = _drawn_features(m)
+            if not feats:
                 print(
-                    "✋ Draw a rectangle or polygon on the map first (tools at the "
-                    "top-left of the map), then click “Use drawn area”."
+                    "✋ Draw something on the map first (tools at the top-left), "
+                    "then click “Use drawn feature(s)”."
                 )
                 return
-            try:
-                geom = roi.get("geometry", roi) if isinstance(roi, dict) else roi
-                gtype = (geom or {}).get("type")
-                coords = (geom or {}).get("coordinates")
-                if gtype == "Polygon":
-                    ring = coords[0]
-                elif gtype == "MultiPolygon":
-                    ring = coords[0][0]
+
+            polys, points, other = _split_drawn(feats)
+
+            # Polygons define an area directly; markers are centres a size is
+            # grown around. One click cannot mean both, and silently keeping one
+            # kind would throw away work the user can see on the map.
+            if polys and points:
+                print(
+                    f"✋ The map holds {len(polys)} polygon(s) AND {len(points)} "
+                    "point(s). They are used differently - a polygon IS the area, "
+                    "a point needs a size to grow around it. Delete one kind "
+                    "(the bin tool at the top-left) and click again."
+                )
+                return
+            if other and not polys and not points:
+                kinds = ", ".join(sorted({t for t in other if t}))
+                print(
+                    f"✋ Only polygons, rectangles and markers can be used; this "
+                    f"map holds {kinds}."
+                )
+                return
+
+            # --- markers: hand them to the point tool ------------------------
+            if points:
+                lats = [float(p[1]) for p in points]
+                lons = [float(p[0]) for p in points]
+                if len(lats) == 1:
+                    point_many_w.value = False
+                    point_lat_w.value, point_lon_w.value = lats[0], lons[0]
                 else:
-                    print(
-                        "✋ Please draw an area — a rectangle or polygon — not a point "
-                        f"or line (this looks like a {gtype})."
+                    point_many_w.value = True
+                    point_list_w.value = "\n".join(
+                        f"{la:.6f}, {lo:.6f}" for la, lo in zip(lats, lons)
                     )
-                    return
-                xs = [pt[0] for pt in ring]
-                ys = [pt[1] for pt in ring]
-                bbox = [min(xs), min(ys), max(xs), max(ys)]  # [xmin, ymin, xmax, ymax] WGS84
-            except Exception as e:
-                print(f"❌ Couldn't read the drawn shape: {e}")
+                _update_point_size()
+                # Switch the panel over, so the coordinates land somewhere the
+                # user is looking - and so the size boxes and the Create button
+                # they still have to press are in front of them.
+                area_source_w.value = "point"
+                _set_point_result(
+                    f"✅ <b>{len(lats)} point(s)</b> taken from the map. Set the "
+                    "size below and press <b>Create area from point</b>."
+                )
                 return
 
-            if bbox[0] >= bbox[2] or bbox[1] >= bbox[3]:
+            # --- polygons: write them all, one feature each -------------------
+            bad = [i for i, f in enumerate(polys, start=1)
+                   if (lambda b: b[0] >= b[2] or b[1] >= b[3])(_polygon_ring_bbox(f))]
+            if bad:
                 print(
-                    "✋ The drawn area has no width or height (it came out as a line or "
-                    f"point):\n{bbox}\n"
-                    "Please draw a box/polygon that covers an actual area — make sure to "
-                    "drag both sideways and up/down — then click “Use drawn area” again."
+                    f"✋ Shape {', '.join(str(i) for i in bad)} has no width or "
+                    "height (it came out as a line or a point). Redraw it so it "
+                    "covers an actual area, then click again."
                 )
                 return
 
-            # Save the EXACT drawn outline as a WGS84 GeoJSON file and point Polygon
-            # at it, so ticking "Clip data cube to polygon boundaries" clips to the
-            # true shape (not just the bbox). get_stac still derives the bbox from it
-            # for the search.
+            # The EXACT outlines are saved, so ticking "Clip to exact polygon
+            # outline" clips to the true shape and not just the bbox. Several
+            # features in one file is what activates batch processing, which is
+            # what the panel now promises.
             try:
-                feature = (
-                    roi
-                    if (isinstance(roi, dict) and roi.get("type") == "Feature")
-                    else {"type": "Feature", "properties": {}, "geometry": geom}
-                )
-                fc = {"type": "FeatureCollection", "features": [feature]}
+                fc = {"type": "FeatureCollection", "features": polys}
                 out_dir = Path("polygons")
                 try:
                     out_dir.mkdir(parents=True, exist_ok=True)
                 except Exception:
                     out_dir = Path(tempfile.gettempdir())
-                out_path = out_dir / f"drawn_{_datetime.now().strftime('%Y%m%d_%H%M%S')}.geojson"
-                out_path = out_path.resolve()  # store an absolute path, not relative
+                stamp = _datetime.now().strftime("%Y%m%d_%H%M%S")
+                out_path = (out_dir / f"drawn_{stamp}.geojson").resolve()
                 with open(out_path, "w", encoding="utf-8") as f:
                     json.dump(fc, f)
             except Exception as e:
-                print(f"❌ Couldn't save the drawn shape: {e}")
+                print(f"❌ Couldn't save the drawn shape(s): {e}")
                 return
 
             polygon_w.value = out_path.as_posix()  # overwrites any path/bbox set above
-            # Clipping is left to the user (the "Output shape" section): a drawn
-            # area defaults to its bounding box like any other input, and the user
-            # can tick "Clip to exact polygon outline" if they want the exact shape.
+            # Clipping is left to the user (the "Clip Raster" section): a drawn
+            # area defaults to its bounding box like any other input.
+            extra = (f" There are {len(polys)} features, so the build will "
+                     f"produce {len(polys)} data cubes (batch processing)."
+                     if len(polys) > 1 else "")
             print(
-                f'✅ Area from your drawing is saved to "{out_path.as_posix()}" and will be '
-                "used as the new polygon of the data cube (◡ ‿ ◡ ✿)"
+                f'✅ {len(polys)} feature(s) from your drawing saved to '
+                f'"{out_path.as_posix()}" and now used as the polygon of the '
+                f"data cube.{extra} (◡ ‿ ◡ ✿)"
             )
 
     draw_polygon_w.observe(lambda c: _update_draw_visibility(), names="value")
@@ -7397,15 +7554,18 @@ def datacube_builder(missions_func=missions):
             "</div>"
         )
 
-    def _tiler_target_crs(polygon):
-        """The projection the tiles must be drawn in: the build's own.
+    def _build_target_crs(probe_area):
+        """The projection an AOI tool must draw in: the build's own.
 
         Output Projection wins when it is set. Otherwise the catalogue is probed
         exactly as "Detect projections" does and the answer is WRITTEN back into
-        Output Projection. That write is the point: a tile grid drawn in one CRS
-        and built in another arrives rotated, its bounding boxes grow, and
-        neighbouring cubes end up overlapping. Pinning the value makes the two
-        unable to disagree.
+        Output Projection. That write is the point: a rectangle drawn in one CRS
+        and built in another arrives rotated and its bounding box grows, so
+        tiles overlap each other and a 128 px square stops being 128 px.
+        Pinning the value makes the two unable to disagree.
+
+        ``probe_area`` only has to be somewhere to search - a polygon path or a
+        lon/lat bbox. Shared by the tiler and the point tool.
 
         Returns (crs, pinned_by_us).
         """
@@ -7415,7 +7575,7 @@ def datacube_builder(missions_func=missions):
 
         entries = probe_native_crs(
             mission_dd.value,
-            polygon,
+            probe_area,
             source=source_w.value,
             daterange=_resolve_daterange(),
         )
@@ -7515,7 +7675,7 @@ def datacube_builder(missions_func=missions):
 
             tiler_run_btn.disabled = True
             _show_status("Splitting the area into tiles...")
-            target_crs, pinned = _tiler_target_crs(polygon)
+            target_crs, pinned = _build_target_crs(polygon)
             out_path = _tiler_output_path(polygon, rows, cols)
 
             gdf = tile_aoi(
@@ -7636,6 +7796,313 @@ def datacube_builder(missions_func=missions):
         ],
         accent="violet",
     )
+
+    # -------------------------------------------------------------------------
+    # Centre point and size: grow a rectangle of a given pixel size around one
+    # or more coordinates and write it into the Area box. Several points give
+    # one feature each, which the build turns into one cube per point.
+    # -------------------------------------------------------------------------
+    def _point_pairs():
+        """The coordinates as [(lat, lon), ...], from whichever input is showing."""
+        if not point_many_w.value:
+            return [(float(point_lat_w.value), float(point_lon_w.value))]
+
+        pairs = []
+        for n, line in enumerate((point_list_w.value or "").splitlines(), start=1):
+            text = line.strip()
+            if not text:
+                continue
+            # Accept a comma or whitespace between the two numbers: a pasted
+            # coordinate arrives either way and neither is worth rejecting.
+            parts = [p for p in re.split(r"[,\s]+", text) if p]
+            if len(parts) != 2:
+                raise ValueError(
+                    f"Line {n} is not a coordinate pair: {text!r}. Write one "
+                    '"latitude, longitude" per line.'
+                )
+            try:
+                pairs.append((float(parts[0]), float(parts[1])))
+            except ValueError:
+                raise ValueError(
+                    f"Line {n} has something that is not a number: {text!r}."
+                )
+        if not pairs:
+            raise ValueError(
+                'No coordinates entered. Write one "latitude, longitude" per line.'
+            )
+        return pairs
+
+    def _update_point_size(*_):
+        """Live 'N x M px at R m = X x Y km', because pixels are the unit the
+        user types in and kilometres are the one they can picture."""
+        h, w = int(point_height_w.value), int(point_width_w.value)
+        res = None if resolution_w.disabled else int(resolution_w.value or 0)
+        if not res:
+            point_size_html.value = (
+                "<div style='font-size:12px; color:#92400e; background:#fffbeb; "
+                "border:1px solid #fde68a; border-radius:6px; padding:6px 8px;'>"
+                "Set <b>Resolution</b> in Advanced Parameters - it is what turns "
+                "pixels into ground distance.</div>"
+            )
+            return
+        try:
+            n_pts = len(_point_pairs())
+        except Exception:
+            n_pts = 0
+        cubes = (f" &nbsp;|&nbsp; <b>{n_pts} data cubes</b>, one per point"
+                 if n_pts > 1 else "")
+        point_size_html.value = (
+            f"{_INFO_BOX}"
+            f"<b>{w} x {h} px</b> at {res} m = <b>{w * res:,} x {h * res:,} m</b> "
+            f"({w * res / 1000:.2f} x {h * res / 1000:.2f} km){cubes}"
+            "</div>"
+        )
+
+    def _coord_tag(value, pos, neg):
+        """A coordinate as a filename-safe tag: 41.0421 -> 41p0421N.
+
+        No decimal point, because a dot in a filename reads as the start of the
+        extension and makes ``point_41.0421_29.0173_128x128.gpkg`` hard to scan.
+        No minus sign either - a leading '-' is taken for a flag by some shells -
+        so the sign becomes a hemisphere letter, which is how anyone reading a
+        coordinate expects to see it anyway.
+        """
+        return f"{abs(float(value)):.4f}".replace(".", "p") + (
+            pos if float(value) >= 0 else neg
+        )
+
+    def _point_output_path(pairs, height, width):
+        """Named after what it is, not when it was made: a coordinate and a size
+        are what tell two of these apart in a folder."""
+        out_dir = Path("polygons")
+        try:
+            out_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            out_dir = Path(tempfile.gettempdir())
+        if len(pairs) == 1:
+            lat, lon = pairs[0]
+            stem = (f"point_{_coord_tag(lat, 'N', 'S')}"
+                    f"_{_coord_tag(lon, 'E', 'W')}_{width}x{height}")
+        else:
+            stem = f"points_{len(pairs)}_{width}x{height}"
+        return str((out_dir / f"{stem}.gpkg").resolve())
+
+    def _set_point_result(html, tone="green"):
+        colours = {
+            "green": ("#166534", "#f0fdf4", "#bbf7d0"),
+            "red": ("#991b1b", "#fef2f2", "#fecaca"),
+        }
+        fg, bg, border = colours[tone]
+        point_result_html.value = (
+            f"<div style='font-size:12px; color:{fg}; background:{bg}; "
+            f"border:1px solid {border}; border-radius:6px; padding:6px 8px;'>"
+            f"{html}</div>"
+        )
+        point_result_html.layout.display = ""
+
+    def _on_point_run_clicked(_btn):
+        try:
+            pairs = _point_pairs()
+            height, width = int(point_height_w.value), int(point_width_w.value)
+            resolution = None if resolution_w.disabled else int(resolution_w.value or 0)
+            if not resolution:
+                raise ValueError(
+                    "Resolution is needed (Advanced Parameters): the edge size "
+                    "is in pixels, and turning that into a ground rectangle "
+                    "needs the pixel size."
+                )
+
+            point_run_btn.disabled = True
+            _show_status("Building the area around the point(s)...")
+            lats = [p[0] for p in pairs]
+            lons = [p[1] for p in pairs]
+
+            # Two passes when the CRS is not already pinned. The first gives an
+            # exact lon/lat extent to search with (a bare point is a zero-area
+            # bbox, which is not a search area), the second redraws on the CRS
+            # the build will actually use.
+            gdf = aoi_from_point(lats, lons, edge_size=(height, width),
+                                 resolution=resolution,
+                                 crs=(crs_user_w.value or "").strip() or None,
+                                 q=True)
+            probe_bbox = [float(v) for v in gdf.to_crs("EPSG:4326").total_bounds]
+            target_crs, pinned = _build_target_crs(probe_bbox)
+            if pinned:
+                gdf = aoi_from_point(lats, lons, edge_size=(height, width),
+                                     resolution=resolution, crs=target_crs, q=True)
+
+            out_path = _point_output_path(pairs, height, width)
+            gdf.to_file(out_path)
+            polygon_w.value = _normalize_ui_path(out_path)
+
+            lines = [
+                f"✅ Area built around {len(gdf)} point(s): "
+                f"{width} x {height} px at {resolution} m "
+                f"({width * resolution} x {height * resolution} m)."
+            ]
+            lines.append(
+                f"   Centre offset: up to {gdf.offset_m.max():.1f} m from the "
+                "coordinate you gave (snapped to the pixel grid so the cube is "
+                "read without resampling)."
+            )
+            lines.append(f"   Saved to: {out_path}")
+            if pinned:
+                lines.append(
+                    f"   Output Projection set to {target_crs} so the area is "
+                    "not reprojected during the build."
+                )
+            _show_status("\n".join(lines))
+
+            _set_point_result(
+                f"✅ <b>Area built around {len(gdf)} point(s)</b>: "
+                f"{width} x {height} px at {resolution} m "
+                f"({width * resolution / 1000:.2f} x "
+                f"{height * resolution / 1000:.2f} km).<br>"
+                f"Saved to <code>{out_path}</code> and <b>set as the new "
+                "polygon</b>"
+                + (f", so the build will produce <b>{len(gdf)} data cubes</b> "
+                   "(batch processing)" if len(gdf) > 1 else "")
+                + f".<br>Centre is within {gdf.offset_m.max():.1f} m of your "
+                "coordinate (snapped to the pixel grid)."
+                + (f"<br>Output Projection set to <b>{target_crs}</b>."
+                   if pinned else "")
+            )
+        except Exception as e:
+            msg = _friendly_error(e, "Building the area from a point")
+            _show_status(msg)
+            _set_point_result(f"❌ {msg}", tone="red")
+        finally:
+            point_run_btn.disabled = False
+
+    def _on_browse_point_clicked(_):
+        if not filechooser_available or point_fc is None:
+            _set_point_result(
+                "Optional dependency <code>ipyfilechooser</code> is not "
+                "available. Install it to use the Browse buttons.", tone="red"
+            )
+            return
+        _toggle_box_display(point_fc_box)
+
+    def _on_point_chooser_selected(chooser):
+        """Fill the coordinate inputs from a point file.
+
+        One point goes into the Latitude/Longitude boxes; several switch the
+        panel into list mode and fill the text area, so what was loaded is
+        visible and editable rather than hidden behind a file path.
+        """
+        path = getattr(chooser, "selected", None)
+        point_fc_box.layout.display = "none"
+        if not path:
+            return
+        try:
+            lats, lons, src_crs = read_point_file(path)
+        except Exception as exc:
+            _set_point_result(
+                f"❌ {_friendly_error(exc, 'Reading the point file')}", tone="red"
+            )
+            return
+
+        if len(lats) == 1:
+            point_many_w.value = False
+            point_lat_w.value, point_lon_w.value = lats[0], lons[0]
+        else:
+            point_many_w.value = True
+            point_list_w.value = "\n".join(
+                f"{la:.6f}, {lo:.6f}" for la, lo in zip(lats, lons)
+            )
+        _update_point_size()
+
+        # Say when the coordinates were converted. A user who put in a UTM file
+        # and sees degrees appear should know that was deliberate, not a bug.
+        converted = (
+            f" Coordinates converted from <b>{src_crs}</b> to latitude/longitude."
+            if src_crs and src_crs.upper() not in ("EPSG:4326",) else ""
+        )
+        _set_point_result(
+            f"✅ Loaded <b>{len(lats)} point(s)</b> from "
+            f"<code>{path}</code>.{converted}"
+        )
+
+    browse_point_btn.on_click(_on_browse_point_clicked)
+    if filechooser_available and point_fc is not None:
+        try:
+            point_fc.register_callback(_on_point_chooser_selected)
+        except Exception:
+            pass
+
+    def _on_point_many_toggled(*_):
+        many = bool(point_many_w.value)
+        point_list_w.layout.display = "" if many else "none"
+        for w in (point_lat_w, point_lon_w):
+            w.layout.display = "none" if many else ""
+        _update_point_size()
+
+    def _update_area_source(*_):
+        """Only one area-creation tool is visible at a time. Both write into the
+        Area box above, so they are alternatives, not parallel settings."""
+        choice = area_source_w.value
+        # draw_polygon_w still owns the lazy map build and its own visibility
+        # logic; the selector just drives it.
+        if bool(draw_polygon_w.value) != (choice == "map"):
+            draw_polygon_w.value = choice == "map"
+        point_box.layout.display = "" if choice == "point" else "none"
+
+    point_many_w.observe(lambda change: _on_point_many_toggled(), names="value")
+    for _w in (point_height_w, point_width_w, point_lat_w, point_lon_w):
+        _w.observe(lambda change: _update_point_size(), names="value")
+    point_list_w.observe(lambda change: _update_point_size(), names="value")
+    resolution_w.observe(lambda change: _update_point_size(), names="value")
+    point_run_btn.on_click(_on_point_run_clicked)
+    area_source_w.observe(lambda change: _update_area_source(), names="value")
+
+    # The folded half of the Polygon group. Built here rather than inline in the
+    # layout so the nested-panel class can be applied: a group inside a group
+    # inherits the same olive fill as its parent and disappears without it.
+    def _advanced_area_group():
+        box = _field_group(
+            "Advanced Options",
+            [
+                tiler_box,
+                _line_divider(),
+                # Coverage check: reads the catalogue, sets nothing.
+                widgets.HBox(
+                    [coverage_btn], layout=widgets.Layout(margin="2px 0")
+                ),
+                coverage_result_acc,
+                skip_footprint_box,
+            ],
+            subtitle="Split the area into tiles, and check what imagery exists over it.",
+            collapsible=True,
+            open=False,
+            accent="violet",
+        )
+        box.add_class("stac2cube-group-nested")
+        return box
+
+    point_box = widgets.VBox(
+        [
+            widgets.HTML(
+                "<div style='font-size:12px; color:#6b7280; margin:0;'>"
+                "Give a coordinate and a size in pixels. The cube comes out at "
+                "exactly that size, centred on the point to within half a pixel."
+                "</div>"
+            ),
+            widgets.HBox([point_lat_w, point_lon_w],
+                         layout=widgets.Layout(gap="8px")),
+            point_many_w,
+            point_list_w,
+            widgets.HBox([browse_point_btn],
+                         layout=widgets.Layout(margin="2px 0")),
+            point_fc_box,
+            widgets.HBox([point_height_w, point_width_w],
+                         layout=widgets.Layout(gap="8px")),
+            point_size_html,
+            widgets.HBox([point_run_btn], layout=widgets.Layout(margin="2px 0")),
+            point_result_html,
+        ],
+        layout=widgets.Layout(width="100%", gap="6px", display="none"),
+    )
+    _update_point_size()
 
     # -------------------------------------------------------------------------
     # "Check area coverage": the last block of the Polygon group. Reads the STAC
@@ -8000,21 +8467,31 @@ def datacube_builder(missions_func=missions):
             # Output Projection). It is the group that opens by default there,
             # because pixel size is the biggest lever on cube size and build time
             # and must not be something a user only discovers after a slow build.
+            # One group, but no longer seven panels stacked flat - which had made
+            # Polygon the largest section in the builder and left no room for a
+            # third way of defining an area. The three things a user always needs
+            # (the area, the tools that build one, the output shape) stay in
+            # view; the rest folds into a collapsed "Advanced Options".
             _field_group(
                 "Polygon",
                 [
-                    # --- Option 1: provide a file or bbox (boxed sub-panel) ---
+                    # --- The area itself: ONE value, the single source of truth.
+                    # Everything below (map, point tool, and the AOI Tiler in the
+                    # next group) writes into this box rather than competing with
+                    # it, which is what the old "Option 1 OR Option 2" framing hid.
                     _subpanel(
                         [
                             widgets.HTML(
                                 "<div style='font-size:13px; font-weight:600; color:#374151; "
-                                "margin:0 0 2px 0;'>Option 1 - Polygon file or bounding box</div>"
+                                "margin:0 0 2px 0;'>Option 1: Import Polygon</div>"
                             ),
                             _boxed(polygon_input_box),
                             widgets.HTML(
                                 "<div style='font-size:12px; color:#1e3a8a; background:#eff6ff; "
                                 "border:1px solid #bfdbfe; border-radius:6px; padding:6px 8px;'>"
-                                "<b>NOTE:</b> a polygon vector file with <b>multiple features</b> is "
+                                "A vector file, or a bounding box "
+                                "<code>[xmin, ymin, xmax, ymax]</code>.<br>"
+                                "<b>NOTE:</b> a vector file with <b>multiple features</b> is "
                                 "accepted and automatically activates <b>BATCH PROCESSING</b> (one "
                                 "data cube per feature). A <i>multi-polygon</i>-type vector file is "
                                 "<b>NOT</b> accepted."
@@ -8023,26 +8500,37 @@ def datacube_builder(missions_func=missions):
                         ],
                         accent="blue",
                     ),
-                    _or_divider(),
-                    # --- Option 2: draw on a map (boxed sub-panel) ---
+                    _line_divider(),
+                    # --- The two ways to CREATE an area, one at a time. Both
+                    # write the result into the box above and then step aside.
                     _subpanel(
                         [
                             widgets.HTML(
                                 "<div style='font-size:13px; font-weight:600; color:#374151; "
-                                "margin:0 0 2px 0;'>Option 2 - Draw on a map</div>"
+                                "margin:0 0 2px 0;'>Option 2: Build a polygon instead</div>"
                             ),
-                            draw_polygon_w,
+                            widgets.HTML(
+                                "<div style='font-size:12px; color:#6b7280; margin:0 0 2px 0;'>"
+                                "Draw the area on a map, or grow it around a coordinate. "
+                                "Either way the result is written into the box above."
+                                "</div>"
+                            ),
+                            area_source_w,
                             draw_box,
+                            point_box,
                         ],
                         accent="green",
                     ),
                     _line_divider(),
-                    # --- Output shape: clipping applies to whichever option above ---
+                    # --- Clip Raster: stays in plain sight. Whether the cube
+                    # comes back as a bounding box or clipped to the outline
+                    # changes what every later step sees, so it is not something
+                    # to hide behind a fold.
                     _subpanel(
                         [
                             widgets.HTML(
                                 "<div style='font-size:13px; font-weight:600; color:#374151; "
-                                "margin:0 0 2px 0;'>Output shape</div>"
+                                "margin:0 0 2px 0;'>Clip Raster</div>"
                             ),
                             clip_raster_w,
                             clip_info_html,
@@ -8051,21 +8539,13 @@ def datacube_builder(missions_func=missions):
                         accent="amber",
                     ),
                     _line_divider(),
-                    # --- AOI Tiler: splits the area, REPLACES the polygon -----
-                    # Last in the group on purpose: everything above defines the
-                    # area, this optionally cuts it up. It also has to sit after
-                    # Output shape, because tiling and clipping lock each other
-                    # out and the user should meet the clip choice first.
-                    tiler_box,
-                    _line_divider(),
-                    # --- Optional coverage check: reads the catalogue, sets nothing ---
-                    widgets.HBox(
-                        [coverage_btn], layout=widgets.Layout(margin="2px 0")
-                    ),
-                    coverage_result_acc,
-                    skip_footprint_box,
+                    # --- Everything a normal build never touches, folded away.
+                    # After Clip Raster on purpose: tiling and clipping lock
+                    # each other out, and the user should meet the clip choice
+                    # before the control that disables it.
+                    _advanced_area_group(),
                 ],
-                subtitle="The area to cover. Pick a polygon file or bounding box, or draw it on a map.",
+                subtitle="The area to cover. Give a file or bounding box, or build one on a map or from a coordinate.",
                 help_html=PARAM_HELP_HTML.get("polygon", ""),
                 collapsible=True,
                 open=False,
@@ -9210,6 +9690,25 @@ def datacube_builder(missions_func=missions):
             "tiler_rows": tiler_rows_w,
             "tiler_cols": tiler_cols_w,
             "tiler_run_btn": tiler_run_btn,
+            "tiler_result": tiler_result_html,
+            # Centre point and size. Like the tiler, these are pre-build tools
+            # rather than build parameters, so they stay out of the settings JSON.
+            "area_source": area_source_w,
+            "draw_box": draw_box,
+            "use_drawn_btn": use_drawn_btn,
+            "point_box": point_box,
+            "point_lat": point_lat_w,
+            "point_lon": point_lon_w,
+            "point_many": point_many_w,
+            "point_list": point_list_w,
+            "point_height": point_height_w,
+            "point_width": point_width_w,
+            "point_run_btn": point_run_btn,
+            "browse_point_btn": browse_point_btn,
+            # The chooser's own callback, exposed so the load path can be
+            # exercised without driving an ipyfilechooser widget.
+            "point_chooser_selected": _on_point_chooser_selected,
+            "point_result": point_result_html,
             "max_cc": max_cc_w,
             "cloud_masking": cloud_masking_w,
             "keep_clouds": keep_clouds_w,

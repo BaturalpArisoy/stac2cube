@@ -1,6 +1,19 @@
-"""Cut an AOI into a regular grid of bbox pieces, one cube per piece.
+"""Build cube-shaped AOI rectangles: split an area, or grow one from a point.
 
-Two jobs, one lattice:
+Two producers, both emitting the same thing - a file of rectangles sized to a
+whole number of pixels in the CRS the cube will be built in:
+
+* :func:`tile_aoi` cuts an existing AOI into a regular grid of pieces.
+* :func:`aoi_from_point` grows a rectangle of a given pixel size around one or
+  more coordinates, the way ``cubo`` does.
+
+Neither touches the build. :func:`stac2cube.get_stac_layers` already makes one
+cube per feature of a multi-feature polygon, so the output goes straight back in
+as ``polygon=``; the only requirements are that ``crs=`` matches what these
+functions drew in and that ``clip_raster=False``, since the features are
+rectangles.
+
+tile_aoi: two jobs, one lattice
 
 * **Mode 1, by number** (``n_pieces``). Split the AOI bounding box into
   ``rows x cols`` equal rectangles. This is the "make it fit" mode: it knows
@@ -59,23 +72,45 @@ gave EPSG:32632 where terrabyte and Planetary Computer gave EPSG:32633). Draw
 the lattice in one zone and build in another and the rectangles arrive rotated,
 their bounds grow, and 128 px becomes 131 px.
 
-So :func:`tile_aoi` reports the CRS it drew in, and that same value must be
+So these functions report the CRS they drew in, and that same value must be
 passed to the build as ``crs=``. Pass ``crs=`` here too whenever you already
 know it.
+
+aoi_from_point: a rectangle around a coordinate
+-----------------------------------------------
+``edge_size`` is in PIXELS, which is the unit that matters when the cube is the
+product; the metre size is derived and reported. The square is then SNAPPED to
+the pixel grid rather than centred exactly on the coordinate:
+
+    half = width_px * resolution / 2
+    x0   = round((x - half) / resolution) * resolution
+    x1   = x0 + width_px * resolution        # exactly width_px pixels
+
+The centre therefore lands within half a pixel of the requested point (at most
+5 m at 10 m, reported per point as ``offset_m``). That half pixel buys two
+things exact centring cannot: the cube is read without resampling, because its
+grid coincides with the scenes', and two cubes from nearby points share one
+grid and can be compared pixel to pixel.
+
+Deliberately NOT snapped to a coarser lattice. Snapping to multiples of
+``edge_size * resolution`` would move the centre by up to half an edge - 640 m
+for a 128 px square at 10 m - which is no longer the place the user picked.
 
 Usage
 -----
 ::
 
-    # Mode 2: chip-perfect, one cube
-    pieces = tile_aoi("aoi.gpkg", chip_size=128, resolution=10, out="pieces.gpkg")
-    get_stac_layers(polygon="pieces.gpkg", crs=pieces.attrs["crs"],
+    # one site
+    aoi = aoi_from_point(41.0421, 29.0173, edge_size=128, resolution=10,
+                         out="site.gpkg")
+    get_stac_layers(polygon="site.gpkg", crs=aoi.attrs["crs"],
                     resolution=10, clip_raster=False, ...)
 
-    # Mode 2: capped at 16x16 chips per cube
-    tile_aoi("aoi.gpkg", chip_size=128, resolution=10, chips_per_piece=16)
+    # many sites -> one cube each, via the normal batch path
+    aoi_from_point([41.04, 41.11], [29.01, 29.22], edge_size=(256, 512),
+                   resolution=10, out="sites.gpkg")
 
-    # Mode 1: 3 rows x 4 cols of equal pieces
+    # 3 rows x 4 cols of equal pieces out of an existing AOI
     tile_aoi("aoi.gpkg", n_pieces=(3, 4), resolution=10)
 """
 
@@ -90,7 +125,7 @@ from shapely.ops import unary_union
 from .get_data import crs_attr_string, validate_target_crs
 from .vector_refiner import read_polygon_file
 
-__all__ = ["tile_aoi", "estimate_piece_bytes"]
+__all__ = ["tile_aoi", "aoi_from_point", "read_point_file", "estimate_piece_bytes"]
 
 # Lattice arithmetic runs on index = coordinate / cell_size, so the tolerance is
 # in units of CELLS, not metres. At a 1280 m chip this is ~1 micrometre: far
@@ -565,6 +600,233 @@ def _report(gdf, geom, mode, n_cells_x, n_cells_y, chip_size, target_crs,
     print(f"total pixels   : {int(gdf.width_px.astype('int64').mul(gdf.height_px).sum()):,}"
           f"  ({dl:.1f} km2 downloaded for a {aoi_bbox_km2:.1f} km2 AOI bbox, "
           f"{dl / aoi_bbox_km2:.2f}x)")
+
+
+# ------------------------------------------------------- rectangle from point
+def _edge_pixels(edge_size):
+    """Normalise edge_size into (height_px, width_px).
+
+    A pair is (rows, cols) - the same order as ``n_pieces`` and as a raster's
+    own shape, so the two functions cannot disagree about which number is which.
+    """
+    if isinstance(edge_size, (tuple, list)):
+        if len(edge_size) != 2:
+            raise ValueError(
+                f"edge_size as a pair must be (height, width) in pixels, "
+                f"got {edge_size!r}"
+            )
+        h, w = (int(v) for v in edge_size)
+    else:
+        h = w = int(edge_size)
+    if h < 1 or w < 1:
+        raise ValueError(f"edge_size must be >= 1 pixel, got {edge_size!r}")
+    return h, w
+
+
+def read_point_file(points):
+    """Read a point file (or GeoDataFrame) into latitudes, longitudes, source CRS.
+
+    Whatever the file is projected in, the coordinates come back as degrees:
+    ``to_crs("EPSG:4326")`` is applied unconditionally, so a UTM or national-grid
+    point file needs no preparation. A file with NO CRS is refused rather than
+    assumed to be lon/lat, because assuming would silently put the AOI somewhere
+    else on the planet.
+
+    Returns ``(lats, lons, source_crs)``; ``source_crs`` is there so a caller can
+    tell the user their coordinates were converted.
+    """
+    src = points if isinstance(points, gpd.GeoDataFrame) else gpd.read_file(points)
+    if src.crs is None:
+        raise ValueError(
+            "the point file has no CRS, so its coordinates cannot be placed on "
+            "the globe. Assign one in your GIS and try again."
+        )
+    kinds = set(src.geom_type)
+    if kinds - {"Point"}:
+        raise ValueError(
+            "this needs POINT geometries; the file holds "
+            f"{sorted(kinds)}. Use tile_aoi for polygons."
+        )
+    if len(src) == 0:
+        raise ValueError("the point file is empty.")
+
+    pts = src.to_crs("EPSG:4326").geometry
+    return ([float(p.y) for p in pts], [float(p.x) for p in pts],
+            crs_attr_string(src.crs))
+
+
+def _read_points(lat, lon):
+    """Normalise the point input into parallel lists of lat/lon in degrees.
+
+    Accepts scalars, equal-length sequences, or - with ``lon`` left out - a
+    point file or GeoDataFrame, which is how a GIS user already stores sample
+    locations. A CSV is one pandas line away from the sequence form, so it is
+    deliberately not special-cased here.
+    """
+    if lon is None:
+        lats, lons, _ = read_point_file(lat)
+        return lats, lons
+
+    lats = [float(lat)] if np.isscalar(lat) else [float(v) for v in lat]
+    lons = [float(lon)] if np.isscalar(lon) else [float(v) for v in lon]
+    if len(lats) != len(lons):
+        raise ValueError(
+            f"lat and lon must be the same length, got {len(lats)} and {len(lons)}."
+        )
+    return lats, lons
+
+
+def aoi_from_point(lat, lon=None, edge_size=128, resolution=None, names=None,
+                   crs=None, out=None, q=False):
+    """A rectangle of a given PIXEL size around one or more coordinates.
+
+    The ``cubo``-style entry point: say where and how many pixels, get an AOI
+    the build turns into a cube of exactly that size. With several points it
+    emits one feature each, which :func:`stac2cube.get_stac_layers` builds as a
+    batch - one cube per point.
+
+    Parameters
+    ----------
+    lat, lon:
+        Decimal degrees (EPSG:4326). Scalars for one site, equal-length
+        sequences for many. Alternatively pass a point file or GeoDataFrame as
+        ``lat`` and leave ``lon`` out.
+    edge_size:
+        Cube side in PIXELS: ``128`` for a square, or ``(height, width)`` for a
+        rectangle. The metre size is ``edge_size * resolution`` and is reported.
+    resolution:
+        Pixel size in the target CRS's metres. Required - it is what turns
+        pixels into ground distance.
+    names:
+        Optional label per point, kept in the ``point`` column. The build's own
+        batch naming stays positional (``_01.._NN``), so these are descriptive
+        only.
+    crs:
+        Target CRS. Guessed from the points when omitted, with a warning. It
+        must match the build's - see the module docstring.
+    out:
+        Optional path to write to (``.gpkg`` recommended).
+
+    Returns
+    -------
+    GeoDataFrame of rectangles in the target CRS, one row per point, in the
+    order given. Columns: ``point``, ``lat``, ``lon`` (as requested),
+    ``width_px``, ``height_px``, ``width_m``, ``height_m``, ``offset_m``
+    (straight-line distance from the requested coordinate to the rectangle's
+    centre - half a pixel per axis, so up to half a pixel times root two),
+    ``bbox_km2``.
+    """
+    if resolution is None:
+        raise ValueError(
+            "resolution is required: edge_size is in pixels, and turning that "
+            "into a ground rectangle needs the pixel size."
+        )
+    resolution = float(resolution)
+    if resolution <= 0:
+        raise ValueError(f"resolution must be positive, got {resolution}")
+
+    height_px, width_px = _edge_pixels(edge_size)
+    lats, lons = _read_points(lat, lon)
+    if not lats:
+        raise ValueError("no points given - there is nothing to build an AOI around.")
+    for la, lo in zip(lats, lons):
+        if not (-90.0 <= la <= 90.0) or not (-180.0 <= lo <= 180.0):
+            raise ValueError(
+                f"({la}, {lo}) is not a valid (lat, lon) in degrees. The order "
+                "is LATITUDE first, longitude second."
+            )
+    if names is not None and len(list(names)) != len(lats):
+        raise ValueError(
+            f"names has {len(list(names))} entries but there are {len(lats)} points."
+        )
+
+    pts = gpd.GeoDataFrame(
+        geometry=gpd.points_from_xy(lons, lats), crs="EPSG:4326"
+    )
+    if crs is not None:
+        target = validate_target_crs(crs)
+    else:
+        target = crs_attr_string(pts.estimate_utm_crs())
+        if not q:
+            print(
+                f"No crs= given; drawing the rectangles in {target}, guessed "
+                "from the points. The build chooses its CRS from the matched "
+                "STAC items instead, and the two can differ - pass this value "
+                "to get_stac_layers(crs=...) so the rectangles are not "
+                "reprojected.",
+                flush=True,
+            )
+        # One CRS for the whole batch, so points scattered across UTM zones all
+        # get drawn in one of them. Metres stay metres, but the further a point
+        # is from its own zone the more its scenes have to be warped at build
+        # time. Worth saying out loud rather than leaving in the timings.
+        zones = {crs_attr_string(pts.iloc[[i]].estimate_utm_crs())
+                 for i in range(len(pts))}
+        if len(zones) > 1 and not q:
+            print(
+                f"Note: these points fall in {len(zones)} different UTM zones "
+                f"({', '.join(sorted(zones))}). They are all drawn in {target}, "
+                "so scenes for the outlying ones will be reprojected during the "
+                "build. Consider one run per zone.",
+                flush=True,
+            )
+
+    proj = pts.to_crs(target)
+    half_w = width_px * resolution / 2.0
+    half_h = height_px * resolution / 2.0
+
+    records, geoms = [], []
+    for i, (p, la, lo) in enumerate(zip(proj.geometry, lats, lons)):
+        # Snap the LOWER-LEFT corner to the pixel grid, then step a whole number
+        # of pixels. Snapping the corner rather than the centre is what keeps
+        # the width exactly width_px: rounding both edges independently could
+        # land a pixel apart.
+        x0 = round((p.x - half_w) / resolution) * resolution
+        y0 = round((p.y - half_h) / resolution) * resolution
+        x1 = x0 + width_px * resolution
+        y1 = y0 + height_px * resolution
+
+        records.append({
+            "point": (list(names)[i] if names is not None
+                      else f"p{i + 1:0{max(2, len(str(len(lats))))}d}"),
+            "lat": la,
+            "lon": lo,
+            "width_px": width_px,
+            "height_px": height_px,
+            "width_m": width_px * resolution,
+            "height_m": height_px * resolution,
+            "offset_m": float(math.hypot((x0 + x1) / 2.0 - p.x,
+                                         (y0 + y1) / 2.0 - p.y)),
+        })
+        geoms.append(box(x0, y0, x1, y1))
+
+    gdf = gpd.GeoDataFrame(pd.DataFrame(records), geometry=geoms, crs=target)
+    gdf["bbox_km2"] = gdf.geometry.area / 1e6
+    gdf.attrs = {
+        "crs": target,
+        "resolution": resolution,
+        "edge_size": (height_px, width_px),
+        "mode": "point",
+        "n_points": len(gdf),
+    }
+
+    if not q:
+        print(f"points         : {len(gdf)} in {target}")
+        print(f"cube size      : {width_px} x {height_px} px at {resolution:g} m "
+              f"= {width_px * resolution:,.0f} x {height_px * resolution:,.0f} m "
+              f"({width_px * resolution / 1000:.2f} x "
+              f"{height_px * resolution / 1000:.2f} km)")
+        # Half a pixel PER AXIS, so the straight-line offset reported here can
+        # reach half a pixel times root two - 7.1 m at 10 m, not 5.
+        print(f"centre offset  : up to {gdf.offset_m.max():.1f} m from the "
+              f"requested point (pixel-grid snap: at most half a pixel per axis)")
+        if len(gdf) > 1:
+            print(f"batch          : {len(gdf)} data cubes, one per point")
+    if out:
+        gdf.to_file(out)
+        if not q:
+            print(f"wrote {out}", flush=True)
+    return gdf
 
 
 def estimate_piece_bytes(gdf, n_dates, n_bands, itemsize=4):

@@ -471,20 +471,42 @@ def aoi_bounds_in_crs(gdf, target_crs, divisions=200, max_vertices=1_000_000):
     return tuple(float(v) for v in geom.to_crs(target_crs).total_bounds)
 
 
+# Tolerance for "is this bound already ON a grid line", in units of `unit`.
+#
+# An AOI that is already grid-aligned comes back from a CRS round-trip as
+# 665939.9999999999 rather than 665940.0. Bare floor() reads that as lying one
+# whole pixel to the left, and ceil() does the same on the far side, so a cube
+# that should be 128 px comes out 130. That is not hypothetical: every feature
+# of a multi-feature AOI is forced through EPSG:4326 by polygon_2_features, so
+# batch builds grew by a pixel per side while the single-feature path - which
+# reads the file in its native CRS - did not. It also silently broke the
+# disjointness of tiles cut by tile_aoi, which are grid-aligned by construction.
+#
+# Measured round-trip error is ~1e-9 m, i.e. ~1e-10 units, so 1e-6 units (10
+# micrometres at a 10 m grid) absorbs it with four orders of magnitude to spare
+# while being far too small to swallow any real difference between AOI edges.
+_SNAP_TOL = 1e-6
+
+
 def snap_bounds(bounds, unit):
     """Grow ``bounds`` outward to the next multiple of ``unit`` on every side.
 
     Outward, never inward: the AOI stays fully covered. Costs at most one pixel
     of extent per side (measured 1-2 px per axis on real AOIs).
+
+    A bound within ``_SNAP_TOL`` of a grid line counts as being ON it, so an
+    already-aligned AOI is left alone instead of being grown a pixel per side by
+    reprojection noise. That tolerance means a bound can move inward by up to a
+    few micrometres, which is far below one pixel and cannot uncover anything.
     """
     if not unit or unit <= 0:
         return tuple(float(v) for v in bounds)
     left, bottom, right, top = (float(v) for v in bounds)
     return (
-        math.floor(left / unit) * unit,
-        math.floor(bottom / unit) * unit,
-        math.ceil(right / unit) * unit,
-        math.ceil(top / unit) * unit,
+        math.floor(left / unit + _SNAP_TOL) * unit,
+        math.floor(bottom / unit + _SNAP_TOL) * unit,
+        math.ceil(right / unit - _SNAP_TOL) * unit,
+        math.ceil(top / unit - _SNAP_TOL) * unit,
     )
 
 

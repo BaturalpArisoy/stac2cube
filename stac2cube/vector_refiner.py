@@ -17,17 +17,37 @@ def polygon_2_gdf(polygon) -> gpd.GeoDataFrame:
 
 def polygon_2_features(polygon):
     """
-    Returns a list of single-feature GeoDataFrames (one per geometry), each
-    reprojected to WGS84. Used by get_stac_layers to iterate cube generation
-    per polygon feature.
+    Returns a list of single-feature GeoDataFrames (one per geometry), each in
+    the FILE'S OWN CRS. Used by get_stac_layers to iterate cube generation per
+    polygon feature.
 
     - bbox lists/tuples are treated as a single feature and returned as-is.
     - A file path is read and split into one GeoDataFrame per feature.
+
+    The features are deliberately NOT reprojected to WGS84, which is what this
+    used to do. A polygon's edges are straight in the CRS it is stored in, so a
+    detour through EPSG:4326 turns straight UTM edges into bowed lon/lat ones,
+    and ``aoi_bounds_in_crs`` then correctly measures the bow when projecting
+    back - producing bounds LARGER than the geometry on disk. Snapped outward to
+    the pixel grid, that cost a whole pixel per side.
+
+    Measured on grid-aligned squares in EPSG:32635, comparing the round trip
+    with densifying in the native CRS:
+
+        128 px  (1.3 km)   bow 0.028 m   vs 0.000000 m
+        2048 px (20 km)    bow 7.15 m    vs 0.000000 m
+        8192 px (82 km)    bow 114 m     vs 0.000000 m
+
+    So a multi-feature build produced cubes 1-11 px larger per axis than the
+    same feature built on its own, and tiles cut to be disjoint came back
+    overlapping. Every consumer reprojects for itself anyway: ``polygon_2_bbox``
+    derives the lon/lat search box, and ``_aoi_geometries`` goes through
+    ``polygon_2_gdf``, so nothing downstream depended on the CRS set here.
     """
     if isinstance(polygon, (list, tuple)):
         return [polygon]
 
-    gdf = polygon_2_gdf(polygon)
+    gdf = read_polygon_file(polygon)
     if gdf is None:
         return []
     return [gdf.iloc[[i]] for i in range(len(gdf))]
