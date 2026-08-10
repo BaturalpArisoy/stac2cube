@@ -144,8 +144,10 @@ If you want to script stac2cube or see what the interface does in the background
 
 
 ## How to run on HPC
-A documentation file on how to use stac2cube features on terrabyte's HPC for compute-intensive processes and for faster processing time can be found in the [slurm folder](https://github.com/BaturalpArisoy/stac2cube/tree/main/slurm). Reading step by step is actually pretty simple.<br><br>
-**One Tip**: You can copy settings from User Interface and directly paste to .json file to run fast and easy!
+A documentation file on how to use stac2cube features on terrabyte's HPC for compute-intensive processes and for faster processing time can be found in the [slurm folder](https://github.com/BaturalpArisoy/stac2cube/tree/main/slurm). It is super simple once the instruction is followed.<br><br>
+
+> [!TIP]
+> You can copy settings from User Interface and directly paste to .json file to run fast and easy!
 
 ## Access and Licensing Details for STAC Catalogs
 
