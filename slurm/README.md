@@ -113,7 +113,15 @@ Edit the JSON of the feature you want to run and save it.
 
 Submit the feature you want by running its `submit.sh`.
 
-#### Recommended (MobaXTerm)
+### 3.1) Make all `submit.sh` executable (only ONCE)
+Inside the `slurm/` folder, run:
+
+```bash
+chmod +x ./*/submit.sh
+```
+This will make sure that you can run .sh files smoothly, otherwise you might run into 'access denied' error.
+
+### 3.2) Recommended (MobaXTerm)
 - Middle-click the feature's `submit.sh`, e.g. `./1_build_data_cube/submit.sh`
 - If using a laptop touchpad:
   - Right-click -> copy file path to terminal -> **Enter**
